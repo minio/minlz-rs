@@ -101,7 +101,10 @@ impl Index {
     ///   re-thins entries in place.
     pub fn add(&mut self, compressed: i64, uncompressed: i64) -> io::Result<()> {
         if let Some(&latest) = self.offsets.last() {
-            if uncompressed - latest.uncompressed < self.est_block_uncomp {
+            let gap = uncompressed
+                .checked_sub(latest.uncompressed)
+                .ok_or_else(|| corrupt("index: uncompressed offset overflow"))?;
+            if gap < self.est_block_uncomp {
                 return Ok(());
             }
             if latest.uncompressed > uncompressed {
@@ -147,10 +150,10 @@ impl Index {
             return Err(corrupt("index: total uncompressed unknown"));
         }
         if offset < 0 {
-            offset += self.total_uncompressed;
-            if offset < 0 {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-            }
+            offset = match offset.checked_add(self.total_uncompressed) {
+                Some(o) if o >= 0 => o,
+                _ => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            };
         }
         if offset > self.total_uncompressed {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
@@ -359,7 +362,10 @@ impl Index {
             }
             if idx > 0 {
                 let prev = self.offsets[idx - 1].uncompressed;
-                u_off += prev + self.est_block_uncomp;
+                u_off = prev
+                    .checked_add(self.est_block_uncomp)
+                    .and_then(|s| u_off.checked_add(s))
+                    .ok_or_else(|| corrupt("index: uncompressed offset overflow"))?;
                 if u_off <= prev {
                     return Err(corrupt("index: non-monotonic uncompressed offset"));
                 }
@@ -375,9 +381,14 @@ impl Index {
             let (mut c_off, n) = read_varint(b)?;
             b = &b[n..];
             if idx > 0 {
-                let predict_next = c_predict + c_off / 2;
+                let predict_next = c_predict
+                    .checked_add(c_off / 2)
+                    .ok_or_else(|| corrupt("index: compressed predictor overflow"))?;
                 let prev = self.offsets[idx - 1].compressed;
-                c_off += prev + c_predict;
+                c_off = prev
+                    .checked_add(c_predict)
+                    .and_then(|s| c_off.checked_add(s))
+                    .ok_or_else(|| corrupt("index: compressed offset overflow"))?;
                 if c_off <= prev {
                     return Err(corrupt("index: non-monotonic compressed offset"));
                 }
