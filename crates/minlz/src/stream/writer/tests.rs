@@ -331,12 +331,12 @@ fn empty_writes_are_noop() {
 #[cfg(miri)]
 #[test]
 fn stress_random_inputs_roundtrip_miri() {
-    // 6 trials × 2 levels × ≤2 KiB.  Smaller than the native version
-    // but still crosses MIN_BLOCK_SIZE and covers both repetitive and
-    // pseudo-random inputs through L1 + L3.
+    // 6 trials × 2 levels.  Sizes 500..5620 span the 4 KiB
+    // MIN_BLOCK_SIZE boundary (3 single-block, 3 multi-block) and
+    // cover both repetitive and pseudo-random inputs through L1 + L3.
     for trial in 0..6u64 {
         let mut rng = lcg(0xc0ffee ^ trial.wrapping_mul(0x9e37));
-        let size = (trial as usize * 211) % 2048;
+        let size = (trial as usize) * 1024 + 500;
         let mut input = vec![0u8; size];
         if trial & 1 == 0 {
             for chunk in input.chunks_mut(7) {
