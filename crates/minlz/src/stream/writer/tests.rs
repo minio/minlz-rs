@@ -274,7 +274,10 @@ fn lcg(seed: u64) -> impl FnMut() -> u8 {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "200 trials × 2 levels × ≤40 KiB is impractical under miri")]
+#[cfg_attr(
+    miri,
+    ignore = "200 trials × 2 levels × ≤40 KiB is impractical under miri"
+)]
 fn stress_random_inputs_roundtrip() {
     // 200 inputs at sizes 0..40 KiB (crosses the 4 KiB minimum block size at
     // L1 etc.).  Two compression levels to keep runtime moderate.

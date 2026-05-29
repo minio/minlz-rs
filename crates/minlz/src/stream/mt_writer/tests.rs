@@ -266,7 +266,10 @@ fn rust_mt_encoded_decodes_in_go() {
 // -------------------- index integration --------------------
 
 #[test]
-#[cfg_attr(miri, ignore = "4 MiB stream × 3 concurrencies is impractical under miri")]
+#[cfg_attr(
+    miri,
+    ignore = "4 MiB stream × 3 concurrencies is impractical under miri"
+)]
 fn append_index_round_trips_via_read_seeker() {
     // Multi-block payload at small block_size so we get several index
     // entries (est_block_uncomp floors at 1 MiB → still 1 entry for

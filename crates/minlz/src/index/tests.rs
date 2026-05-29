@@ -387,7 +387,10 @@ fn read_seeker_seek_start_end_and_current() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "256 KiB stream + random probes is impractical under miri")]
+#[cfg_attr(
+    miri,
+    ignore = "256 KiB stream + random probes is impractical under miri"
+)]
 fn read_seeker_read_at_random() {
     let mut payload = vec![0u8; 256 << 10];
     for (i, b) in payload.iter_mut().enumerate() {
@@ -473,7 +476,10 @@ fn add_equal_offsets_after_skip_window_succeed() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "MAX_INDEX_ENTRIES+5000 entries is impractical under miri")]
+#[cfg_attr(
+    miri,
+    ignore = "MAX_INDEX_ENTRIES+5000 entries is impractical under miri"
+)]
 fn reduce_triggered_by_append_to() {
     // Force a giant entry count then call append_to and confirm the
     // emitted byte stream parses back to ≤ MAX_INDEX_ENTRIES entries.
