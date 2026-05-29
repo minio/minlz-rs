@@ -5,20 +5,29 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn mz_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mz"))
 }
 
+// PID + nanos isn't collision-proof: macOS' SystemTime::now() bottoms
+// out at ~microsecond resolution, so two parallel #[test]s in the same
+// binary can land on identical paths and clobber each other's files
+// (root cause of the flaky `block_round_trip` byte-mismatch on macOS
+// CI).  Append a process-local atomic counter to guarantee uniqueness.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn tmp_dir() -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!(
-        "mz_test_{}_{}",
+        "mz_test_{}_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&p).unwrap();
     p
