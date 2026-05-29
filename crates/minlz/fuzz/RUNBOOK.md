@@ -27,22 +27,44 @@ cargo +nightly fuzz list
 
 ## 1. Seed the corpus
 
-Run once.  The script auto-locates the Go repo at `../../../../minlz`
-(sibling of `minlz-rs/`) or via the `GO_REPO` env var.
+Run once.  Downloads the upstream seed tarball and extracts every
+target's corpus into `crates/minlz/fuzz/corpus/<target>/`.  Subsequent
+`cargo fuzz run` invocations will accumulate beyond the seed.
+
+Requires `zstd` on `PATH` (tar shells out to it):
+
+```bash
+# Debian/Ubuntu:  sudo apt install zstd
+# Fedora/RHEL:    sudo dnf install zstd
+# Arch:           sudo pacman -S zstd
+# macOS:          brew install zstd
+zstd --version  # sanity check
+```
+
+Then seed:
 
 ```bash
 cd minlz-rs/crates/minlz/fuzz
-bash seed.sh
-# Or, if Go repo lives elsewhere:
-GO_REPO=/path/to/go/minlz bash seed.sh
+curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
+  | tar --zstd -xf -
+# corpus/{decode_arbitrary,roundtrip,stream_decode_arbitrary,stream_roundtrip,index_load}/
+# are now populated.  Verify:
+for t in decode_arbitrary roundtrip stream_decode_arbitrary stream_roundtrip index_load; do
+    printf '%-25s %s seeds\n' "$t" "$(ls corpus/$t 2>/dev/null | wc -l)"
+done
 ```
 
-Expected output after a successful run:
+To re-seed a single target without touching the others, name it on the
+tar command line:
+
+```bash
+curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
+  | tar --zstd -xf - corpus/index_load
 ```
-corpus/decode_arbitrary: 1798 seeds
-corpus/roundtrip: 883 seeds
-corpus/max_encoded_len: 883 seeds
-```
+
+The same tarball backs the GitHub Actions fuzz workflow (one fetch per
+CI run, shared with the matrix jobs via a workflow artifact) — see
+`.github/workflows/fuzz.yml`.
 
 ## 2. Run a target
 
@@ -127,10 +149,10 @@ roughly equally across the three targets.  Concretely:
 
 ```bash
 cd minlz-rs/crates/minlz/fuzz
-bash seed.sh
+# Seed corpus first (§1) if you haven't already.
 # Note: stream targets benefit from a higher -max_len so the 9 MiB cap
 # inside each target is actually reached.
-for tgt in decode_arbitrary roundtrip stream_decode_arbitrary stream_roundtrip; do
+for tgt in decode_arbitrary roundtrip stream_decode_arbitrary stream_roundtrip index_load; do
     cargo +nightly fuzz run "$tgt" -- -max_total_time=900 -jobs=8 -workers=8 -max_len=9437184
 done
 ```

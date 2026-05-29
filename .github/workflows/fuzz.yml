@@ -1,10 +1,14 @@
 name: Fuzz
 
 # Short fuzz pass per target on every push to main + nightly cron.
-# Corpus is not committed to the repo (see `.gitignore`); each fresh
-# run starts bare and the cache step accumulates seeds across runs.
-# Long-form fuzzing (≥ 20 min/target) happens locally per the
-# `crates/minlz/fuzz/RUNBOOK.md` checklist before tagged releases.
+# Corpus is not committed to the repo (see `.gitignore`).  Each job
+# first restores the prior run's corpus from cache; if that's empty
+# (first-ever run, eviction, or new target), it downloads the seed
+# tarball at https://download.klauspost.com/rust-fuzz-corpus.tar.zst
+# and extracts just the matching target subfolder.  Subsequent runs
+# accumulate beyond the seed via the cache.  Long-form fuzzing (≥ 20
+# min/target) happens locally per `crates/minlz/fuzz/RUNBOOK.md`
+# before tagged releases.
 on:
   push:
     branches: [main]
@@ -22,9 +26,41 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Single fetch of the upstream seed tarball, shared with every
+  # matrix job via a workflow artifact.  Avoids N parallel downloads
+  # of the same URL.  Soft-failing: matrix jobs check `has_seed` and
+  # fall back to empty corpus if the upstream is unreachable.
+  seed:
+    name: Fetch seed corpus
+    runs-on: ubuntu-latest
+    outputs:
+      has_seed: ${{ steps.dl.outputs.has_seed }}
+    steps:
+      - name: Download seed tarball
+        id: dl
+        run: |
+          set -eu
+          if curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
+                  -o rust-fuzz-corpus.tar.zst; then
+              ls -la rust-fuzz-corpus.tar.zst
+              echo "has_seed=true" >> "$GITHUB_OUTPUT"
+          else
+              echo "::warning::seed tarball download failed; matrix jobs will run with empty corpus"
+              echo "has_seed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload tarball artifact
+        if: steps.dl.outputs.has_seed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-seed-tarball
+          path: rust-fuzz-corpus.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
   fuzz:
     name: cargo fuzz run (${{ matrix.target }})
     runs-on: ubuntu-latest
+    needs: seed
     strategy:
       fail-fast: false
       matrix:
@@ -49,8 +85,11 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      # Persistent corpus across runs.  No in-tree seeds; cache
-      # bootstraps the coverage frontier from the prior run.
+      # Persistent corpus across runs.  cache-hit checks the *exact*
+      # key, which intentionally includes github.run_id so each run
+      # writes a fresh cache; restore-keys pulls in the last run's
+      # corpus.  The Seed step below uses `ls -A` instead of cache-hit
+      # so a restore-keys hit still skips the extract.
       - name: Restore corpus cache
         id: cache-corpus
         uses: actions/cache@v4
@@ -60,10 +99,29 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
+      - name: Download seed tarball artifact
+        if: needs.seed.outputs.has_seed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-seed-tarball
+
+      - name: Seed corpus from tarball if empty
+        run: |
+          set -eu
+          mkdir -p crates/minlz/fuzz/corpus/${{ matrix.target }}
+          if [ -n "$(ls -A crates/minlz/fuzz/corpus/${{ matrix.target }})" ]; then
+              echo "Corpus restored from cache for ${{ matrix.target }}"
+          elif [ -f rust-fuzz-corpus.tar.zst ]; then
+              tar --zstd -xf rust-fuzz-corpus.tar.zst -C crates/minlz/fuzz corpus/${{ matrix.target }}
+              echo "Seeded from upstream tarball"
+          else
+              echo "::warning::no seed tarball and no cache; running with empty corpus"
+          fi
+          echo "$(find crates/minlz/fuzz/corpus/${{ matrix.target }} -type f | wc -l) seeds"
+
       - name: Fuzz
         run: |
           cd crates/minlz/fuzz
-          mkdir -p corpus/${{ matrix.target }}
           DUR="${{ github.event.inputs.duration_secs || '300' }}"
           cargo +nightly fuzz run "${{ matrix.target }}" -- \
               -max_total_time="$DUR" \
