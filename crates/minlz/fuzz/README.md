@@ -30,14 +30,11 @@ WSL.
 
 ## Seed corpora
 
-The Go repo ships seed corpora under `testdata/fuzz/`:
+Seed corpora for all five targets are bundled in a single tarball
+hosted at <https://download.klauspost.com/rust-fuzz-corpus.tar.zst>.
+See [`RUNBOOK.md` §1](RUNBOOK.md) for the one-liner that downloads
+and extracts it into `corpus/<target>/`.
 
-| Rust target                | Go corpus                                                   |
-|----------------------------|-------------------------------------------------------------|
-| `decode_arbitrary`         | `testdata/fuzz/block-corpus-raw.zip`                        |
-| `roundtrip`                | `testdata/fuzz/block-corpus-enc.zip`, `enc_regressions.zip` |
-| `stream_decode_arbitrary`  | `testdata/fuzz/FuzzDecodeReader.zip` (Go fuzz cache)        |
-| `stream_roundtrip`         | Seeded by `seed.sh` from the block corpus + Go fuzz cache.  |
-| `index_load`               | Seeded by `seed.sh` from the Go index fuzz cache.           |
-
-Run `seed.sh` from this directory to populate `corpus/<target>/`.
+The same tarball is fetched once per CI run by
+`.github/workflows/fuzz.yml` and shared with the matrix jobs via a
+workflow artifact.

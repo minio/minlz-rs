@@ -8,7 +8,7 @@
 //! mutations can reach the > MAX_BLOCK_SIZE multi-block territory when
 //! `-max_len` is set accordingly.
 //!
-//! Corpus: seeded from Go's `testdata/fuzz/` (see seed.sh).
+//! Corpus: seeded from the upstream tarball; see fuzz/RUNBOOK.md §1.
 
 #![no_main]
 

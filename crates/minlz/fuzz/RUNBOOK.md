@@ -23,6 +23,7 @@ cargo +nightly fuzz list
 #   roundtrip
 #   stream_decode_arbitrary
 #   stream_roundtrip
+#   index_load
 ```
 
 ## 1. Seed the corpus
@@ -46,7 +47,7 @@ Then seed:
 ```bash
 cd minlz-rs/crates/minlz/fuzz
 curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
-  | tar --zstd -xf -
+  | tar --zstd -xf - --no-same-owner --no-same-permissions
 # corpus/{decode_arbitrary,roundtrip,stream_decode_arbitrary,stream_roundtrip,index_load}/
 # are now populated.  Verify:
 for t in decode_arbitrary roundtrip stream_decode_arbitrary stream_roundtrip index_load; do
@@ -59,7 +60,7 @@ tar command line:
 
 ```bash
 curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
-  | tar --zstd -xf - corpus/index_load
+  | tar --zstd -xf - --no-same-owner --no-same-permissions corpus/index_load
 ```
 
 The same tarball backs the GitHub Actions fuzz workflow (one fetch per
@@ -76,9 +77,11 @@ stage plan asks for.
 cd minlz-rs/crates/minlz/fuzz
 
 # 20 min each — `-jobs=N -workers=N` parallelises across cores.
-cargo +nightly fuzz run decode_arbitrary -- -max_total_time=1200 -jobs=8 -workers=8
-cargo +nightly fuzz run roundtrip        -- -max_total_time=1200 -jobs=8 -workers=8
-cargo +nightly fuzz run max_encoded_len  -- -max_total_time=1200 -jobs=8 -workers=8
+cargo +nightly fuzz run decode_arbitrary        -- -max_total_time=1200 -jobs=8 -workers=8
+cargo +nightly fuzz run roundtrip               -- -max_total_time=1200 -jobs=8 -workers=8
+cargo +nightly fuzz run stream_decode_arbitrary -- -max_total_time=1200 -jobs=8 -workers=8
+cargo +nightly fuzz run stream_roundtrip        -- -max_total_time=1200 -jobs=8 -workers=8
+cargo +nightly fuzz run index_load              -- -max_total_time=1200 -jobs=8 -workers=8
 ```
 
 Live output looks like this:
@@ -145,7 +148,7 @@ branches that are never executable on valid corpus.
 ## 5. Stage A "DONE" target
 
 The plan asks for **≥ 1 hour total wall-clock with no findings**, split
-roughly equally across the three targets.  Concretely:
+roughly equally across the five targets.  Concretely:
 
 ```bash
 cd minlz-rs/crates/minlz/fuzz

@@ -625,7 +625,7 @@ fn decode_arbitrary_corpus_smoke() {
     let dir = manifest.join("fuzz/corpus/decode_arbitrary");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         eprintln!("skip: corpus not extracted at {}", dir.display());
-        eprintln!("  run `bash crates/minlz/fuzz/seed.sh` to populate it");
+        eprintln!("  see crates/minlz/fuzz/RUNBOOK.md §1 to populate it");
         return;
     };
     let mut count = 0usize;

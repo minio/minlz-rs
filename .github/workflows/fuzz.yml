@@ -12,6 +12,8 @@ name: Fuzz
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "0 4 * * *"   # every night 04:00 UTC
   workflow_dispatch:
@@ -112,7 +114,9 @@ jobs:
           if [ -n "$(ls -A crates/minlz/fuzz/corpus/${{ matrix.target }})" ]; then
               echo "Corpus restored from cache for ${{ matrix.target }}"
           elif [ -f rust-fuzz-corpus.tar.zst ]; then
-              tar --zstd -xf rust-fuzz-corpus.tar.zst -C crates/minlz/fuzz corpus/${{ matrix.target }}
+              tar --zstd -xf rust-fuzz-corpus.tar.zst \
+                  --no-same-owner --no-same-permissions \
+                  -C crates/minlz/fuzz corpus/${{ matrix.target }}
               echo "Seeded from upstream tarball"
           else
               echo "::warning::no seed tarball and no cache; running with empty corpus"
