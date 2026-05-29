@@ -169,6 +169,7 @@ fn drop_without_finish_does_not_block() {
 /// iterations.  Surfaces scheduling-dependent bugs that single-iteration
 /// tests miss — substitute for `loom` while staying std-only.
 #[test]
+#[cfg_attr(miri, ignore = "50 trials × 16 (N,M) combos is impractical under miri")]
 fn stress_random_cross_concurrency() {
     fn lcg(seed: u64) -> impl FnMut() -> u8 {
         let mut x = seed;
@@ -265,6 +266,7 @@ fn rust_mt_encoded_decodes_in_go() {
 // -------------------- index integration --------------------
 
 #[test]
+#[cfg_attr(miri, ignore = "4 MiB stream × 3 concurrencies is impractical under miri")]
 fn append_index_round_trips_via_read_seeker() {
     // Multi-block payload at small block_size so we get several index
     // entries (est_block_uncomp floors at 1 MiB → still 1 entry for
@@ -319,6 +321,7 @@ fn append_index_round_trips_via_read_seeker() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "256 KiB stream is impractical under miri")]
 fn append_index_off_produces_smaller_stream() {
     let payload = vec![b'z'; 256 << 10];
     let n = NonZeroUsize::new(4).unwrap();
@@ -357,6 +360,7 @@ fn append_index_off_produces_smaller_stream() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "2 MiB stream is impractical under miri")]
 fn mt_padding_aligns_total_size() {
     // Encode with padding=1024 and verify the resulting stream is a
     // multiple of 1024 bytes.  Decoding must still produce the original
@@ -383,6 +387,7 @@ fn mt_padding_aligns_total_size() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "1 MiB stream is impractical under miri")]
 fn mt_padding_plus_index_aligns_and_reads() {
     // padding + append_index — padding precedes the index but its size
     // accounts for the index length, so the final stream is aligned.
@@ -417,6 +422,7 @@ fn mt_padding_plus_index_aligns_and_reads() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "3 MiB stream is impractical under miri")]
 fn mt_index_offsets_match_st_index_offsets() {
     // For an identical input + identical block layout, ST and MT
     // writers must produce indices that agree on every (comp, uncomp)

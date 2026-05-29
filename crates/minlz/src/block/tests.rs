@@ -20,10 +20,18 @@ fn roundtrip_at(input: &[u8], level: Level) -> Result<(), String> {
 }
 
 /// Run a round-trip at every shipping level.
+///
+/// Under miri, L3 is skipped: its only unsafe code (`load32`/`load64`)
+/// is shared with L1+L2, while the L3 entry zeros 1.25M `u64`s of
+/// thread-local tables on every call — the dominant cost of miri
+/// runs on this crate.  Native builds still hit all three levels.
 fn roundtrip(input: &[u8]) -> Result<(), String> {
-    // Only Fastest is implemented in this stage; Balanced/Smallest fall back
-    // to uncompressed.  Both should still roundtrip.
-    for &level in &[Level::Fastest, Level::Balanced, Level::Smallest] {
+    let levels: &[Level] = if cfg!(miri) {
+        &[Level::Fastest, Level::Balanced]
+    } else {
+        &[Level::Fastest, Level::Balanced, Level::Smallest]
+    };
+    for &level in levels {
         roundtrip_at(input, level).map_err(|e| format!("lvl {level:?}: {e}"))?;
     }
     Ok(())
@@ -741,8 +749,15 @@ fn miri_decoder_unsafe_paths() {
         // Long-ish English (exercises copy2 + emit_literal extension).
         b"the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog.",
     ];
+    // L1 alone exercises every encoder unsafe load/store; L2/L3 add
+    // table-zeroing cost (esp. L3's 1.25M `u64`s) without new UB coverage.
+    let levels: &[Level] = if cfg!(miri) {
+        &[Level::Fastest]
+    } else {
+        &[Level::Fastest, Level::Balanced, Level::Smallest]
+    };
     for &input in inputs {
-        for &level in &[Level::Fastest, Level::Balanced, Level::Smallest] {
+        for &level in levels {
             let mut enc = Vec::new();
             encode(&mut enc, input, level).expect("encode");
             let mut dec = Vec::new();

@@ -32,7 +32,9 @@ jobs:
       # Heavy tests are #[cfg_attr(miri, ignore)]'d in source; the lighter
       # set takes ~15 min on a 4-core runner.
       - name: cargo +nightly miri test --lib
-        run: cargo +nightly miri test --lib
+        # --report-time appends `<X.YZs>` to each test line so slow tests
+        # are visible in the CI log without rerunning.
+        run: cargo +nightly miri test --lib -- -Z unstable-options --report-time
         env:
           # Tree borrows would also work; stacked borrows is the
           # historical default and catches the bugs we care about.

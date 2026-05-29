@@ -274,6 +274,7 @@ fn lcg(seed: u64) -> impl FnMut() -> u8 {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "200 trials × 2 levels × ≤40 KiB is impractical under miri")]
 fn stress_random_inputs_roundtrip() {
     // 200 inputs at sizes 0..40 KiB (crosses the 4 KiB minimum block size at
     // L1 etc.).  Two compression levels to keep runtime moderate.
@@ -322,4 +323,42 @@ fn empty_writes_are_noop() {
         .read_to_end(&mut decoded)
         .unwrap();
     assert!(decoded.is_empty());
+}
+
+#[cfg(miri)]
+#[test]
+fn stress_random_inputs_roundtrip_miri() {
+    // 6 trials × 2 levels × ≤2 KiB.  Smaller than the native version
+    // but still crosses MIN_BLOCK_SIZE and covers both repetitive and
+    // pseudo-random inputs through L1 + L3.
+    for trial in 0..6u64 {
+        let mut rng = lcg(0xc0ffee ^ trial.wrapping_mul(0x9e37));
+        let size = (trial as usize * 211) % 2048;
+        let mut input = vec![0u8; size];
+        if trial & 1 == 0 {
+            for chunk in input.chunks_mut(7) {
+                let v = rng();
+                for b in chunk {
+                    *b = v;
+                }
+            }
+        } else {
+            for b in &mut input {
+                *b = rng();
+            }
+        }
+        for level in [crate::Level::Fastest, crate::Level::Smallest] {
+            let mut w = WriterBuilder::new()
+                .block_size(crate::stream::MIN_BLOCK_SIZE)
+                .level(level)
+                .build(Vec::new());
+            w.write_all(&input).unwrap();
+            let stream = w.finish().unwrap();
+            let mut decoded = Vec::new();
+            Reader::new(Cursor::new(&stream))
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, input, "trial={trial} size={size} level={level:?}");
+        }
+    }
 }
