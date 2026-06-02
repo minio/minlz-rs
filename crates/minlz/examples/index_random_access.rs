@@ -61,7 +61,8 @@ fn main() {
         // whole-block fast path still applies, but not so small that
         // per-chunk overhead dominates (4 KiB minimum is excessive).
         .append_index() // write the index chunk after EOF
-        .build(&mut compressed);
+        .build(&mut compressed)
+        .unwrap();
     w.write_all(&payload).expect("write");
     let _ = w.finish().expect("finish");
     let enc_elapsed = t.elapsed();
@@ -81,11 +82,11 @@ fn main() {
     let open_elapsed = t.elapsed();
     let idx = rs.index();
     println!(
-        "opened ReadSeeker in {:.2?}  (index: {} entries, total_uncompressed={}, total_compressed={})",
+        "opened ReadSeeker in {:.2?}  (index: {} entries, total_uncompressed={:?}, total_compressed={:?})",
         open_elapsed,
-        idx.offsets.len(),
-        idx.total_uncompressed,
-        idx.total_compressed,
+        idx.offsets().len(),
+        idx.total_uncompressed(),
+        idx.total_compressed(),
     );
 
     // -------------------- 4. Random reads (timed) --------------------

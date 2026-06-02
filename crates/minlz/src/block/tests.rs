@@ -148,7 +148,7 @@ fn invalid_varint() {
     ];
     for input in cases {
         let err = decoded_len(input).expect_err("expected an error");
-        assert_eq!(err, Error::Corrupt, "input={input:?}");
+        assert!(matches!(err, Error::Corrupt(_)), "input={input:?}");
     }
 }
 
@@ -156,9 +156,12 @@ fn invalid_varint() {
 #[test]
 fn decoded_len_minimal() {
     assert_eq!(decoded_len(&[0x00]).unwrap(), 0);
-    assert_eq!(decoded_len(&[]).unwrap_err(), Error::Corrupt);
+    assert!(matches!(decoded_len(&[]).unwrap_err(), Error::Corrupt(_)));
     // `[0x00, 0x00]` declares length 0 with no body — Go rejects this.
-    assert_eq!(decoded_len(&[0x00, 0x00]).unwrap_err(), Error::Corrupt);
+    assert!(matches!(
+        decoded_len(&[0x00, 0x00]).unwrap_err(),
+        Error::Corrupt(_)
+    ));
     // `[0x00, 0x00, 'A']` decodes to a 1-byte literal block.
     assert_eq!(decoded_len(&[0x00, 0x00, b'A']).unwrap(), 1);
 }

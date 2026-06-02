@@ -93,6 +93,8 @@ fn crc32c_update_table(crc: u32, data: &[u8]) -> u32 {
     let mut c = !crc;
     let mut chunks = data.chunks_exact(8);
     for chunk in &mut chunks {
+        // `chunks_exact(8)` yields 8-byte slices, so the 4-byte sub-slices
+        // are always exactly `[u8; 4]` — `try_into` is infallible here.
         let v0 = u32::from_le_bytes(chunk[0..4].try_into().unwrap()) ^ c;
         let v1 = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
         // Slice-by-8: process 8 bytes per iteration via 8 parallel tables.
@@ -229,6 +231,8 @@ unsafe fn crc32c_hw_x86_64(crc: u32, data: &[u8]) -> u32 {
     let mut c64 = u64::from(c);
     let mut chunks = data.chunks_exact(8);
     for chunk in &mut chunks {
+        // `chunks_exact(8)` guarantees an 8-byte slice, so the conversion
+        // to `[u8; 8]` is infallible.
         let v = u64::from_le_bytes(chunk.try_into().unwrap());
         c64 = _mm_crc32_u64(c64, v);
     }
@@ -282,6 +286,8 @@ unsafe fn crc32c_hw_aarch64(crc: u32, data: &[u8]) -> u32 {
     }
     let mut chunks = data.chunks_exact(8);
     for chunk in &mut chunks {
+        // `chunks_exact(8)` guarantees an 8-byte slice, so the conversion
+        // to `[u8; 8]` is infallible.
         let v = u64::from_le_bytes(chunk.try_into().unwrap());
         c = __crc32cd(c, v);
     }

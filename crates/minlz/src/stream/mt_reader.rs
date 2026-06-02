@@ -62,11 +62,22 @@ struct DecodeOutput {
     result: Result<Vec<u8>, Error>,
 }
 
+/// Result of [`super::Reader::decode_concurrent`]: the recovered sink plus the
+/// number of decoded bytes written into it. The sink is handed back because the
+/// worker pool owns it during the decode.
+#[derive(Debug)]
+pub struct ConcurrentDecode<W> {
+    /// Total uncompressed bytes written to the sink.
+    pub bytes_written: u64,
+    /// The sink, returned to the caller.
+    pub writer: W,
+}
+
 pub(super) fn decode_concurrent_into<R: Read, W: Write + Send + 'static>(
     reader: &mut Reader<R>,
     w: W,
     threads: usize,
-) -> io::Result<(u64, W)> {
+) -> io::Result<ConcurrentDecode<W>> {
     let threads = threads.max(1);
     // One submit channel per worker (capacity 1) for round-robin
     // dispatch — no Mutex<Receiver> contention.
@@ -78,7 +89,7 @@ pub(super) fn decode_concurrent_into<R: Read, W: Write + Send + 'static>(
         submit_rxs.push(rx);
     }
     let (order_tx, order_rx) = mpsc::sync_channel::<Receiver<DecodeOutput>>(threads + 1);
-    let (finish_tx, finish_rx) = mpsc::sync_channel::<io::Result<(u64, W)>>(1);
+    let (finish_tx, finish_rx) = mpsc::sync_channel::<io::Result<ConcurrentDecode<W>>>(1);
     let err: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
     let pool_slots = threads + 1;
     let compressed_pool = Arc::new(BufferPool::new(pool_slots, reader.max_block / 8));
@@ -132,6 +143,9 @@ fn dispatch_loop<R: Read>(
     let mut uncomp_emitted: u64 = 0;
     let mut next_worker: usize = 0;
     loop {
+        // Lock poison only panics if a worker thread already panicked while
+        // holding this mutex — it propagates that panic rather than masking
+        // it. Same rationale applies to every `lock().unwrap()` below.
         if let Some(e) = err.lock().unwrap().as_ref() {
             return Err(clone_io_err(e));
         }
@@ -400,7 +414,7 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
 fn writer_loop<W: Write + Send + 'static>(
     mut w: W,
     order_rx: Receiver<Receiver<DecodeOutput>>,
-    finish_tx: SyncSender<io::Result<(u64, W)>>,
+    finish_tx: SyncSender<io::Result<ConcurrentDecode<W>>>,
     err_slot: Arc<Mutex<Option<io::Error>>>,
     decoded_pool: Arc<BufferPool>,
 ) {
@@ -426,12 +440,16 @@ fn writer_loop<W: Write + Send + 'static>(
         w.flush().map_err(|e| record(&err_slot, e))?;
         Ok(())
     })();
-    let payload = res.map(|()| (written, w));
+    let payload = res.map(|()| ConcurrentDecode {
+        bytes_written: written,
+        writer: w,
+    });
     let _ = finish_tx.send(payload);
 }
 
 fn record(slot: &Arc<Mutex<Option<io::Error>>>, e: io::Error) -> io::Error {
     let cloned = clone_io_err(&e);
+    // Lock poison only propagates a prior worker panic (see `dispatch_loop`).
     let mut guard = slot.lock().unwrap();
     if guard.is_none() {
         *guard = Some(e);

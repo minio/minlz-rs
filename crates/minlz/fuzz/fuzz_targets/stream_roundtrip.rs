@@ -28,11 +28,10 @@
 #![no_main]
 
 use std::io::{Read, Write};
-use std::num::NonZeroUsize;
 
 use libfuzzer_sys::fuzz_target;
 use minlz::Level;
-use minlz::stream::{MtWriterBuilder, Reader, WriterBuilder};
+use minlz::stream::{ConcurrentDecode, MtWriterBuilder, Reader, WriterBuilder};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() || data.len() > 9 * 1024 * 1024 {
@@ -61,7 +60,8 @@ fuzz_target!(|data: &[u8]| {
         let mut w = WriterBuilder::new()
             .level(level)
             .block_size(block_size)
-            .build(&mut buf);
+            .build(&mut buf)
+            .unwrap();
         w.write_all(payload).expect("ST write");
         let _ = w.finish().expect("ST finish");
         let mut dec = Vec::with_capacity(payload.len());
@@ -75,12 +75,16 @@ fuzz_target!(|data: &[u8]| {
         let mut w = MtWriterBuilder::new()
             .level(level)
             .block_size(block_size)
-            .concurrency(NonZeroUsize::new(enc_conc).unwrap())
-            .build(Vec::<u8>::new());
+            .concurrency(enc_conc)
+            .build(Vec::<u8>::new())
+            .unwrap();
         w.write_all(payload).expect("MT write");
         let stream = w.finish().expect("MT finish");
         let mut reader = Reader::new(&stream[..]);
-        let (n, dec) = reader
+        let ConcurrentDecode {
+            bytes_written: n,
+            writer: dec,
+        } = reader
             .decode_concurrent(Vec::<u8>::with_capacity(payload.len()), dec_conc)
             .expect("MT decode");
         assert_eq!(n as usize, payload.len(), "MT length mismatch");

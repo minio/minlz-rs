@@ -65,7 +65,7 @@ fn multi_block_payload_round_trip() {
     // Force at least 2 blocks at 4 KiB block size.
     let payload: Vec<u8> = (0..16 * 1024).map(|i| (i % 256) as u8).collect();
     let buf: Vec<u8> = Vec::new();
-    let mut w = WriterBuilder::new().block_size(4 << 10).build(buf);
+    let mut w = WriterBuilder::new().block_size(4 << 10).build(buf).unwrap();
     w.write_all(&payload).unwrap();
     let out = w.finish().unwrap();
     let mut decoded = Vec::new();
@@ -79,7 +79,7 @@ fn multi_block_payload_round_trip() {
 fn uncompressed_mode_round_trip() {
     let payload = vec![b'b'; 5000];
     let buf: Vec<u8> = Vec::new();
-    let mut w = WriterBuilder::new().uncompressed().build(buf);
+    let mut w = WriterBuilder::new().uncompressed().build(buf).unwrap();
     w.write_all(&payload).unwrap();
     let out = w.finish().unwrap();
     let mut decoded = Vec::new();
@@ -92,7 +92,7 @@ fn uncompressed_mode_round_trip() {
 #[test]
 fn flush_on_write_emits_one_chunk_per_write() {
     let buf: Vec<u8> = Vec::new();
-    let mut w = WriterBuilder::new().flush_on_write().build(buf);
+    let mut w = WriterBuilder::new().flush_on_write().build(buf).unwrap();
     w.write_all(b"a").unwrap();
     w.write_all(b"b").unwrap();
     w.write_all(b"c").unwrap();
@@ -133,6 +133,7 @@ fn add_user_chunk_round_trips_via_callback() {
             Ok(())
         })
         .build(Cursor::new(&out))
+        .unwrap()
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, b"prefixinfixsuffix");
@@ -155,7 +156,7 @@ fn padding_produces_multiple_of_n() {
     let payload = b"abc";
     let pad: u32 = 64;
     let buf: Vec<u8> = Vec::new();
-    let mut w = WriterBuilder::new().padding(pad).build(buf);
+    let mut w = WriterBuilder::new().padding(pad).build(buf).unwrap();
     w.write_all(payload).unwrap();
     let out = w.finish().unwrap();
     assert_eq!(out.len() % pad as usize, 0);
@@ -175,12 +176,12 @@ fn padding_with_already_aligned_output_is_noop() {
     let payload = vec![b'x'; 100];
     let pad = 32u32;
     let buf: Vec<u8> = Vec::new();
-    let mut w = WriterBuilder::new().padding(pad).build(buf);
+    let mut w = WriterBuilder::new().padding(pad).build(buf).unwrap();
     w.write_all(&payload).unwrap();
     let out_padded = w.finish().unwrap();
 
     let buf: Vec<u8> = Vec::new();
-    let mut w = WriterBuilder::new().build(buf);
+    let mut w = WriterBuilder::new().build(buf).unwrap();
     w.write_all(&payload).unwrap();
     let out_plain = w.finish().unwrap();
 
@@ -227,12 +228,12 @@ fn written_reports_byte_counts() {
     let payload = vec![b'q'; 8 << 10];
     w.write_all(&payload).unwrap();
     w.flush().unwrap();
-    let (uncomp, comp) = w.written();
-    assert_eq!(uncomp, payload.len() as u64);
-    assert!(comp > 0);
+    let written = w.written();
+    assert_eq!(written.uncompressed, payload.len() as u64);
+    assert!(written.compressed > 0);
     // After finish there's the EOF chunk too.
     let out = w.finish().unwrap();
-    assert!(out.len() as u64 > comp);
+    assert!(out.len() as u64 > written.compressed);
 }
 
 #[test]
@@ -257,7 +258,8 @@ fn level_smallest_round_trip() {
     let buf: Vec<u8> = Vec::new();
     let mut w = WriterBuilder::new()
         .level(crate::Level::Smallest)
-        .build(buf);
+        .build(buf)
+        .unwrap();
     w.write_all(&payload).unwrap();
     let out = w.finish().unwrap();
     let mut decoded = Vec::new();
@@ -316,7 +318,8 @@ fn stress_random_inputs_roundtrip() {
             let mut w = WriterBuilder::new()
                 .block_size(crate::stream::MIN_BLOCK_SIZE)
                 .level(level)
-                .build(Vec::new());
+                .build(Vec::new())
+                .unwrap();
             w.write_all(&input).unwrap();
             let stream = w.finish().unwrap();
             let mut decoded = Vec::new();
@@ -368,7 +371,8 @@ fn stress_random_inputs_roundtrip_miri() {
             let mut w = WriterBuilder::new()
                 .block_size(crate::stream::MIN_BLOCK_SIZE)
                 .level(level)
-                .build(Vec::new());
+                .build(Vec::new())
+                .unwrap();
             w.write_all(&input).unwrap();
             let stream = w.finish().unwrap();
             let mut decoded = Vec::new();

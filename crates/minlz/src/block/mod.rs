@@ -46,15 +46,24 @@ pub enum Level {
     Smallest = 3,
 }
 
-impl Level {
-    /// Convert from the Go integer level encoding.
-    pub fn from_i32(v: i32) -> Result<Self, Error> {
+impl TryFrom<i32> for Level {
+    type Error = Error;
+
+    /// Convert from the integer level encoding (`1`/`2`/`3`); any other value
+    /// is [`Error::InvalidLevel`].
+    fn try_from(v: i32) -> Result<Self, Error> {
         match v {
             1 => Ok(Level::Fastest),
             2 => Ok(Level::Balanced),
             3 => Ok(Level::Smallest),
             _ => Err(Error::InvalidLevel),
         }
+    }
+}
+
+impl From<Level> for i32 {
+    fn from(l: Level) -> i32 {
+        l as i32
     }
 }
 
@@ -104,9 +113,10 @@ pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(),
     }
 }
 
-/// Try to encode `src`; on success, append to `dst` and return `true`.
-/// Returns `false` if the input is not compressible (parity with Go
-/// `TryEncode`, which returns `nil` in that case).
+/// Try to encode `src` at the given [`Level`]; on success, append the block to
+/// `dst` and return `true`. Returns `false` (leaving `dst` unchanged) if the
+/// input is too small or does not compress to fewer bytes than the input — the
+/// give-up path, parity with Go `TryEncode` returning `nil`.
 pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, Error> {
     let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
@@ -121,7 +131,8 @@ pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, E
 
     let n = match level {
         Level::Fastest => encode_l1::encode_block(&mut dst[body_start..], src),
-        Level::Balanced | Level::Smallest => 0,
+        Level::Balanced => encode_l2::encode_block(&mut dst[body_start..], src),
+        Level::Smallest => encode_l3::encode_block(&mut dst[body_start..], src),
     };
 
     // Go's TryEncode also rejects "compressed >= src.len()" (see encode.go).
@@ -176,47 +187,47 @@ pub fn decoded_len(src: &[u8]) -> Result<usize, Error> {
     Ok(dlen)
 }
 
-/// Returns `true` if `src` looks like a MinLZ block (leading 0 byte).
+/// Returns `Some(uncompressed_size)` if `src` looks like a MinLZ block (leading
+/// 0 byte), or `None` if it does not (e.g. a Snappy/S2 stream, which is out of
+/// scope). `Err` only on a malformed MinLZ header.
 ///
-/// Snappy/S2 fallback is out of scope, so a non-zero first byte returns
-/// `Ok(false, _)` *only* if it's a well-formed legacy header — otherwise
-/// the parser refuses.  In practice we just check the first byte; full
-/// validation happens inside [`decode`].
-///
-/// On success returns `(is_minlz, uncompressed_size)`.
-pub fn is_minlz(src: &[u8]) -> Result<(bool, usize), Error> {
+/// Replaces a bare `(bool, usize)`: the size is meaningful exactly when the
+/// answer is "yes", which `Option` expresses directly. Full validation still
+/// happens inside [`decode`].
+pub fn is_minlz(src: &[u8]) -> Result<Option<usize>, Error> {
     if src.is_empty() {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("empty input"));
     }
     if src[0] != 0 {
         // Snappy/S2 fallback is out of scope.
-        return Ok((false, 0));
+        return Ok(None);
     }
     let (_, _, dlen) = parse_header(src)?;
-    Ok((true, dlen))
+    Ok(Some(dlen))
 }
 
 /// Parse the block header.  Returns `(is_literal_only, body_slice, dlen)`.
 fn parse_header(src: &[u8]) -> Result<(bool, &[u8], usize), Error> {
     if src.is_empty() {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("empty input"));
     }
     if src.len() == 1 {
         // Single byte: must be 0 (0-byte block).
         if src[0] == 0 {
             return Ok((true, &src[1..], 0));
         }
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("invalid single-byte block"));
     }
     if src[0] != 0 {
         // Snappy/S2 fallback path — refused here.
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("snappy/s2 stream not supported"));
     }
     let after_magic = &src[1..];
-    let (v, n) = format::get_uvarint(after_magic).ok_or(Error::Corrupt)?;
+    let (v, n) =
+        format::get_uvarint(after_magic).ok_or(Error::Corrupt("bad decoded-length varint"))?;
     // Match Go decodedLen: anything that wouldn't fit in uint32 is corrupt …
     if v > 0xffff_ffff {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("decoded length exceeds u32"));
     }
     // … and anything between uint32 and MaxBlockSize is "too large".
     if v > MAX_BLOCK_SIZE as u64 {
@@ -226,14 +237,14 @@ fn parse_header(src: &[u8]) -> Result<(bool, &[u8], usize), Error> {
     let body = &after_magic[n..];
     // Order matches Go's isMinLZ: body-empty before the v==0 short-circuit.
     if body.is_empty() {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("empty block body"));
     }
     if dlen == 0 {
         return Ok((true, body, body.len()));
     }
     if dlen < body.len() {
         // A compressed block may not be larger than the decompressed block.
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("compressed larger than decoded size"));
     }
     Ok((false, body, dlen))
 }
@@ -300,7 +311,7 @@ pub(crate) fn append_decoded_chunk_body(dst: &mut Vec<u8>, body: &[u8]) -> Resul
         return Ok(());
     }
     if dlen < compressed.len() {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("compressed larger than decoded size"));
     }
     let start = dst.len();
     dst.reserve(dlen + decode::OVERSHOOT_PAD);
@@ -324,9 +335,9 @@ pub(crate) fn decoded_len_chunk_body(body: &[u8]) -> Result<usize, Error> {
 }
 
 fn split_chunk_body(body: &[u8]) -> Result<(usize, &[u8]), Error> {
-    let (v, n) = format::get_uvarint(body).ok_or(Error::Corrupt)?;
+    let (v, n) = format::get_uvarint(body).ok_or(Error::Corrupt("bad chunk length varint"))?;
     if v > 0xffff_ffff {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("chunk decoded length exceeds u32"));
     }
     if v > MAX_BLOCK_SIZE as u64 {
         return Err(Error::TooLarge);

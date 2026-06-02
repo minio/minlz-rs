@@ -116,22 +116,28 @@ impl<R: Read + Seek> ReadSeeker<R> {
             self.reader.err = None;
         }
 
+        // Offsets are `u64`, but seek arithmetic is done in `i64` so that
+        // negative `End`/`Current` deltas and "before start" are detectable.
+        // Convert with `i64::try_from` so a total/offset beyond `i64::MAX`
+        // errors instead of silently wrapping negative.
+        let to_i64 = |v: u64| {
+            i64::try_from(v).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "offset exceeds i64 seek range")
+            })
+        };
         let abs_off = match pos {
-            SeekFrom::Start(o) => o as i64,
-            SeekFrom::Current(d) => {
-                let cur = self.reader.current_offset() as i64;
-                cur.checked_add(d)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek overflow"))?
-            }
+            SeekFrom::Start(o) => to_i64(o)?,
+            SeekFrom::Current(d) => to_i64(self.reader.current_offset())?
+                .checked_add(d)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek overflow"))?,
             SeekFrom::End(d) => {
-                if self.index.total_uncompressed < 0 {
-                    return Err(io::Error::new(
+                let total = self.index.total_uncompressed().ok_or_else(|| {
+                    io::Error::new(
                         io::ErrorKind::Unsupported,
                         "seek from end requires known total_uncompressed",
-                    ));
-                }
-                self.index
-                    .total_uncompressed
+                    )
+                })?;
+                to_i64(total)?
                     .checked_add(d)
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek overflow"))?
             }
@@ -141,6 +147,17 @@ impl<R: Read + Seek> ReadSeeker<R> {
                 io::ErrorKind::InvalidInput,
                 "seek before start of file",
             ));
+        }
+        // The target is now known non-negative; carry it as `u64` so block
+        // and index offsets stay in their native type (no i64 round-trips
+        // that could wrap for offsets above `i64::MAX`).
+        let abs_off = abs_off as u64;
+        // Past-end is an error (the infallible `Index::find` would otherwise
+        // clamp to the last block). Only enforceable when the total is known.
+        if let Some(total) = self.index.total_uncompressed() {
+            if abs_off > total {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
         }
 
         // Ensure the reader has consumed the stream identifier so that
@@ -154,30 +171,32 @@ impl<R: Read + Seek> ReadSeeker<R> {
         }
 
         // Fast path: in current buffer.
-        let block_start = self.reader.block_start as i64;
-        let block_end = block_start + self.reader.decoded.len() as i64;
+        let block_start = self.reader.block_start;
+        let block_end = block_start + self.reader.decoded.len() as u64;
         if abs_off >= block_start && abs_off < block_end {
             self.reader.decoded_pos = (abs_off - block_start) as usize;
-            return Ok(abs_off as u64);
+            return Ok(abs_off);
         }
 
-        // Slow path: index lookup.
-        let (c_off, u_off) = self.index.find(abs_off)?;
+        // Slow path: index lookup (infallible; returns the entry at or before).
+        let entry = self.index.find(abs_off);
+        let c_off = entry.compressed;
+        let u_off = entry.uncompressed;
 
-        self.reader.r.seek(SeekFrom::Start(c_off as u64))?;
+        self.reader.r.seek(SeekFrom::Start(c_off))?;
         // Hard-reset block state: clearing the decoded buffer makes the
         // next data chunk's `block_start += decoded.len()` a no-op, so
         // block_start at the new chunk equals u_off as desired.
         self.reader.decoded.clear();
         self.reader.decoded_pos = 0;
-        self.reader.block_start = u_off as u64;
+        self.reader.block_start = u_off;
 
         if u_off < abs_off {
-            self.reader.skip((abs_off - u_off) as u64)?;
+            self.reader.skip(abs_off - u_off)?;
         }
         debug_assert!(u_off <= abs_off);
 
-        Ok(abs_off as u64)
+        Ok(abs_off)
     }
 
     /// Read up to `p.len()` bytes starting at uncompressed `offset`.

@@ -28,7 +28,6 @@
 #![allow(missing_docs)]
 
 use std::io::{Read, Write};
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -83,7 +82,7 @@ fn level_label(l: Level) -> &'static str {
 }
 
 fn encode_stream(src: &[u8], level: Level) -> Vec<u8> {
-    let mut w = WriterBuilder::new().level(level).build(Vec::new());
+    let mut w = WriterBuilder::new().level(level).build(Vec::new()).unwrap();
     w.write_all(src).unwrap();
     w.finish().unwrap()
 }
@@ -103,7 +102,7 @@ fn bench_encode(c: &mut Criterion) {
             let id = BenchmarkId::new(*label, level_label(level));
             g.bench_with_input(id, &src, |b, src| {
                 b.iter(|| {
-                    let mut w = WriterBuilder::new().level(level).build(Vec::new());
+                    let mut w = WriterBuilder::new().level(level).build(Vec::new()).unwrap();
                     w.write_all(src).unwrap();
                     let _ = w.finish().unwrap();
                 });
@@ -148,7 +147,9 @@ fn bench_encode_mt(c: &mut Criterion) {
     let mut g = c.benchmark_group("stream_encode_mt");
     g.measurement_time(Duration::from_secs(8));
     g.warm_up_time(Duration::from_secs(2));
-    let concurrency = std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap());
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     for (n, label) in sizes {
         let src = expand(&twain, *n);
         g.throughput(Throughput::Bytes(*n as u64));
@@ -159,7 +160,8 @@ fn bench_encode_mt(c: &mut Criterion) {
                     let mut w = MtWriterBuilder::new()
                         .level(level)
                         .concurrency(concurrency)
-                        .build(Vec::with_capacity(src.len() / 8));
+                        .build(Vec::with_capacity(src.len() / 8))
+                        .unwrap();
                     w.write_all(src).unwrap();
                     let _ = w.finish().unwrap();
                 });
@@ -177,8 +179,8 @@ fn bench_decode_mt(c: &mut Criterion) {
     g.measurement_time(Duration::from_secs(8));
     g.warm_up_time(Duration::from_secs(2));
     let concurrency = std::thread::available_parallelism()
-        .unwrap_or(NonZeroUsize::new(1).unwrap())
-        .get();
+        .map(|n| n.get())
+        .unwrap_or(1);
     for (n, label) in sizes {
         let src = expand(&twain, *n);
         g.throughput(Throughput::Bytes(*n as u64));
@@ -188,7 +190,7 @@ fn bench_decode_mt(c: &mut Criterion) {
             g.bench_with_input(id, &stream, |b, stream| {
                 b.iter(|| {
                     let mut reader = Reader::new(&stream[..]);
-                    let (_, _w) = reader
+                    let _ = reader
                         .decode_concurrent(Vec::<u8>::new(), concurrency)
                         .unwrap();
                 });
@@ -220,7 +222,8 @@ fn bench_index_seek_random(c: &mut Criterion) {
         .block_size(32 << 10)
         .level(Level::Balanced)
         .append_index()
-        .build(&mut compressed);
+        .build(&mut compressed)
+        .unwrap();
     w.write_all(&src).unwrap();
     let _ = w.finish().unwrap();
 

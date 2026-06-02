@@ -84,7 +84,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                     if v & 4 == 0 {
                         // Literal: copy, advance, and skip the docopy below.
                         if length > dlen - d || length > src_len - s {
-                            return Err(Error::Corrupt);
+                            return Err(Error::Corrupt("literal length out of bounds"));
                         }
                         // SAFETY: bounds checked above.  We pad dst by
                         // `OVERSHOOT_PAD ≥ 16` bytes, so a 16-byte write
@@ -170,7 +170,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                     }
                     if lit_len > 0 {
                         if dlen - d < 4 {
-                            return Err(Error::Corrupt);
+                            return Err(Error::Corrupt("truncated output tail"));
                         }
                         // Fast-path: write 4 bytes; unused trailing bytes
                         // will be overwritten by the next op.
@@ -187,7 +187,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
             }
             // docopy: emit `length` bytes from `dst[d-offset..]`.
             if d < offset || length > dlen - d {
-                return Err(Error::Corrupt);
+                return Err(Error::Corrupt("match copy out of bounds"));
             }
             // SAFETY: `d + length ≤ dlen`, `d ≥ offset`, both checked above.
             unsafe {
@@ -229,19 +229,19 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                 } else if x == 29 {
                     s += 2;
                     if s > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("truncated input"));
                     }
                     (src[s - 1] as usize) + 30
                 } else if x == 30 {
                     s += 3;
                     if s > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("truncated input"));
                     }
                     ((src[s - 2] as usize) | ((src[s - 1] as usize) << 8)) + 30
                 } else {
                     s += 4;
                     if s > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("truncated input"));
                     }
                     ((src[s - 3] as usize)
                         | ((src[s - 2] as usize) << 8)
@@ -250,7 +250,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                 };
                 if v & 4 == 0 {
                     if length > dlen - d || length > src_len - s {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("literal length out of bounds"));
                     }
                     // SAFETY: bounds checked above; src and dst are
                     // disjoint allocations.
@@ -266,7 +266,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
             1 => {
                 s += 2;
                 if s > src_len {
-                    return Err(Error::Corrupt);
+                    return Err(Error::Corrupt("truncated input"));
                 }
                 let lo16 = ((src[s - 2] as u16) | ((src[s - 1] as u16) << 8)) as u32;
                 let len_field = ((src[s - 2] >> 2) & 15) as usize;
@@ -274,7 +274,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                 if len_field == 15 {
                     s += 1;
                     if s > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("truncated input"));
                     }
                     length = (src[s - 1] as usize) + 18;
                 } else {
@@ -284,7 +284,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
             2 => {
                 s += 3;
                 if s > src_len {
-                    return Err(Error::Corrupt);
+                    return Err(Error::Corrupt("truncated input"));
                 }
                 let raw = (src[s - 3] >> 2) as usize;
                 offset = (src[s - 2] as usize) | ((src[s - 1] as usize) << 8);
@@ -293,19 +293,19 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                 } else if raw == 61 {
                     s += 1;
                     if s > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("truncated input"));
                     }
                     (src[s - 1] as usize) + 64
                 } else if raw == 62 {
                     s += 2;
                     if s > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("truncated input"));
                     }
                     ((src[s - 2] as usize) | ((src[s - 1] as usize) << 8)) + 64
                 } else {
                     s += 3;
                     if s > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("truncated input"));
                     }
                     ((src[s - 3] as usize)
                         | ((src[s - 2] as usize) << 8)
@@ -317,7 +317,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
             _ => {
                 s += 4;
                 if s > src_len {
-                    return Err(Error::Corrupt);
+                    return Err(Error::Corrupt("truncated input"));
                 }
                 let val = (src[s - 4] as u32)
                     | ((src[s - 3] as u32) << 8)
@@ -338,19 +338,19 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                     } else if length_tmp == 61 {
                         s += 1;
                         if s > src_len {
-                            return Err(Error::Corrupt);
+                            return Err(Error::Corrupt("truncated input"));
                         }
                         (src[s - 1] as usize) + 64
                     } else if length_tmp == 62 {
                         s += 2;
                         if s > src_len {
-                            return Err(Error::Corrupt);
+                            return Err(Error::Corrupt("truncated input"));
                         }
                         ((src[s - 2] as usize) | ((src[s - 1] as usize) << 8)) + 64
                     } else {
                         s += 3;
                         if s > src_len {
-                            return Err(Error::Corrupt);
+                            return Err(Error::Corrupt("truncated input"));
                         }
                         ((src[s - 3] as usize)
                             | ((src[s - 2] as usize) << 8)
@@ -360,7 +360,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                 }
                 if lit_len > 0 {
                     if lit_len > dlen - d || s + lit_len > src_len {
-                        return Err(Error::Corrupt);
+                        return Err(Error::Corrupt("literal length out of bounds"));
                     }
                     // SAFETY: bounds checked above.
                     unsafe {
@@ -372,7 +372,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
             }
         }
         if offset == 0 || d < offset || length > dlen - d {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt("match offset out of bounds"));
         }
         unsafe {
             if offset > length {
@@ -385,7 +385,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
     }
 
     if d != dlen {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt("output length mismatch"));
     }
     Ok(())
 }

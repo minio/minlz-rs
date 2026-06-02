@@ -53,7 +53,7 @@ const USER_CB_COUNT: usize = (MAX_USER_NON_SKIPPABLE_CHUNK - MIN_USER_SKIPPABLE_
 /// # use std::io::Cursor;
 /// # use minlz::stream::ReaderBuilder;
 /// let src = Cursor::new(Vec::<u8>::new());
-/// let mut reader = ReaderBuilder::new().ignore_crc().build(src);
+/// let mut reader = ReaderBuilder::new().ignore_crc().build(src).unwrap();
 /// # let _ = &mut reader;
 /// ```
 #[must_use]
@@ -87,11 +87,9 @@ impl ReaderBuilder {
     /// by either the stream identifier or an individual chunk) cause the
     /// reader to return [`Error::TooLarge`].
     ///
-    /// # Panics
-    ///
-    /// Panics if `n` is zero or exceeds [`MAX_BLOCK_SIZE`].
+    /// `n` must be in `(0, MAX_BLOCK_SIZE]`; an out-of-range value is
+    /// reported as [`Error::Config`] by [`ReaderBuilder::build`].
     pub fn max_block_size(mut self, n: usize) -> Self {
-        assert!(n > 0 && n <= MAX_BLOCK_SIZE, "max_block_size out of range");
         self.max_block_size = n;
         self
     }
@@ -134,8 +132,16 @@ impl ReaderBuilder {
     }
 
     /// Consume the builder and wrap `r` in a [`Reader`].
-    pub fn build<R: Read>(self, r: R) -> Reader<R> {
-        Reader::with_builder(r, self)
+    ///
+    /// # Errors
+    /// [`Error::Config`] if `max_block_size` is `0` or exceeds `MAX_BLOCK_SIZE`.
+    pub fn build<R: Read>(self, r: R) -> Result<Reader<R>> {
+        if self.max_block_size == 0 || self.max_block_size > MAX_BLOCK_SIZE {
+            return Err(Error::Config(
+                "max_block_size must be in (0, MAX_BLOCK_SIZE]",
+            ));
+        }
+        Ok(Reader::with_builder(r, self))
     }
 }
 
@@ -169,7 +175,9 @@ pub struct Reader<R> {
 impl<R: Read> Reader<R> {
     /// Create a reader with default options.
     pub fn new(r: R) -> Self {
-        ReaderBuilder::new().build(r)
+        ReaderBuilder::new()
+            .build(r)
+            .expect("default ReaderBuilder options are always valid")
     }
 
     fn with_builder(r: R, b: ReaderBuilder) -> Self {
@@ -396,10 +404,17 @@ impl<R: Read> Reader<R> {
     /// inside outlives any caller-stack borrow.  Borrowed sinks
     /// (`&mut Vec<u8>`) are not supported; wrap them in an owned adapter
     /// (e.g. pass `Vec::new()` and copy back from the returned `W`).
-    pub fn decode_concurrent<W>(&mut self, w: W, threads: usize) -> io::Result<(u64, W)>
+    pub fn decode_concurrent<W>(
+        &mut self,
+        w: W,
+        threads: usize,
+    ) -> io::Result<super::ConcurrentDecode<W>>
     where
         W: io::Write + Send + 'static,
     {
+        let threads = super::Concurrency::new(threads)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "concurrency must be ≥ 1"))?
+            .get();
         if self.decoded_pos < self.decoded.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

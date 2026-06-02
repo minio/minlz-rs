@@ -23,9 +23,7 @@ use std::path::Path;
 /// Resolve the worker-thread count from `Options::threads`, falling
 /// back to `available_parallelism()` and finally to 1.
 pub fn resolve_threads(opt: Option<NonZeroUsize>) -> NonZeroUsize {
-    opt.unwrap_or_else(|| {
-        std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap())
-    })
+    opt.unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
 }
 
 const BUF_SIZE: usize = 256 * 1024;

@@ -33,13 +33,22 @@ use super::format::{
     MIN_USER_SKIPPABLE_CHUNK, make_stream_header, put_uvarint,
 };
 
+/// Byte counts reported by [`Writer::written`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Written {
+    /// Uncompressed bytes accepted via [`std::io::Write::write`].
+    pub uncompressed: u64,
+    /// Compressed bytes written to the sink.
+    pub compressed: u64,
+}
+
 /// Builder for [`Writer`] options.
 ///
 /// ```
 /// # use minlz::stream::WriterBuilder;
 /// # use minlz::Level;
 /// let mut buf = Vec::<u8>::new();
-/// let mut writer = WriterBuilder::new().level(Level::Smallest).build(&mut buf);
+/// let mut writer = WriterBuilder::new().level(Level::Smallest).build(&mut buf).unwrap();
 /// # let _ = &mut writer;
 /// ```
 #[must_use]
@@ -74,15 +83,8 @@ impl WriterBuilder {
     }
 
     /// Set the maximum uncompressed block size.  Must lie in
-    /// `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]`.
-    ///
-    /// # Panics
-    /// Panics if `n` is outside the supported range.
+    /// `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]`; validated by [`build`](Self::build).
     pub fn block_size(mut self, n: usize) -> Self {
-        assert!(
-            (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&n),
-            "block_size must be in [{MIN_BLOCK_SIZE}, {MAX_BLOCK_SIZE}], got {n}"
-        );
         self.block_size = n;
         self
     }
@@ -103,15 +105,9 @@ impl WriterBuilder {
 
     /// Pad the total written size to a multiple of `n` bytes by emitting
     /// padding chunks (`0xfe`) at [`Writer::finish`] time.  `n == 0` or
-    /// `n == 1` disables padding.
-    ///
-    /// # Panics
-    /// Panics if `n > MAX_BLOCK_SIZE`.
+    /// `n == 1` disables padding.  `n > MAX_BLOCK_SIZE` is rejected by
+    /// [`build`](Self::build).
     pub fn padding(mut self, n: u32) -> Self {
-        assert!(
-            n as usize <= MAX_BLOCK_SIZE,
-            "padding must be ≤ {MAX_BLOCK_SIZE}, got {n}"
-        );
         self.padding = if n <= 1 { 0 } else { n };
         self
     }
@@ -125,35 +121,38 @@ impl WriterBuilder {
     }
 
     /// Toggle in-memory index generation.  Default is `true` so that
-    /// [`Writer::close_index`] can return an index after writing.  Set
-    /// to `false` for streaming output where no index is ever needed
-    /// (matches Go `WriterCreateIndex`).
-    ///
-    /// # Panics
-    /// Panics if called with `false` after [`Self::append_index`] was
-    /// requested — the two flags cannot disagree.
+    /// [`Writer::close_index`] can return an index after writing.  Set to
+    /// `false` for streaming output that never needs an index (matches Go
+    /// `WriterCreateIndex`).  If [`append_index`](Self::append_index) is also
+    /// requested, the index is generated regardless of this flag.
     pub fn generate_index(mut self, b: bool) -> Self {
-        if !b && self.append_index {
-            panic!("generate_index(false) conflicts with append_index()");
-        }
         self.generate_index = b;
         self
     }
 
     /// Append the index chunk to the end of the stream when finishing.
-    /// Requires index generation (which is the default).  Mirrors Go
-    /// `WriterAddIndex(true)`.
+    /// Implies index generation.  Mirrors Go `WriterAddIndex(true)`.
     pub fn append_index(mut self) -> Self {
-        if !self.generate_index {
-            panic!("append_index requires generate_index(true)");
-        }
+        self.generate_index = true;
         self.append_index = true;
         self
     }
 
     /// Consume the builder and wrap `w` in a [`Writer`].
-    pub fn build<W: Write>(self, w: W) -> Writer<W> {
-        Writer::with_builder(w, self)
+    ///
+    /// # Errors
+    /// [`Error::Config`] if `block_size` is outside `[MIN_BLOCK_SIZE,
+    /// MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
+    pub fn build<W: Write>(self, w: W) -> Result<Writer<W>, Error> {
+        if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&self.block_size) {
+            return Err(Error::Config(
+                "block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]",
+            ));
+        }
+        if self.padding as usize > MAX_BLOCK_SIZE {
+            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE"));
+        }
+        Ok(Writer::with_builder(w, self))
     }
 }
 
@@ -187,25 +186,21 @@ pub struct Writer<W> {
 impl<W: Write> Writer<W> {
     /// Wrap `w` with default options.
     pub fn new(w: W) -> Self {
-        WriterBuilder::new().build(w)
+        WriterBuilder::new()
+            .build(w)
+            .expect("default WriterBuilder options are always valid")
     }
 
     fn with_builder(w: W, b: WriterBuilder) -> Self {
         let ibuf = Vec::with_capacity(b.block_size);
-        let mut index = if b.generate_index {
+        let index = if b.generate_index || b.append_index {
             let mut idx = Index::default();
             idx.reset(b.block_size);
             Some(idx)
         } else {
             None
         };
-        // Newly created indices start with total_*=-1 (Go's reset);
-        // `index.add` later promotes them, but for callers who close
-        // immediately we want non-negative totals.
-        if let Some(i) = index.as_mut() {
-            i.total_uncompressed = 0;
-            i.total_compressed = 0;
-        }
+        // Totals stay unknown (None) until `append_to` records them at close.
         Self {
             w,
             ibuf,
@@ -235,15 +230,16 @@ impl<W: Write> Writer<W> {
         self.err = None;
         if let Some(idx) = self.index.as_mut() {
             idx.reset(self.block_size);
-            idx.total_uncompressed = 0;
-            idx.total_compressed = 0;
         }
     }
 
     /// Total uncompressed bytes accepted by [`Write::write`] and total
     /// compressed bytes written to the sink so far.
-    pub fn written(&self) -> (u64, u64) {
-        (self.uncomp_written, self.comp_written)
+    pub fn written(&self) -> Written {
+        Written {
+            uncompressed: self.uncomp_written,
+            compressed: self.comp_written,
+        }
     }
 
     /// Add a user chunk (`id` in `0x80..=0xfd`) to the stream.  Any pending
@@ -331,11 +327,11 @@ impl<W: Write> Writer<W> {
                 .as_mut()
                 .expect("build_index implies generate_index");
             let comp_total = if self.padding <= 1 {
-                self.comp_written as i64
+                Some(self.comp_written)
             } else {
-                -1
+                None
             };
-            idx.append_to(&mut index_bytes, self.uncomp_written as i64, comp_total);
+            idx.append_to(&mut index_bytes, Some(self.uncomp_written), comp_total)?;
             if self.append_index {
                 // Count the index toward written bytes so the padding
                 // size calc below sees the right total.
@@ -400,7 +396,7 @@ impl<W: Write> Writer<W> {
     /// 0x01 uncompressed-data chunk, depending on whether compression wins.
     fn emit_block(&mut self, block: &[u8]) -> io::Result<()> {
         if let Some(idx) = self.index.as_mut() {
-            idx.add(self.comp_written as i64, self.uncomp_written as i64)?;
+            idx.add(self.comp_written, self.uncomp_written)?;
         }
         let crc = masked_crc32c(block);
         // Try compression unless explicitly disabled.

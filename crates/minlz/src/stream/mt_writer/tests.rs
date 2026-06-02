@@ -13,14 +13,16 @@
 // limitations under the License.
 
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::num::NonZeroUsize;
 
 use crate::Index;
-use crate::stream::{MtWriter, MtWriterBuilder, ReadSeeker, Reader};
+use crate::stream::{ConcurrentDecode, MtWriter, MtWriterBuilder, ReadSeeker, Reader};
 
 fn round_trip_concurrency(payload: &[u8], concurrency: usize) -> Vec<u8> {
-    let n = NonZeroUsize::new(concurrency).unwrap();
-    let mut w = MtWriterBuilder::new().concurrency(n).build(Vec::new());
+    let n = concurrency;
+    let mut w = MtWriterBuilder::new()
+        .concurrency(n)
+        .build(Vec::new())
+        .unwrap();
     w.write_all(payload).unwrap();
     let buf = w.finish().unwrap();
     let mut decoded = Vec::new();
@@ -54,8 +56,9 @@ fn multi_block_payload_round_trip() {
     let payload: Vec<u8> = (0..16 * 1024).map(|i| (i % 256) as u8).collect();
     let mut w = MtWriterBuilder::new()
         .block_size(4 << 10)
-        .concurrency(NonZeroUsize::new(4).unwrap())
-        .build(Vec::new());
+        .concurrency(4)
+        .build(Vec::new())
+        .unwrap();
     w.write_all(&payload).unwrap();
     let buf = w.finish().unwrap();
     let mut decoded = Vec::new();
@@ -70,8 +73,9 @@ fn encode_buffer_round_trip() {
     let payload: Vec<u8> = (0..40 * 1024).map(|i| (i * 31) as u8).collect();
     let mut w = MtWriterBuilder::new()
         .block_size(4 << 10)
-        .concurrency(NonZeroUsize::new(4).unwrap())
-        .build(Vec::new());
+        .concurrency(4)
+        .build(Vec::new())
+        .unwrap();
     w.encode_buffer(&payload).unwrap();
     let buf = w.finish().unwrap();
     let mut decoded = Vec::new();
@@ -86,8 +90,9 @@ fn uncompressed_mode_round_trip() {
     let payload = vec![b'b'; 5_000];
     let mut w = MtWriterBuilder::new()
         .uncompressed()
-        .concurrency(NonZeroUsize::new(4).unwrap())
-        .build(Vec::new());
+        .concurrency(4)
+        .build(Vec::new())
+        .unwrap();
     w.write_all(&payload).unwrap();
     let buf = w.finish().unwrap();
     let mut decoded = Vec::new();
@@ -123,8 +128,9 @@ fn add_user_chunk_round_trip_via_callback() {
     use std::cell::RefCell;
     use std::rc::Rc;
     let mut w = MtWriterBuilder::new()
-        .concurrency(NonZeroUsize::new(2).unwrap())
-        .build(Vec::<u8>::new());
+        .concurrency(2)
+        .build(Vec::<u8>::new())
+        .unwrap();
     w.write_all(b"prefix").unwrap();
     w.add_user_chunk(0x80, b"meta-a").unwrap();
     w.write_all(b"infix").unwrap();
@@ -147,6 +153,7 @@ fn add_user_chunk_round_trip_via_callback() {
             Ok(())
         })
         .build(Cursor::new(&buf))
+        .unwrap()
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, b"prefixinfixsuffix");
@@ -171,8 +178,9 @@ fn drop_without_finish_does_not_block() {
     let buf: Vec<u8> = Vec::new();
     let mut w = MtWriterBuilder::new()
         .block_size(4 << 10)
-        .concurrency(NonZeroUsize::new(4).unwrap())
-        .build(buf);
+        .concurrency(4)
+        .build(buf)
+        .unwrap();
     w.write_all(&payload).unwrap();
     drop(w);
     // If we got here without hanging, the test passes.
@@ -223,11 +231,15 @@ fn stress_random_cross_concurrency() {
         for &(enc_n, dec_n) in combos {
             let mut w = MtWriterBuilder::new()
                 .block_size(crate::stream::MIN_BLOCK_SIZE)
-                .concurrency(NonZeroUsize::new(enc_n).unwrap())
-                .build(Vec::<u8>::new());
+                .concurrency(enc_n)
+                .build(Vec::<u8>::new())
+                .unwrap();
             w.write_all(&input).unwrap();
             let stream = w.finish().unwrap();
-            let (n, dec) = Reader::new(&stream[..])
+            let ConcurrentDecode {
+                bytes_written: n,
+                writer: dec,
+            } = Reader::new(&stream[..])
                 .decode_concurrent(Vec::<u8>::with_capacity(input.len()), dec_n)
                 .unwrap();
             assert_eq!(
@@ -254,9 +266,10 @@ fn rust_mt_encoded_decodes_in_go() {
         .collect();
     for concurrency in [1usize, 4, 8] {
         let mut w = MtWriterBuilder::new()
-            .concurrency(NonZeroUsize::new(concurrency).unwrap())
+            .concurrency(concurrency)
             .block_size(8 << 10)
-            .build(Vec::<u8>::new());
+            .build(Vec::<u8>::new())
+            .unwrap();
         w.write_all(&payload).unwrap();
         let stream = w.finish().unwrap();
 
@@ -294,9 +307,10 @@ fn append_index_round_trips_via_read_seeker() {
     for concurrency in [1usize, 4, 8] {
         let mut w = MtWriterBuilder::new()
             .block_size(64 << 10)
-            .concurrency(NonZeroUsize::new(concurrency).unwrap())
+            .concurrency(concurrency)
             .append_index()
-            .build(Vec::<u8>::new());
+            .build(Vec::<u8>::new())
+            .unwrap();
         w.write_all(&payload).unwrap();
         let stream = w.finish().unwrap();
 
@@ -311,7 +325,7 @@ fn append_index_round_trips_via_read_seeker() {
         let reader = Reader::new(Cursor::new(stream.clone()));
         let mut rs = ReadSeeker::new(reader, &[])
             .unwrap_or_else(|e| panic!("ReadSeeker::new (n={concurrency}): {e}"));
-        assert_eq!(rs.index().total_uncompressed, payload.len() as i64);
+        assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
 
         for &off in &[0u64, 100_000, (2 << 20), (4 << 20) - 64] {
             if off as usize >= payload.len() {
@@ -341,12 +355,13 @@ fn append_index_round_trips_via_read_seeker() {
 #[cfg_attr(miri, ignore = "256 KiB stream is impractical under miri")]
 fn append_index_off_produces_smaller_stream() {
     let payload = vec![b'z'; 256 << 10];
-    let n = NonZeroUsize::new(4).unwrap();
+    let n = 4;
     let mut indexed = MtWriterBuilder::new()
         .block_size(16 << 10)
         .concurrency(n)
         .append_index()
-        .build(Vec::<u8>::new());
+        .build(Vec::<u8>::new())
+        .unwrap();
     indexed.write_all(&payload).unwrap();
     let with_idx = indexed.finish().unwrap();
 
@@ -354,7 +369,8 @@ fn append_index_off_produces_smaller_stream() {
         .block_size(16 << 10)
         .concurrency(n)
         .generate_index(false)
-        .build(Vec::<u8>::new());
+        .build(Vec::<u8>::new())
+        .unwrap();
     bare.write_all(&payload).unwrap();
     let no_idx = bare.finish().unwrap();
 
@@ -385,9 +401,10 @@ fn mt_padding_aligns_total_size() {
     let payload: Vec<u8> = (0..(2 << 20)).map(|i| (i as u8).wrapping_mul(7)).collect();
     let mut w = MtWriterBuilder::new()
         .block_size(64 << 10)
-        .concurrency(NonZeroUsize::new(4).unwrap())
+        .concurrency(4)
         .padding(1024)
-        .build(Vec::<u8>::new());
+        .build(Vec::<u8>::new())
+        .unwrap();
     w.write_all(&payload).unwrap();
     let buf = w.finish().unwrap();
     assert_eq!(
@@ -412,10 +429,11 @@ fn mt_padding_plus_index_aligns_and_reads() {
     let multiple = 4096u32;
     let mut w = MtWriterBuilder::new()
         .block_size(64 << 10)
-        .concurrency(NonZeroUsize::new(4).unwrap())
+        .concurrency(4)
         .padding(multiple)
         .append_index()
-        .build(Vec::<u8>::new());
+        .build(Vec::<u8>::new())
+        .unwrap();
     w.write_all(&payload).unwrap();
     let buf = w.finish().unwrap();
     assert_eq!(
@@ -428,9 +446,9 @@ fn mt_padding_plus_index_aligns_and_reads() {
     // ReadSeeker still finds the index at the tail.
     let reader = Reader::new(Cursor::new(buf));
     let mut rs = ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
-    assert_eq!(rs.index().total_uncompressed, payload.len() as i64);
-    // total_compressed must be -1 when padding is in play (Go semantics).
-    assert_eq!(rs.index().total_compressed, -1);
+    assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
+    // total_compressed must be unknown (None) when padding is in play.
+    assert_eq!(rs.index().total_compressed(), None);
     // Random read still works.
     let mut buf = [0u8; 512];
     let off = (payload.len() / 2) as u64;
@@ -452,15 +470,17 @@ fn mt_index_offsets_match_st_index_offsets() {
 
     let mut st = crate::stream::WriterBuilder::new()
         .block_size(block_size)
-        .build(Vec::<u8>::new());
+        .build(Vec::<u8>::new())
+        .unwrap();
     st.write_all(&payload).unwrap();
     let st_idx = st.close_index().unwrap();
 
     let mut mt = MtWriterBuilder::new()
         .block_size(block_size)
-        .concurrency(NonZeroUsize::new(4).unwrap())
+        .concurrency(4)
         .append_index()
-        .build(Vec::<u8>::new());
+        .build(Vec::<u8>::new())
+        .unwrap();
     mt.write_all(&payload).unwrap();
     let mt_stream = mt.finish().unwrap();
 
@@ -473,18 +493,19 @@ fn mt_index_offsets_match_st_index_offsets() {
     parsed_st.load(&st_idx).unwrap();
 
     assert_eq!(
-        parsed_st.total_uncompressed, mt_idx.total_uncompressed,
+        parsed_st.total_uncompressed(),
+        mt_idx.total_uncompressed(),
         "total uncompressed mismatch"
     );
     // ST and MT must enumerate the same blocks at the same uncomp
     // offsets (compressed offsets diverge by the stream header byte
     // count differences if any — but ST and MT use the same header).
     assert_eq!(
-        parsed_st.offsets.len(),
-        mt_idx.offsets.len(),
+        parsed_st.offsets().len(),
+        mt_idx.offsets().len(),
         "entry count mismatch"
     );
-    for (a, b) in parsed_st.offsets.iter().zip(mt_idx.offsets.iter()) {
+    for (a, b) in parsed_st.offsets().iter().zip(mt_idx.offsets().iter()) {
         assert_eq!(a.uncompressed, b.uncompressed, "uncomp offset");
         assert_eq!(a.compressed, b.compressed, "comp offset");
     }

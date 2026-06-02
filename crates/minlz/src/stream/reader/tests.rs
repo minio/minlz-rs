@@ -201,7 +201,13 @@ fn ignore_crc_skips_check() {
     body.extend_from_slice(payload);
     push_chunk(&mut s, CHUNK_TYPE_UNCOMPRESSED_DATA, &body);
     push_eof(&mut s, payload.len() as u64);
-    let got = decode_to_end(ReaderBuilder::new().ignore_crc().build(Cursor::new(&s))).unwrap();
+    let got = decode_to_end(
+        ReaderBuilder::new()
+            .ignore_crc()
+            .build(Cursor::new(&s))
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(got, payload);
 }
 
@@ -303,7 +309,8 @@ fn user_chunk_callback_receives_payload() {
             seen3.borrow_mut().push((id, body.to_vec()));
             Ok(())
         })
-        .build(Cursor::new(&s));
+        .build(Cursor::new(&s))
+        .unwrap();
     let got = decode_to_end(reader).unwrap();
     assert_eq!(got, payload);
     let seen = seen.borrow();
@@ -321,7 +328,8 @@ fn user_chunk_callback_error_aborts_decode() {
     push_eof(&mut s, 11);
     let reader = ReaderBuilder::new()
         .user_chunk_callback(0x80, |_, _| Err(io::Error::other("denied")))
-        .build(Cursor::new(&s));
+        .build(Cursor::new(&s))
+        .unwrap();
     let mut buf = Vec::new();
     let err = { reader }.read_to_end(&mut buf).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::Other);
@@ -341,7 +349,8 @@ fn ignore_stream_id_allows_starting_mid_stream() {
     let got = decode_to_end(
         ReaderBuilder::new()
             .ignore_stream_id()
-            .build(Cursor::new(&s)),
+            .build(Cursor::new(&s))
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(got, b"abc");
@@ -358,6 +367,7 @@ fn max_block_size_rejects_oversized() {
     let err = ReaderBuilder::new()
         .max_block_size(crate::stream::MIN_BLOCK_SIZE)
         .build(Cursor::new(&s))
+        .unwrap()
         .read(&mut [0u8; 4])
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -538,7 +548,8 @@ fn build_multi_block_stream(payload: &[u8], block_size: usize) -> Vec<u8> {
     let mut compressed: Vec<u8> = Vec::new();
     let mut w = crate::stream::WriterBuilder::new()
         .block_size(block_size)
-        .build(&mut compressed);
+        .build(&mut compressed)
+        .unwrap();
     w.write_all(payload).unwrap();
     let _ = w.finish().unwrap();
     compressed

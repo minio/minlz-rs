@@ -28,7 +28,6 @@
 
 use std::io::{self, Write};
 use std::marker::PhantomData;
-use std::num::NonZeroUsize;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -36,6 +35,7 @@ use std::thread::JoinHandle;
 use crate::block;
 use crate::index::Index;
 
+use super::Concurrency;
 use super::crc::masked_crc32c;
 use super::error::Error;
 use super::format::{
@@ -102,7 +102,9 @@ pub struct MtWriterBuilder {
     level: block::Level,
     uncompressed: bool,
     padding: u32,
-    concurrency: NonZeroUsize,
+    /// Requested worker count (raw); validated into a [`Concurrency`] at
+    /// [`build`](MtWriterBuilder::build). `0` is rejected there.
+    concurrency: usize,
     generate_index: bool,
     append_index: bool,
 }
@@ -114,8 +116,7 @@ impl Default for MtWriterBuilder {
             level: block::Level::Balanced,
             uncompressed: false,
             padding: 0,
-            concurrency: std::thread::available_parallelism()
-                .unwrap_or(NonZeroUsize::new(1).unwrap()),
+            concurrency: Concurrency::available().get(),
             generate_index: true,
             append_index: false,
         }
@@ -128,15 +129,9 @@ impl MtWriterBuilder {
         Self::default()
     }
 
-    /// Set the maximum uncompressed block size.
-    ///
-    /// # Panics
-    /// Panics if `n` is outside `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]`.
+    /// Set the maximum uncompressed block size.  Must lie in
+    /// `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]`; validated by [`build`](Self::build).
     pub fn block_size(mut self, n: usize) -> Self {
-        assert!(
-            (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&n),
-            "block_size must be in [{MIN_BLOCK_SIZE}, {MAX_BLOCK_SIZE}], got {n}"
-        );
         self.block_size = n;
         self
     }
@@ -155,53 +150,59 @@ impl MtWriterBuilder {
     }
 
     /// Pad total output to a multiple of `n` at finish time.  `0`/`1`
-    /// disables padding.
+    /// disables padding.  `n > MAX_BLOCK_SIZE` is rejected by
+    /// [`build`](Self::build).
     pub fn padding(mut self, n: u32) -> Self {
-        assert!(
-            n as usize <= MAX_BLOCK_SIZE,
-            "padding must be ≤ {MAX_BLOCK_SIZE}, got {n}"
-        );
         self.padding = if n <= 1 { 0 } else { n };
         self
     }
 
-    /// Number of worker threads to spin up.  `1` still uses the MT
-    /// pipeline (with one worker) — for the lowest-overhead
-    /// single-threaded path, use [`super::Writer`] instead.
-    pub fn concurrency(mut self, n: NonZeroUsize) -> Self {
+    /// Number of worker threads to spin up.  `0` is rejected by
+    /// [`build`](Self::build); `1` still uses the MT pipeline (one worker) —
+    /// for the lowest-overhead path use [`super::Writer`].
+    pub fn concurrency(mut self, n: usize) -> Self {
         self.concurrency = n;
         self
     }
 
     /// Toggle in-memory index generation.  Default `true`.  Set to
     /// `false` for streaming output where no index is ever needed.
-    /// Matches [`super::WriterBuilder::generate_index`].
-    ///
-    /// # Panics
-    /// Panics if called with `false` after [`Self::append_index`] was
-    /// requested.
+    /// Matches [`super::WriterBuilder::generate_index`]. If
+    /// [`append_index`](Self::append_index) is also requested, the index is
+    /// generated regardless of this flag.
     pub fn generate_index(mut self, b: bool) -> Self {
-        if !b && self.append_index {
-            panic!("generate_index(false) conflicts with append_index()");
-        }
         self.generate_index = b;
         self
     }
 
     /// Append the index chunk to the end of the stream when finishing.
-    /// Requires index generation (the default).  Matches
+    /// Implies index generation.  Matches
     /// [`super::WriterBuilder::append_index`].
     pub fn append_index(mut self) -> Self {
-        if !self.generate_index {
-            panic!("append_index requires generate_index(true)");
-        }
+        self.generate_index = true;
         self.append_index = true;
         self
     }
 
     /// Consume the builder and wrap `w`.
-    pub fn build<W: Write + Send + 'static>(self, w: W) -> MtWriter<W> {
-        MtWriter::with_builder(w, self)
+    ///
+    /// # Errors
+    /// [`Error::Config`] if `block_size` is outside `[MIN_BLOCK_SIZE,
+    /// MAX_BLOCK_SIZE]`, `padding` exceeds `MAX_BLOCK_SIZE`, or `concurrency`
+    /// was set to `0`.
+    pub fn build<W: Write + Send + 'static>(self, w: W) -> Result<MtWriter<W>, Error> {
+        if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&self.block_size) {
+            return Err(Error::Config(
+                "block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]",
+            ));
+        }
+        if self.padding as usize > MAX_BLOCK_SIZE {
+            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE"));
+        }
+        let concurrency = Concurrency::new(self.concurrency)
+            .ok_or(Error::Config("concurrency must be ≥ 1"))?
+            .get();
+        Ok(MtWriter::with_builder(w, self, concurrency))
     }
 }
 
@@ -248,11 +249,12 @@ pub struct MtWriter<W: Write + Send + 'static> {
 impl<W: Write + Send + 'static> MtWriter<W> {
     /// Wrap `w` with default options + `available_parallelism()` workers.
     pub fn new(w: W) -> Self {
-        MtWriterBuilder::new().build(w)
+        MtWriterBuilder::new()
+            .build(w)
+            .expect("default MtWriterBuilder options are always valid")
     }
 
-    fn with_builder(w: W, b: MtWriterBuilder) -> Self {
-        let concurrency = b.concurrency.get();
+    fn with_builder(w: W, b: MtWriterBuilder, concurrency: usize) -> Self {
         // One bounded submit channel per worker — capacity 1 means
         // backpressure kicks in immediately once a worker is busy, but
         // the dispatcher can fan out to another worker without blocking.
@@ -281,17 +283,14 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         let err_writer = err.clone();
         let input_pool_w = input_pool.clone();
         let obuf_pool_w = obuf_pool.clone();
-        let mut writer_index = if b.generate_index {
+        let writer_index = if b.generate_index || b.append_index {
             let mut idx = Index::default();
             idx.reset(b.block_size);
+            // Totals stay unknown (None) until `append_to` records them at close.
             Some(idx)
         } else {
             None
         };
-        if let Some(idx) = writer_index.as_mut() {
-            idx.total_uncompressed = 0;
-            idx.total_compressed = 0;
-        }
         let block_size_w = b.block_size;
         let append_index_w = b.append_index;
         let padding_w = b.padding;
@@ -406,6 +405,9 @@ impl<W: Write + Send + 'static> MtWriter<W> {
     }
 
     fn check_err(&self) -> io::Result<()> {
+        // Lock poison only panics if a worker thread already panicked while
+        // holding this mutex — it propagates that panic rather than masking
+        // it. Same rationale applies to every `lock().unwrap()` below.
         if let Some(e) = self.err.lock().unwrap().as_ref() {
             return Err(clone_io_err(e));
         }
@@ -422,6 +424,9 @@ impl<W: Write + Send + 'static> MtWriter<W> {
     }
 
     fn submit_raw(&mut self, bytes: Vec<u8>) -> io::Result<()> {
+        // `order_tx` is `Some` for the writer's entire usable life; it is
+        // only `.take()`n in `finish()` (which consumes `self`) and `Drop`
+        // (terminal), so no submit path can observe `None` here.
         match self.order_tx.as_ref().unwrap().send(OrderItem::Raw(bytes)) {
             Ok(()) => Ok(()),
             Err(_) => Err(self.collect_pipeline_error()),
@@ -437,6 +442,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         input.extend_from_slice(block);
         let (result_tx, result_rx) = mpsc::sync_channel::<WorkerOutput>(1);
         // Push order slot first so the writer thread can drain in order.
+        // `order_tx` is `Some` until `finish()`/`Drop` (see `submit_raw`).
         if self
             .order_tx
             .as_ref()
@@ -712,8 +718,8 @@ fn writer_loop<W: Write + Send + 'static>(
                         // for this block *before* incrementing — these
                         // are offsets at the start of the chunk.
                         if let Some(idx) = index.as_mut() {
-                            idx.add(comp_written as i64, uncomp_written as i64)
-                                .map_err(|e| record(&err_slot, e))?;
+                            idx.add(comp_written, uncomp_written)
+                                .map_err(|e| record(&err_slot, e.into()))?;
                         }
                         let body_len = body.len();
                         w.write_all(&hdr).map_err(|e| record(&err_slot, e))?;
@@ -751,11 +757,12 @@ fn writer_loop<W: Write + Send + 'static>(
             // `total_compressed` is bytes-before-index; if padding will
             // be added, store -1 (unknown) so seekers don't rely on it.
             let comp_total = if padding <= 1 {
-                comp_written as i64
+                Some(comp_written)
             } else {
-                -1
+                None
             };
-            idx.append_to(&mut idx_bytes, uncomp_written as i64, comp_total);
+            idx.append_to(&mut idx_bytes, Some(uncomp_written), comp_total)
+                .map_err(|e| record(&err_slot, e.into()))?;
             if append_index {
                 comp_written += idx_bytes.len() as u64;
             } else {
@@ -820,6 +827,7 @@ fn emit_mt_padding<W: Write>(
 
 fn record(slot: &Arc<Mutex<Option<io::Error>>>, e: io::Error) -> io::Error {
     let cloned = clone_io_err(&e);
+    // Lock poison only propagates a prior worker panic (see `check_err`).
     let mut guard = slot.lock().unwrap();
     if guard.is_none() {
         *guard = Some(e);

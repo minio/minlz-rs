@@ -87,7 +87,7 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }
     let start = Instant::now();
-    let mut w = builder.build(&mut counted_dst);
+    let mut w = builder.build(&mut counted_dst)?;
     io::copy(&mut counted_src, &mut w)?;
     let _ = w.finish()?;
     counted_dst.flush()?;
@@ -116,7 +116,7 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
     }
     builder = builder
         .block_size(opts.block_size.unwrap_or(CLI_DEFAULT_BLOCK_SIZE))
-        .concurrency(std::num::NonZeroUsize::new(threads).unwrap());
+        .concurrency(threads);
     if let Some(pad) = opts.padding {
         builder = builder.padding(pad);
     }
@@ -130,7 +130,7 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }
     let start = Instant::now();
-    let mut w = builder.build(dst);
+    let mut w = builder.build(dst)?;
     // We can't wrap the underlying writer in a counter (it's owned by
     // the MT writer thread); track input bytes via the reader-side.
     let mut counted_src = CountingReader::new(&mut src);

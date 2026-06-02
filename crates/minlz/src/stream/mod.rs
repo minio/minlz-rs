@@ -35,13 +35,42 @@ mod reader;
 mod seek;
 mod writer;
 
+use std::num::NonZeroUsize;
+
+/// Worker-thread count for the parallel codec paths
+/// ([`MtWriterBuilder::concurrency`], [`Reader::decode_concurrent`]).
+///
+/// The "at least one worker" invariant is encoded in the type, so a count can
+/// never be zero. Construct with [`Concurrency::new`], or
+/// [`available`](Concurrency::available) for the host CPU count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Concurrency(NonZeroUsize);
+
+impl Concurrency {
+    /// A count of `n` workers, or `None` if `n == 0`.
+    pub fn new(n: usize) -> Option<Self> {
+        NonZeroUsize::new(n).map(Self)
+    }
+
+    /// The host's available parallelism, or one worker if it can't be queried.
+    pub fn available() -> Self {
+        Self(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+    }
+
+    /// The worker count as a `usize` (always ≥ 1).
+    pub fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
 pub use error::{Error, Result};
 pub use format::{
     CHUNK_TYPE_PADDING, CHUNK_TYPE_STREAM_IDENTIFIER, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE,
     MAX_USER_CHUNK_SIZE, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_USER_SKIPPABLE_CHUNK, MIN_BLOCK_SIZE,
     MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK,
 };
+pub use mt_reader::ConcurrentDecode;
 pub use mt_writer::{MtWriter, MtWriterBuilder};
 pub use reader::{Reader, ReaderBuilder, UserChunkCb};
 pub use seek::ReadSeeker;
-pub use writer::{Writer, WriterBuilder};
+pub use writer::{Writer, WriterBuilder, Written};

@@ -48,7 +48,8 @@ fn main() {
     let mut w = WriterBuilder::new()
         .block_size(64 << 10)
         .generate_index(false)
-        .build(&mut compressed);
+        .build(&mut compressed)
+        .unwrap();
     w.write_all(&payload).expect("write");
     let _ = w.finish().expect("finish");
     println!(
@@ -97,14 +98,16 @@ fn main() {
     idx.load(&restored).expect("Index::load");
 
     let want_off: u64 = 1_000_000;
-    let (c_off, u_off) = idx.find(want_off as i64).expect("find");
+    let entry = idx.find(want_off);
+    let (c_off, u_off) = (entry.compressed, entry.uncompressed);
     println!("Index::find({want_off}) -> comp_off={c_off} uncomp_off={u_off}");
 
     // Simulate "position the source at c_off" by slicing the bytes.
     let mut reader = ReaderBuilder::new()
         .ignore_stream_id()
-        .build(Cursor::new(&compressed[c_off as usize..]));
-    reader.skip(want_off - u_off as u64).expect("skip");
+        .build(Cursor::new(&compressed[c_off as usize..]))
+        .unwrap();
+    reader.skip(want_off - u_off).expect("skip");
 
     // Read a few bytes from the requested position.
     let mut got = [0u8; 64];

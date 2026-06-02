@@ -13,17 +13,16 @@
 // limitations under the License.
 
 use std::io::{Cursor, Write};
-use std::num::NonZeroUsize;
 
-use crate::stream::{MtWriterBuilder, Reader};
+use crate::stream::{ConcurrentDecode, MtWriterBuilder, Reader};
 
 fn encode_mt(payload: &[u8], concurrency: usize, block_size: Option<usize>) -> Vec<u8> {
-    let n = NonZeroUsize::new(concurrency).unwrap();
+    let n = concurrency;
     let mut b = MtWriterBuilder::new().concurrency(n);
     if let Some(bs) = block_size {
         b = b.block_size(bs);
     }
-    let mut w = b.build(Vec::new());
+    let mut w = b.build(Vec::new()).unwrap();
     w.write_all(payload).unwrap();
     w.finish().unwrap()
 }
@@ -32,7 +31,10 @@ fn encode_mt(payload: &[u8], concurrency: usize, block_size: Option<usize>) -> V
 fn decode_concurrent_empty() {
     let stream = encode_mt(b"", 4, None);
     let mut reader = Reader::new(Cursor::new(stream));
-    let (n, sink) = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
+    let ConcurrentDecode {
+        bytes_written: n,
+        writer: sink,
+    } = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
     assert_eq!(n, 0);
     assert!(sink.is_empty());
 }
@@ -42,7 +44,10 @@ fn decode_concurrent_small() {
     let payload = b"Hello, MinLZ!".to_vec();
     let stream = encode_mt(&payload, 4, None);
     let mut reader = Reader::new(Cursor::new(stream));
-    let (n, sink) = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
+    let ConcurrentDecode {
+        bytes_written: n,
+        writer: sink,
+    } = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(sink, payload);
 }
@@ -52,7 +57,10 @@ fn decode_concurrent_multi_block() {
     let payload: Vec<u8> = (0..32 * 1024).map(|i| (i * 17) as u8).collect();
     let stream = encode_mt(&payload, 4, Some(4 << 10));
     let mut reader = Reader::new(Cursor::new(stream));
-    let (n, sink) = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
+    let ConcurrentDecode {
+        bytes_written: n,
+        writer: sink,
+    } = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(sink, payload);
 }
@@ -65,12 +73,16 @@ fn decode_concurrent_matches_st_for_st_encoded() {
     {
         let mut w = crate::stream::WriterBuilder::new()
             .block_size(4 << 10)
-            .build(&mut buf);
+            .build(&mut buf)
+            .unwrap();
         w.write_all(&payload).unwrap();
         let _ = w.finish().unwrap();
     }
     let mut reader = Reader::new(Cursor::new(&buf));
-    let (n, sink) = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
+    let ConcurrentDecode {
+        bytes_written: n,
+        writer: sink,
+    } = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(sink, payload);
 }
@@ -82,7 +94,10 @@ fn cross_concurrency_round_trips() {
         for &dec_n in &[1, 2, 4, 8] {
             let stream = encode_mt(&payload, enc_n, Some(4 << 10));
             let mut reader = Reader::new(Cursor::new(&stream));
-            let (n, sink) = reader.decode_concurrent(Vec::<u8>::new(), dec_n).unwrap();
+            let ConcurrentDecode {
+                bytes_written: n,
+                writer: sink,
+            } = reader.decode_concurrent(Vec::<u8>::new(), dec_n).unwrap();
             assert_eq!(n as usize, payload.len(), "enc={enc_n} dec={dec_n}");
             assert_eq!(sink, payload, "enc={enc_n} dec={dec_n}");
         }
@@ -141,7 +156,10 @@ fn go_mt_encoded_decodes_in_rust_mt() {
         let stream = out.stdout;
 
         let mut reader = Reader::new(Cursor::new(&stream));
-        let (n, dec) = reader
+        let ConcurrentDecode {
+            bytes_written: n,
+            writer: dec,
+        } = reader
             .decode_concurrent(Vec::<u8>::with_capacity(payload.len()), 4)
             .expect("rust decode");
         assert_eq!(n as usize, payload.len(), "cpu={cpu}");

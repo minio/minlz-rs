@@ -43,6 +43,9 @@ impl BufferPool {
     /// Pop a recycled buffer or allocate a fresh one of at least
     /// `cap_hint` bytes capacity.  Returns an empty `Vec`.
     pub(super) fn acquire(&self) -> Vec<u8> {
+        // `lock().unwrap()` only panics if another thread panicked while
+        // holding this lock; that propagates a pre-existing worker panic
+        // rather than introducing a new failure mode.
         if let Some(buf) = self.inner.lock().unwrap().pop() {
             return buf;
         }
@@ -53,6 +56,7 @@ impl BufferPool {
     /// full, the buffer is dropped.
     pub(super) fn release(&self, mut buf: Vec<u8>) {
         buf.clear();
+        // Lock poison only propagates a prior worker panic (see `acquire`).
         let mut guard = self.inner.lock().unwrap();
         if guard.len() < self.max_items {
             guard.push(buf);

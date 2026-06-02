@@ -38,25 +38,26 @@ fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
         return;
     }
-    let est = ((data[0] as i64) << 10).max(1 << 12);
+    let est = ((data[0] as u64) << 10).max(1 << 12);
     let mut idx = Index::default();
     idx.reset(est as usize);
     let n = (data[1] as usize) % 64;
-    let mut comp = 0i64;
-    let mut uncomp = 0i64;
+    let mut comp = 0u64;
+    let mut uncomp = 0u64;
     for i in 0..n {
-        comp += (data.get(2 + i).copied().unwrap_or(1) as i64) * 100 + 1;
-        uncomp += est + (data.get(2 + i).copied().unwrap_or(1) as i64);
+        comp += (data.get(2 + i).copied().unwrap_or(1) as u64) * 100 + 1;
+        uncomp += est + (data.get(2 + i).copied().unwrap_or(1) as u64);
         let _ = idx.add(comp, uncomp);
     }
     let total_u = uncomp;
     let total_c = comp;
     let mut buf = Vec::new();
-    idx.append_to(&mut buf, total_u, total_c);
+    idx.append_to(&mut buf, Some(total_u), Some(total_c))
+        .expect("synthetic totals fit i64");
 
     let mut idx2 = Index::default();
     idx2.load(&buf).expect("round-trip load");
-    assert_eq!(idx2.total_uncompressed, total_u);
-    assert_eq!(idx2.total_compressed, total_c);
-    assert_eq!(idx2.offsets, idx.offsets);
+    assert_eq!(idx2.total_uncompressed(), Some(total_u));
+    assert_eq!(idx2.total_compressed(), Some(total_c));
+    assert_eq!(idx2.offsets(), idx.offsets());
 });

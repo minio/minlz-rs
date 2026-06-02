@@ -19,7 +19,7 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use minlz::stream::{ReadSeeker, Reader};
+use minlz::stream::{ConcurrentDecode, ReadSeeker, Reader};
 
 use crate::args::Options;
 use crate::io_util::{
@@ -116,13 +116,9 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
     }
 
     // Resolve the source seek + how many bytes to emit.
-    let total = rs.index().total_uncompressed;
-    if total < 0 {
-        return Err(io::Error::other(
-            "--offset / --tail require an index with known total size",
-        ));
-    }
-    let total = total as u64;
+    let total = rs.index().total_uncompressed().ok_or_else(|| {
+        io::Error::other("--offset / --tail require an index with known total size")
+    })?;
     let (start, limit) = match (opts.offset, opts.tail) {
         (Some(off), None) => (off, total.saturating_sub(off)),
         (None, Some(t)) => {
@@ -216,7 +212,10 @@ fn decompress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Res
     }
     let start = Instant::now();
     let mut reader = Reader::new(&mut counted_src);
-    let (decoded_bytes, _w) = reader.decode_concurrent(dst, threads)?;
+    let ConcurrentDecode {
+        bytes_written: decoded_bytes,
+        writer: _w,
+    } = reader.decode_concurrent(dst, threads)?;
     let elapsed = start.elapsed();
     print_decompress_summary(opts, counted_src.bytes, decoded_bytes, elapsed);
     if opts.remove && input != Path::new("-") {

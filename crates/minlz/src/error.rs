@@ -20,10 +20,11 @@ use core::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// Input bytes are not a valid MinLZ block (or are truncated/malformed).
-    ///
-    /// Equivalent to Go's `ErrCorrupt`.
-    Corrupt,
+    /// Input bytes are not a valid MinLZ block (truncated, malformed, or an
+    /// out-of-bounds offset/length). The payload is a short, stable reason
+    /// for diagnostics — do not match on its exact text. Equivalent to Go's
+    /// `ErrCorrupt`.
+    Corrupt(&'static str),
     /// Declared or input length exceeds [`crate::MAX_BLOCK_SIZE`].
     ///
     /// Equivalent to Go's `ErrTooLarge`.
@@ -36,13 +37,20 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let msg = match self {
-            Error::Corrupt => "minlz: corrupt input",
-            Error::TooLarge => "minlz: decoded block is too large",
-            Error::InvalidLevel => "minlz: invalid compression level",
-        };
-        f.write_str(msg)
+        match self {
+            Error::Corrupt(reason) => write!(f, "minlz: corrupt input: {reason}"),
+            Error::TooLarge => f.write_str("minlz: decoded block is too large"),
+            Error::InvalidLevel => f.write_str("minlz: invalid compression level"),
+        }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<Error> for std::io::Error {
+    /// Wrap a block/index error as an [`std::io::Error`] (kind `InvalidData`)
+    /// for the I/O-returning stream and index entry points.
+    fn from(e: Error) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    }
+}
