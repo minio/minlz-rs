@@ -15,9 +15,10 @@
 //! The parser of LevelFastestSIMD, a port of `(*simdEncoder).encodeBlockGo` and
 //! `encodeBlockGo64K` of Go's `encode_l1.go`.
 
-use super::encode::{Encoder, load32, load64};
+use super::encode::{Encoder, match_back};
 use crate::block::format::INPUT_MARGIN;
 use crate::block::hash::hash6;
+use crate::block::load_store::{load32, load64};
 use crate::block::table_pool::{self, U16_14, U32_15};
 
 /// A hash table entry: a position in the block.
@@ -66,7 +67,11 @@ impl<'a> Encoder<'a> {
     }
 
     /// The body of encodeBlockGo and encodeBlockGo64K, which differ only in their tables.
-    #[inline(always)]
+    ///
+    /// Its loads are unchecked, as Go's: src has more than MIN_SAVING bytes, s and the entries
+    /// of the zeroed table stay at most s_limit, and candidates and repeat sources are below s.
+    // Not inlined, see parse_fast.
+    #[inline(never)]
     fn parse_block<E: Entry, const N: usize>(&mut self, src: &'a [u8], table: &mut [E; N]) {
         const SKIP_LOG: usize = 6;
         const CHECK_REP: usize = 1;
@@ -74,7 +79,8 @@ impl<'a> Encoder<'a> {
         let s_limit = src.len() - INPUT_MARGIN;
         let mut next_emit = 0;
         let mut s = 1;
-        let mut cv = load64(src, s);
+        // SAFETY: src.len() > MIN_SAVING.
+        let mut cv = unsafe { load64(src, s) };
         let mut repeat = 1;
         'outer: loop {
             let mut candidate;
@@ -91,17 +97,19 @@ impl<'a> Encoder<'a> {
                 table[hash1] = E::new(s + 1);
                 let hash2 = hash6(cv >> 16, table_bits) as usize;
 
-                if (cv >> (CHECK_REP * 8)) as u32 == load32(src, s - repeat + CHECK_REP) {
+                // SAFETY: s + 4 <= next_s <= s_limit, and the repeat offset is at most the output,
+                // so at most s.
+                if (cv >> (CHECK_REP * 8)) as u32 == unsafe { load32(src, s - repeat + CHECK_REP) }
+                {
                     let mut base = s + CHECK_REP;
-                    let mut i = base - repeat;
-                    while base > next_emit && i > 0 && src[i - 1] == src[base - 1] {
-                        i -= 1;
-                        base -= 1;
-                    }
+                    let i = base - repeat;
+                    // SAFETY: i < base <= s + 1.
+                    base -= unsafe { match_back(src, base, i, i.min(base - next_emit)) };
                     let mut candidate = s - repeat + 4 + CHECK_REP;
                     s += 4 + CHECK_REP;
                     while s <= s_limit {
-                        let diff = load64(src, s) ^ load64(src, candidate);
+                        // SAFETY: candidate < s <= s_limit.
+                        let diff = unsafe { load64(src, s) ^ load64(src, candidate) };
                         if diff != 0 {
                             s += diff.trailing_zeros() as usize >> 3;
                             break;
@@ -123,39 +131,44 @@ impl<'a> Encoder<'a> {
                     if s >= s_limit {
                         break 'outer;
                     }
-                    cv = load64(src, s);
+                    // SAFETY: s < s_limit.
+                    cv = unsafe { load64(src, s) };
                     continue;
                 }
 
-                if cv as u32 == load32(src, candidate) {
+                // SAFETY: the table holds 0 or positions below s_limit.
+                if cv as u32 == unsafe { load32(src, candidate) } {
                     break;
                 }
                 candidate = table[hash2].get();
-                if (cv >> 8) as u32 == load32(src, candidate2) {
+                // SAFETY: as candidate.
+                if (cv >> 8) as u32 == unsafe { load32(src, candidate2) } {
                     table[hash2] = E::new(s + 2);
                     candidate = candidate2;
                     s += 1;
                     break;
                 }
                 table[hash2] = E::new(s + 2);
-                if (cv >> 16) as u32 == load32(src, candidate) {
+                // SAFETY: as above.
+                if (cv >> 16) as u32 == unsafe { load32(src, candidate) } {
                     s += 2;
                     break;
                 }
-                cv = load64(src, next_s);
+                // SAFETY: next_s <= s_limit.
+                cv = unsafe { load64(src, next_s) };
                 s = next_s;
             }
 
-            while candidate > 0 && s > next_emit && src[candidate - 1] == src[s - 1] {
-                candidate -= 1;
-                s -= 1;
-            }
+            // SAFETY: candidate < s.
+            let n = unsafe { match_back(src, s, candidate, candidate.min(s - next_emit)) };
+            (candidate, s) = (candidate - n, s - n);
             let mut base = s;
             repeat = base - candidate;
             s += 4;
             candidate += 4;
             while s + 8 <= src.len() {
-                let diff = load64(src, s) ^ load64(src, candidate);
+                // SAFETY: candidate < s.
+                let diff = unsafe { load64(src, s) ^ load64(src, candidate) };
                 if diff != 0 {
                     s += diff.trailing_zeros() as usize >> 3;
                     break;
@@ -181,15 +194,16 @@ impl<'a> Encoder<'a> {
                 if s >= s_limit {
                     break 'outer;
                 }
-                let mut x = load64(src, s - 2);
+                // SAFETY: 4 < s < s_limit after a match; the table as above.
+                let mut x = unsafe { load64(src, s - 2) };
                 let m2_hash = hash6(x, table_bits) as usize;
                 x >>= 16;
                 let curr_hash = hash6(x, table_bits) as usize;
                 candidate = table[curr_hash].get();
                 table[m2_hash] = E::new(s - 2);
                 table[curr_hash] = E::new(s);
-                if x as u32 != load32(src, candidate) {
-                    cv = load64(src, s + 1);
+                if x as u32 != unsafe { load32(src, candidate) } {
+                    cv = unsafe { load64(src, s + 1) };
                     s += 1;
                     break;
                 }
@@ -198,7 +212,8 @@ impl<'a> Encoder<'a> {
                 s += 4;
                 candidate += 4;
                 while s + 8 <= src.len() {
-                    let diff = load64(src, s) ^ load64(src, candidate);
+                    // SAFETY: candidate < s.
+                    let diff = unsafe { load64(src, s) ^ load64(src, candidate) };
                     if diff != 0 {
                         s += diff.trailing_zeros() as usize >> 3;
                         break;

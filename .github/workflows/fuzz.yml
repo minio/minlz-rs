@@ -5,10 +5,11 @@ name: Fuzz
 # first restores the prior run's corpus from cache; if that's empty
 # (first-ever run, eviction, or new target), it downloads the seed
 # tarball at https://download.klauspost.com/rust-fuzz-corpus.tar.zst
-# and extracts just the matching target subfolder.  Subsequent runs
-# accumulate beyond the seed via the cache.  Long-form fuzzing (≥ 20
-# min/target) happens locally per `crates/minlz/fuzz/RUNBOOK.md`
-# before tagged releases.
+# and extracts the matching target subfolder, if the tarball has one.
+# Every job also adds the seeds `write_fuzz_seeds` derives from the
+# repo (SIMD fixtures, pivco cases).  Subsequent runs accumulate beyond
+# the seed via the cache.  Long-form fuzzing (≥ 20 min/target) happens
+# locally per `crates/minlz/fuzz/RUNBOOK.md` before tagged releases.
 on:
   push:
     branches: [main]
@@ -28,16 +29,39 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Single fetch of the upstream seed tarball, shared with every
-  # matrix job via a workflow artifact.  Avoids N parallel downloads
-  # of the same URL.  Soft-failing: matrix jobs check `has_seed` and
-  # fall back to empty corpus if the upstream is unreachable.
+  # Single fetch of the upstream seed tarball, and the generated seeds,
+  # shared with every matrix job via workflow artifacts.  Avoids N
+  # parallel downloads of the same URL.  The download is soft-failing:
+  # matrix jobs check `has_seed` and fall back to the generated seeds
+  # alone if the upstream is unreachable.
   seed:
     name: Fetch seed corpus
     runs-on: ubuntu-latest
     outputs:
       has_seed: ${{ steps.dl.outputs.has_seed }}
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Seeds of every target from the repo's own data. Go's seed zips
+      # (MINLZ_TESTDATA) are left to local runs, see RUNBOOK.md §1.
+      - name: Generate seeds
+        run: |
+          set -eu
+          cargo test -p minlz --release --lib write_fuzz_seeds -- --ignored
+          tar --zstd -cf fuzz-seeds-generated.tar.zst -C crates/minlz/fuzz corpus
+
+      - name: Upload generated seeds
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-seeds-generated
+          path: fuzz-seeds-generated.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Download seed tarball
         id: dl
         run: |
@@ -72,6 +96,10 @@ jobs:
           - stream_decode_arbitrary
           - stream_roundtrip
           - index_load
+          - pivco_decode
+          - pivco_roundtrip
+          - pivco_table
+          - simd_decode
     steps:
       - uses: actions/checkout@v4
 
@@ -107,20 +135,29 @@ jobs:
         with:
           name: fuzz-seed-tarball
 
+      - name: Download generated seeds
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-seeds-generated
+
       - name: Seed corpus from tarball if empty
         run: |
           set -eu
           mkdir -p crates/minlz/fuzz/corpus/${{ matrix.target }}
           if [ -n "$(ls -A crates/minlz/fuzz/corpus/${{ matrix.target }})" ]; then
               echo "Corpus restored from cache for ${{ matrix.target }}"
-          elif [ -f rust-fuzz-corpus.tar.zst ]; then
-              tar --zstd -xf rust-fuzz-corpus.tar.zst \
+          elif [ -f rust-fuzz-corpus.tar.zst ] && tar --zstd -xf rust-fuzz-corpus.tar.zst \
                   --no-same-owner --no-same-permissions \
-                  -C crates/minlz/fuzz corpus/${{ matrix.target }}
+                  -C crates/minlz/fuzz corpus/${{ matrix.target }} 2>/dev/null; then
               echo "Seeded from upstream tarball"
           else
-              echo "::warning::no seed tarball and no cache; running with empty corpus"
+              echo "::warning::no tarball seeds and no cache for ${{ matrix.target }}"
           fi
+          # Named by content hash, so this only adds seeds.
+          tar --zstd -xf fuzz-seeds-generated.tar.zst \
+              --no-same-owner --no-same-permissions \
+              -C crates/minlz/fuzz corpus/${{ matrix.target }} 2>/dev/null \
+              || echo "no generated seeds for ${{ matrix.target }}"
           echo "$(find crates/minlz/fuzz/corpus/${{ matrix.target }} -type f | wc -l) seeds"
 
       - name: Fuzz

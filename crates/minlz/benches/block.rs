@@ -344,24 +344,54 @@ fn bench_snappy_decode(c: &mut Criterion) {
     g.finish();
 }
 
-/// SIMD block decode at Go's levels 4-7, mirroring the `level-N` cases of Go's `benchDecode`.
-/// Rust has no SIMD encoder yet, so the blocks are the Go encoder's fixtures in
-/// `tests/fixtures/simd` (`_helpers/simdgo`); the largest inputs are 400 KiB to 1.1 MB.
+/// The SIMD levels: Go's 4-7 and the delta-literal variants 260-262.
+const SIMD_LEVELS: [Level; 7] = [
+    Level::SuperFastSimd,
+    Level::FastestSimd,
+    Level::BalancedSimd,
+    Level::SmallestSimd,
+    Level::SuperFastSimdDelta,
+    Level::FastestSimdDelta,
+    Level::BalancedSimdDelta,
+];
+
+/// SIMD block decode of 1-4 MB blocks at every SIMD level, from the Rust encoder (byte-identical
+/// to Go's): Twain as [`expand`]ed for Go's `BenchmarkTwainDecode1eN`, and the files of the Snappy
+/// corpus concatenated, without its truncated cases (text, HTML, URLs, protobuf, PDF, JPEG).
 fn bench_simd_decode(c: &mut Criterion) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simd");
+    let twain = load_twain();
+    let mut corpus = Vec::new();
+    for f in [
+        "html",
+        "urls.10K",
+        "fireworks.jpeg",
+        "paper-100k.pdf",
+        "html_x_4",
+        "alice29.txt",
+        "asyoulik.txt",
+        "lcet10.txt",
+        "plrabn12.txt",
+        "geo.protodata",
+        "kppkn.gtb",
+    ] {
+        corpus.extend_from_slice(&load_bench_file(f));
+    }
+    let inputs = [
+        ("twain-1e6", expand(&twain, 1_000_000)),
+        ("twain-4e6", expand(&twain, 4_000_000)),
+        ("corpus", corpus),
+    ];
     let mut g = c.benchmark_group("simd_decode");
     g.measurement_time(Duration::from_secs(4));
     g.warm_up_time(Duration::from_secs(1));
-    for name in ["sawyer-409600", "sparse-524288", "mixed-1126400"] {
-        for level in 4..=7 {
-            let path = dir.join(format!("{name}.L{level}.mzb"));
-            let enc =
-                std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            let n = minlz::decoded_len(&enc).expect("SIMD fixture");
-            g.throughput(Throughput::Bytes(n as u64));
-            let id = BenchmarkId::new(name, format!("level-{level}"));
+    for (name, src) in &inputs {
+        g.throughput(Throughput::Bytes(src.len() as u64));
+        for level in SIMD_LEVELS {
+            let mut enc = Vec::new();
+            encode(&mut enc, src, level).expect("encode for bench prep");
+            let id = BenchmarkId::new(*name, level_label(level));
             g.bench_with_input(id, &enc, |b, enc| {
-                let mut buf = Vec::with_capacity(n);
+                let mut buf = Vec::with_capacity(src.len());
                 b.iter(|| {
                     decode(&mut buf, enc).expect("decode");
                 });

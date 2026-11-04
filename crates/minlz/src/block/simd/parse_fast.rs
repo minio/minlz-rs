@@ -15,10 +15,11 @@
 //! The parser of LevelSuperFastSIMD, a port of `(*simdEncoder).encodeFastBlockGo` and
 //! `encodeFastBlockGo64K` of Go's `encode_l0.go`.
 
-use super::encode::{Encoder, load32, load64};
+use super::encode::{Encoder, match_back};
 use super::parse_block::Entry;
 use crate::block::format::INPUT_MARGIN;
 use crate::block::hash::hash8;
+use crate::block::load_store::{load32, load64};
 use crate::block::table_pool::{self, U16_13, U32_13};
 
 impl<'a> Encoder<'a> {
@@ -39,7 +40,12 @@ impl<'a> Encoder<'a> {
     }
 
     /// The body of encodeFastBlockGo and encodeFastBlockGo64K, which differ only in their tables.
-    #[inline(always)]
+    ///
+    /// Its loads are unchecked, as Go's: src has more than MIN_SAVING bytes, s and the entries
+    /// of the zeroed table stay at most s_limit, and candidates and repeat sources are below s.
+    // Not inlined into the callers, whose unwinding drops the table: a function with a landing
+    // pad keeps a frame pointer on Windows, a register the loop needs.
+    #[inline(never)]
     fn parse_fast<E: Entry, const N: usize>(&mut self, src: &'a [u8], table: &mut [E; N]) {
         const SKIP_LOG: usize = 5;
         const CHECK_REP: usize = 1;
@@ -47,7 +53,8 @@ impl<'a> Encoder<'a> {
         let s_limit = src.len() - INPUT_MARGIN;
         let mut next_emit = 0;
         let mut s = 1;
-        let mut cv = load64(src, s);
+        // SAFETY: src.len() > MIN_SAVING.
+        let mut cv = unsafe { load64(src, s) };
         let mut repeat = 1;
         'outer: loop {
             let mut candidate;
@@ -57,26 +64,28 @@ impl<'a> Encoder<'a> {
                     break 'outer;
                 }
                 let hash0 = hash8(cv, table_bits) as usize;
-                let cv1 = load64(src, s + 1);
+                // SAFETY: s + 5 <= next_s <= s_limit.
+                let cv1 = unsafe { load64(src, s + 1) };
                 let hash1 = hash8(cv1, table_bits) as usize;
                 candidate = table[hash0].get();
                 let candidate2 = table[hash1].get();
                 table[hash0] = E::new(s);
                 table[hash1] = E::new(s + 1);
-                let cv2 = load64(src, s + 2);
+                // SAFETY: as cv1.
+                let cv2 = unsafe { load64(src, s + 2) };
                 let hash2 = hash8(cv2, table_bits) as usize;
 
-                if cv1 as u32 == load32(src, s - repeat + CHECK_REP) {
+                // SAFETY: as cv1; the repeat offset is at most the output, so at most s.
+                if cv1 as u32 == unsafe { load32(src, s - repeat + CHECK_REP) } {
                     let mut base = s + CHECK_REP;
-                    let mut i = base - repeat;
-                    while base > next_emit && i > 0 && src[i - 1] == src[base - 1] {
-                        i -= 1;
-                        base -= 1;
-                    }
+                    let i = base - repeat;
+                    // SAFETY: i < base <= s + 1.
+                    base -= unsafe { match_back(src, base, i, i.min(base - next_emit)) };
                     let mut candidate = s - repeat + 4 + CHECK_REP;
                     s += 4 + CHECK_REP;
                     while s <= s_limit {
-                        let diff = load64(src, s) ^ load64(src, candidate);
+                        // SAFETY: candidate < s <= s_limit.
+                        let diff = unsafe { load64(src, s) ^ load64(src, candidate) };
                         if diff != 0 {
                             s += diff.trailing_zeros() as usize >> 3;
                             break;
@@ -98,26 +107,31 @@ impl<'a> Encoder<'a> {
                     if s >= s_limit {
                         break 'outer;
                     }
-                    cv = load64(src, s);
+                    // SAFETY: s < s_limit.
+                    cv = unsafe { load64(src, s) };
                     continue;
                 }
 
-                if cv == load64(src, candidate) {
+                // SAFETY: the table holds 0 or positions below s_limit.
+                if cv == unsafe { load64(src, candidate) } {
                     break;
                 }
                 candidate = table[hash2].get();
-                if cv1 == load64(src, candidate2) {
+                // SAFETY: as candidate.
+                if cv1 == unsafe { load64(src, candidate2) } {
                     table[hash2] = E::new(s + 2);
                     candidate = candidate2;
                     s += 1;
                     break;
                 }
                 table[hash2] = E::new(s + 2);
-                if cv2 == load64(src, candidate) {
+                // SAFETY: as above.
+                if cv2 == unsafe { load64(src, candidate) } {
                     s += 2;
                     break;
                 }
-                cv = load64(src, next_s);
+                // SAFETY: next_s <= s_limit.
+                cv = unsafe { load64(src, next_s) };
                 s = next_s;
             }
 
@@ -126,7 +140,8 @@ impl<'a> Encoder<'a> {
             s += 8;
             candidate += 8;
             while s + 8 <= src.len() {
-                let diff = load64(src, s) ^ load64(src, candidate);
+                // SAFETY: candidate < s.
+                let diff = unsafe { load64(src, s) ^ load64(src, candidate) };
                 if diff != 0 {
                     s += diff.trailing_zeros() as usize >> 3;
                     break;
@@ -152,14 +167,15 @@ impl<'a> Encoder<'a> {
                 if s >= s_limit {
                     break 'outer;
                 }
-                let m2_hash = hash8(load64(src, s - 2), table_bits) as usize;
-                let x = load64(src, s);
+                // SAFETY: 8 <= s < s_limit after a match; the table as above.
+                let m2_hash = hash8(unsafe { load64(src, s - 2) }, table_bits) as usize;
+                let x = unsafe { load64(src, s) };
                 let curr_hash = hash8(x, table_bits) as usize;
                 candidate = table[curr_hash].get();
                 table[m2_hash] = E::new(s - 2);
                 table[curr_hash] = E::new(s);
-                if x != load64(src, candidate) {
-                    cv = load64(src, s + 1);
+                if x != unsafe { load64(src, candidate) } {
+                    cv = unsafe { load64(src, s + 1) };
                     s += 1;
                     break;
                 }
@@ -168,7 +184,8 @@ impl<'a> Encoder<'a> {
                 s += 8;
                 candidate += 8;
                 while s + 8 <= src.len() {
-                    let diff = load64(src, s) ^ load64(src, candidate);
+                    // SAFETY: candidate < s.
+                    let diff = unsafe { load64(src, s) ^ load64(src, candidate) };
                     if diff != 0 {
                         s += diff.trailing_zeros() as usize >> 3;
                         break;

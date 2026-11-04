@@ -53,6 +53,8 @@ pub mod block;
 pub mod cpu;
 mod error;
 #[cfg(test)]
+mod fuzz_seeds;
+#[cfg(test)]
 mod guard;
 pub mod index;
 #[doc(hidden)]

@@ -49,6 +49,12 @@
 //!
 //! The 16-lane steps of the flat kernels run on the low lane of a YMM register (the
 //! loads leave the high lane undefined, the stores drop it).
+//!
+//! The D = 8 copy and pack loops run at about 0.8 and 0.9 of Go's speed on a Ryzen 9 9950X.
+//! Their speed depends on where the loop lands in a 64-byte block, which a Rust build doesn't
+//! control: Go's copy loop as inline asm in a Rust binary ran 203 ns at offset 32 and 245-255
+//! ns elsewhere, as fast as LLVM's 4x unrolled copy. D = 8 flats only occur for near-uniform
+//! symbols.
 
 use core::arch::x86_64::*;
 use core::mem::transmute;

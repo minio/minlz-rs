@@ -224,12 +224,10 @@ pub fn append_decoded(dst: &mut Vec<u8>, src: &[u8]) -> Result<(), Error> {
         dst.extend_from_slice(body);
         return Ok(());
     }
-    let start = dst.len();
     if simd {
-        // The SIMD decoder writes exactly dlen bytes, so the spare capacity stays untouched.
-        dst.resize(start + dlen, 0);
-        return simd::decode_simd(&mut dst[start..], body).inspect_err(|_| dst.truncate(start));
+        return simd::append_decoded(dst, dlen, body);
     }
+    let start = dst.len();
     // The decoder uses LZ4-style 16-byte overshoot stores in its hot path;
     // give it `OVERSHOOT_PAD` bytes of writable padding past `dlen`.
     dst.reserve(dlen + decode::OVERSHOOT_PAD);
@@ -340,47 +338,39 @@ fn encode_uncompressed(dst: &mut Vec<u8>, src: &[u8]) {
 // 0x03), the chunk type itself identifies it, so the leading marker is
 // omitted.  The three helpers below speak that "chunk body" form.
 
-/// Encode `src` as a MinLZ stream-chunk body (`varint(dlen) + body`), no
-/// leading `0` marker.  Returns `Ok(true)` if the encoded body is strictly
-/// smaller than `src` (caller should emit it as a 0x02 chunk, or a 0x10 chunk
-/// for the SIMD levels, whose block header holds its type); `Ok(false)`
-/// if compression isn't worthwhile (caller should emit a 0x01 chunk).  On
-/// `false`, `dst` is truncated back to its original length.
-pub(crate) fn append_encoded_chunk_body(
+/// Encode `src` as a MinLZ stream-chunk body to `dst[start..]` and return its
+/// size: `varint(dlen) + body`, no leading `0` marker, for a 0x02 chunk, or a
+/// SIMD block, whose header holds its type, for a 0x10 chunk at the SIMD
+/// levels.  Returns 0 if compression isn't worthwhile (caller should emit a
+/// 0x01 chunk).
+///
+/// `dst` grows to [`max_encoded_len`] bytes past `start` and keeps its length:
+/// the bytes after the body are left from earlier blocks.  The encoders only
+/// write their output, so a stream reuses `dst` for every block without
+/// zeroing it again (Go's `Writer.encodeBlock` on its `obuf`).
+pub(crate) fn encode_chunk_body(
     dst: &mut Vec<u8>,
+    start: usize,
     src: &[u8],
     level: Level,
-) -> Result<bool, Error> {
-    let start = dst.len();
+) -> Result<usize, Error> {
+    let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
+    if dst.len() < start + max {
+        dst.resize(start + max, 0);
+    }
+    let dst = &mut dst[start..start + max];
     let encode_block = match level {
         Level::Fastest => encode_l1::encode_block,
         Level::Balanced => encode_l2::encode_block,
         Level::Smallest => encode_l3::encode_block,
-        _ => {
-            let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
-            dst.resize(start + max, 0);
-            let n = simd::encode_block_simd(&mut dst[start..], src, level.into());
-            dst.truncate(start + n);
-            return Ok(n > 0);
-        }
+        _ => return Ok(simd::encode_block_simd(dst, src, level.into())),
     };
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
-        return Ok(false);
+        return Ok(0);
     }
-    let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
-    dst.reserve(max);
-    format::put_uvarint(dst, src.len() as u64);
-    let body_start = dst.len();
-    dst.resize(start + max, 0);
-
-    let n = encode_block(&mut dst[body_start..], src);
-    if n > 0 && (body_start - start) + n < src.len() {
-        dst.truncate(body_start + n);
-        Ok(true)
-    } else {
-        dst.truncate(start);
-        Ok(false)
-    }
+    let h = format::put_uvarint_at(dst, src.len() as u64);
+    let n = encode_block(&mut dst[h..], src);
+    Ok(if n > 0 && h + n < src.len() { h + n } else { 0 })
 }
 
 /// Decode a MinLZ stream-chunk body (`varint(dlen) + body`).  `dst` is

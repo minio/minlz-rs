@@ -19,14 +19,15 @@
 //! they agree on success and output.  On streams that decode, `skip` to
 //! the middle continues as the full decode does.
 //!
-//! The first byte picks the worker count for the MT path (bits 0-1) and
+//! The first byte picks the worker count for the MT path (bits 0-1),
 //! whether checksums and hashes are ignored (bit 2), which lets mutated
-//! chunks reach the block decoders.  The rest is fed verbatim as a
+//! chunks reach the block decoders, and a 1 MiB maximum block size (bit 3).
+//! Go's fuzzer always does both.  The rest is fed verbatim as a
 //! potential MinLZ stream.  Cap is 9 MiB so libfuzzer mutations can reach
 //! the > MAX_BLOCK_SIZE multi-block territory when `-max_len` is set
 //! accordingly.
 //!
-//! Corpus: seeded from the upstream tarball; see fuzz/RUNBOOK.md §1.
+//! Corpus: see fuzz/RUNBOOK.md §1.
 
 #![no_main]
 
@@ -42,10 +43,12 @@ fuzz_target!(|data: &[u8]| {
     }
     let threads = ((data[0] & 0x3) as usize) + 1; // 1..=4
     let ignore_crc = data[0] & 0x4 != 0;
+    let small = data[0] & 0x8 != 0;
     let payload = &data[1..];
     let reader = || {
         let b = ReaderBuilder::new();
         let b = if ignore_crc { b.ignore_crc() } else { b };
+        let b = if small { b.max_block_size(1 << 20) } else { b };
         b.build(payload).unwrap()
     };
 

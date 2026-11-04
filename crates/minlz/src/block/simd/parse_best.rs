@@ -16,8 +16,9 @@
 //! `encode_l3.go`.
 
 use super::MAX_LEN;
-use super::encode::{BLOCK_BITS, Encoder, TABLE_BITS, load32, load64};
+use super::encode::{BLOCK_BITS, Encoder, TABLE_BITS, match_back};
 use crate::block::hash::{hash4, hash8};
+use crate::block::load_store::{load8, load32, load64};
 use crate::block::table_pool::{self, U64_18, U64_20};
 
 /// Long hash matches.
@@ -67,31 +68,34 @@ struct Scorer<'s> {
 impl Scorer<'_> {
     /// extend updates best with the match at offset, whose first n bytes the caller has checked.
     /// The checks are left to the inlined callers, since they reject most candidates.
-    fn extend(&mut self, offset: usize, mut s: usize, n: usize, rep: bool) {
+    ///
+    /// # Safety
+    /// `offset < s` and `s + n <= self.src.len()` must hold.
+    unsafe fn extend(&mut self, offset: usize, s: usize, n: usize, rep: bool) {
         let src = self.src;
-        let (mut m_offset, mut m_s, mut end) = (offset, s, offset + n);
-        s += n;
-        while s < src.len() {
-            if src.len() - s < 8 {
-                if src[s] == src[end] {
+        debug_assert!(offset < s && s + n <= src.len());
+        let (mut p, mut end) = (s + n, offset + n);
+        // SAFETY: end < p in the loop.
+        while p < src.len() {
+            if src.len() - p < 8 {
+                if unsafe { load8(src, p) == load8(src, end) } {
                     end += 1;
-                    s += 1;
+                    p += 1;
                     continue;
                 }
                 break;
             }
-            let diff = load64(src, s) ^ load64(src, end);
+            let diff = unsafe { load64(src, p) ^ load64(src, end) };
             if diff != 0 {
                 end += diff.trailing_zeros() as usize >> 3;
                 break;
             }
-            s += 8;
+            p += 8;
             end += 8;
         }
-        while m_s > self.next_emit && m_offset > 0 && src[m_offset - 1] == src[m_s - 1] {
-            m_s -= 1;
-            m_offset -= 1;
-        }
+        // SAFETY: offset < s, and s is at least next_emit.
+        let back = unsafe { match_back(src, s, offset, offset.min(s - self.next_emit)) };
+        let (m_offset, m_s) = (offset - back, s - back);
         let length = end - m_offset;
 
         // Bigger score is better.
@@ -132,8 +136,10 @@ impl Scorer<'_> {
         let mut nextrep = false;
         if m_s + length < self.s_limit {
             const CHECKOFF: usize = 1;
-            nextrep =
-                load32(src, m_s + length + CHECKOFF) == load32(src, m_offset + length + CHECKOFF);
+            // SAFETY: m_offset < m_s, and m_s + length + CHECKOFF + 4 < s_limit + INPUT_MARGIN.
+            nextrep = unsafe {
+                load32(src, m_s + length + CHECKOFF) == load32(src, m_offset + length + CHECKOFF)
+            };
         }
 
         let b = &self.best;
@@ -165,20 +171,25 @@ impl Scorer<'_> {
         };
     }
 
+    /// # Safety
+    /// `s + 4 <= self.src.len()` must hold.
     #[inline(always)]
-    fn match_at(&mut self, offset: usize, s: usize, first: u32) {
+    unsafe fn match_at(&mut self, offset: usize, s: usize, first: u32) {
         // Don't retest if we have the same offset.
         let b = &self.best;
+        // SAFETY: offset < s.
         if s > offset
             && (b.length == 0 || b.s - b.offset != s - offset)
-            && load32(self.src, offset) == first
+            && unsafe { load32(self.src, offset) } == first
         {
-            self.extend(offset, s, 4, false);
+            unsafe { self.extend(offset, s, 4, false) };
         }
     }
 
+    /// # Safety
+    /// `offset < s` and `s + 4 <= self.src.len()` must hold.
     #[inline(always)]
-    fn match_at_repeat(&mut self, offset: usize, s: usize, first: u32) {
+    unsafe fn match_at_repeat(&mut self, offset: usize, s: usize, first: u32) {
         // 2 gives close to no improvement,
         // since it may just give 'literal -> len 2 repeat -> literal' section.
         // which eats up the gains in overhead.
@@ -186,8 +197,9 @@ impl Scorer<'_> {
         const CHECKBYTES: usize = 3;
         const MASK: u32 = (1 << (8 * CHECKBYTES)) - 1;
         // Don't retest if we already have a repeat
-        if !self.best.rep && load32(self.src, offset) & MASK == first & MASK {
-            self.extend(offset, s, CHECKBYTES, true);
+        // SAFETY: offset < s.
+        if !self.best.rep && unsafe { load32(self.src, offset) } & MASK == first & MASK {
+            unsafe { self.extend(offset, s, CHECKBYTES, true) };
         }
     }
 }
@@ -196,6 +208,26 @@ impl<'a> Encoder<'a> {
     /// encodeBlockBest parses src like the function encodeBlockBest, without its size and offset
     /// limits, scoring matches by their estimated size in a SIMD block.
     pub(super) fn encode_block_best(&mut self, src: &'a [u8]) {
+        let mut l_table = table_pool::get(&U64_20);
+        let mut s_table = table_pool::get(&U64_18);
+        self.parse_best(src, &mut l_table, &mut s_table);
+        table_pool::put(&U64_20, l_table);
+        table_pool::put(&U64_18, s_table);
+    }
+
+    /// The body of encode_block_best.
+    ///
+    /// Its loads are unchecked, as Go's: src has more than MIN_SAVING bytes, s stays below
+    /// s_limit, the zeroed tables hold 0 or positions below s, and repeat sources are below s.
+    /// The Scorer checks that candidates are below the position they match.
+    // Not inlined, see parse_fast.
+    #[inline(never)]
+    fn parse_best(
+        &mut self,
+        src: &'a [u8],
+        l_table: &mut [u64; 1 << L_TABLE_BITS],
+        s_table: &mut [u64; 1 << S_TABLE_BITS],
+    ) {
         let (mut token_bits, mut symbol_bits, mut ll_bits) = (4 * 16, 7 * 16, 0);
         // Up to 2 KB the operation streams are stored at 8 bits a value, and a match that splits
         // a literal run adds a literal length. Slightly lower costs than that measure best.
@@ -211,8 +243,6 @@ impl<'a> Encoder<'a> {
         }
 
         let s_limit = src.len() - INPUT_MARGIN;
-        let mut l_table = table_pool::get(&U64_20);
-        let mut s_table = table_pool::get(&U64_18);
         let mut m = Scorer {
             src,
             s_limit,
@@ -226,7 +256,8 @@ impl<'a> Encoder<'a> {
         };
         let mut s = 1;
         let mut repeat = 1;
-        let mut cv = load64(src, s);
+        // SAFETY: src.len() > MIN_SAVING.
+        let mut cv = unsafe { load64(src, s) };
 
         'outer: loop {
             m.best = Match::default();
@@ -245,33 +276,42 @@ impl<'a> Encoder<'a> {
                 let candidate_l = l_table[hash_l];
                 let candidate_s = s_table[hash_s];
 
-                m.match_at(get_cur(candidate_l), s, cv as u32);
-                m.match_at(get_prev(candidate_l), s, cv as u32);
-                m.match_at(get_cur(candidate_s), s, cv as u32);
-                m.match_at(get_prev(candidate_s), s, cv as u32);
-                m.match_at_repeat(s - repeat, s, cv as u32);
-                m.match_at_repeat(s - repeat + 1, s + 1, (cv >> 8) as u32);
+                // SAFETY (to the loads and matches before the tables are updated): s < next_s <=
+                // s_limit, so 8 bytes can be loaded at s + 2. The repeat offset is at most the
+                // output, so at most s.
+                unsafe {
+                    m.match_at(get_cur(candidate_l), s, cv as u32);
+                    m.match_at(get_prev(candidate_l), s, cv as u32);
+                    m.match_at(get_cur(candidate_s), s, cv as u32);
+                    m.match_at(get_prev(candidate_s), s, cv as u32);
+                    m.match_at_repeat(s - repeat, s, cv as u32);
+                    m.match_at_repeat(s - repeat + 1, s + 1, (cv >> 8) as u32);
+                }
 
                 if m.best.length > 0 {
                     let next_short = s_table[hash4(cv >> 8, S_TABLE_BITS) as usize];
                     let mut s_fwd = s + 1;
-                    let mut cv = load64(src, s_fwd);
+                    let mut cv = unsafe { load64(src, s_fwd) };
                     let next_long = l_table[hash8(cv, L_TABLE_BITS) as usize];
-                    m.match_at(get_cur(next_short), s_fwd, cv as u32);
-                    m.match_at(get_prev(next_short), s_fwd, cv as u32);
-                    m.match_at(get_cur(next_long), s_fwd, cv as u32);
-                    m.match_at(get_prev(next_long), s_fwd, cv as u32);
+                    unsafe {
+                        m.match_at(get_cur(next_short), s_fwd, cv as u32);
+                        m.match_at(get_prev(next_short), s_fwd, cv as u32);
+                        m.match_at(get_cur(next_long), s_fwd, cv as u32);
+                        m.match_at(get_prev(next_long), s_fwd, cv as u32);
+                    }
 
                     s_fwd += 1;
-                    cv = load64(src, s_fwd);
+                    cv = unsafe { load64(src, s_fwd) };
                     let next_long = l_table[hash8(cv, L_TABLE_BITS) as usize];
 
-                    m.match_at_repeat(s_fwd - repeat, s_fwd, cv as u32);
+                    unsafe { m.match_at_repeat(s_fwd - repeat, s_fwd, cv as u32) };
                     let next_short = s_table[hash4(cv, S_TABLE_BITS) as usize];
-                    m.match_at(get_cur(next_short), s_fwd, cv as u32);
-                    m.match_at(get_prev(next_short), s_fwd, cv as u32);
-                    m.match_at(get_cur(next_long), s_fwd, cv as u32);
-                    m.match_at(get_prev(next_long), s_fwd, cv as u32);
+                    unsafe {
+                        m.match_at(get_cur(next_short), s_fwd, cv as u32);
+                        m.match_at(get_prev(next_short), s_fwd, cv as u32);
+                        m.match_at(get_cur(next_long), s_fwd, cv as u32);
+                        m.match_at(get_prev(next_long), s_fwd, cv as u32);
+                    }
 
                     // Search for a match at best match end, see if that is better.
                     // Allow some bytes at the beginning to mismatch.
@@ -284,24 +324,25 @@ impl<'a> Encoder<'a> {
                     if s_at < s_limit {
                         let s_back = m.best.s + SKIP_BEGINNING - SKIP_END;
                         let back_l = m.best.length - SKIP_BEGINNING;
-                        cv = load64(src, s_back);
-                        let at = load64(src, s_at);
+                        // SAFETY: s_back < s_at < s_limit.
+                        cv = unsafe { load64(src, s_back) };
+                        let at = unsafe { load64(src, s_at) };
 
                         let next = l_table[hash8(at, L_TABLE_BITS) as usize];
                         // Go's checkAt > 0.
                         if get_cur(next) > back_l {
-                            m.match_at(get_cur(next) - back_l, s_back, cv as u32);
+                            unsafe { m.match_at(get_cur(next) - back_l, s_back, cv as u32) };
                         }
                         if get_prev(next) > back_l {
-                            m.match_at(get_prev(next) - back_l, s_back, cv as u32);
+                            unsafe { m.match_at(get_prev(next) - back_l, s_back, cv as u32) };
                         }
                         // Quite small gain, but generally a benefit on very compressible material.
                         let next = s_table[hash4(at, S_TABLE_BITS) as usize];
                         if get_cur(next) > back_l {
-                            m.match_at(get_cur(next) - back_l, s_back, cv as u32);
+                            unsafe { m.match_at(get_cur(next) - back_l, s_back, cv as u32) };
                         }
                         if get_prev(next) > back_l {
-                            m.match_at(get_prev(next) - back_l, s_back, cv as u32);
+                            unsafe { m.match_at(get_prev(next) - back_l, s_back, cv as u32) };
                         }
                     }
                 }
@@ -313,7 +354,8 @@ impl<'a> Encoder<'a> {
                     break;
                 }
 
-                cv = load64(src, next_s);
+                // SAFETY: next_s <= s_limit.
+                cv = unsafe { load64(src, next_s) };
                 s = next_s;
             }
             let start_idx = s + 1;
@@ -344,19 +386,19 @@ impl<'a> Encoder<'a> {
                 break 'outer;
             }
             for i in start_idx..s {
-                let cv0 = load64(src, i);
+                // SAFETY: i < s < s_limit.
+                let cv0 = unsafe { load64(src, i) };
                 let long0 = hash8(cv0, L_TABLE_BITS) as usize;
                 let short0 = hash4(cv0, S_TABLE_BITS) as usize;
                 l_table[long0] = i as u64 | l_table[long0] << 32;
                 s_table[short0] = i as u64 | s_table[short0] << 32;
             }
-            cv = load64(src, s);
+            // SAFETY: s < s_limit.
+            cv = unsafe { load64(src, s) };
         }
 
         if m.next_emit < src.len() {
             self.emit_literals(&src[m.next_emit..]);
         }
-        table_pool::put(&U64_20, l_table);
-        table_pool::put(&U64_18, s_table);
     }
 }

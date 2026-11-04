@@ -37,19 +37,45 @@ fn mutate(x: &mut Xorshift64, b: &[u8], keep: usize) -> Vec<u8> {
     d
 }
 
+/// Go FuzzDecodeBlock's seeds: [128 bytes of length nibbles][symbol count, u16][block].
+fn decode_block_seeds() -> Vec<Vec<u8>> {
+    corrupt_cases()
+        .iter()
+        .map(|cc| {
+            let mut seed = vec![0u8; 128];
+            for (s, &v) in cc.tb.lens().iter().enumerate() {
+                seed[s / 2] |= v << (4 * (s & 1));
+            }
+            seed.extend_from_slice(&(cc.src.len() as u16).to_le_bytes());
+            seed.extend_from_slice(&cc.blk);
+            seed
+        })
+        .collect()
+}
+
+/// Go FuzzDecodeBlockFixed's seeds: [table][symbol count, u16][block].
+fn decode_block_fixed_seeds() -> Vec<Vec<u8>> {
+    corrupt_cases()
+        .iter()
+        .enumerate()
+        .map(|(i, cc)| {
+            [
+                &[i as u8][..],
+                &(cc.src.len() as u16).to_le_bytes(),
+                &cc.blk,
+            ]
+            .concat()
+        })
+        .collect()
+}
+
 /// Go FuzzDecodeBlock.
 #[test]
 #[cfg_attr(miri, ignore)] // slow under Miri
 fn fuzz_decode_block_seeded() {
     let mut cs = coders();
     let mut x = Xorshift64(0xDEC0);
-    for cc in corrupt_cases() {
-        let mut seed = vec![0u8; 128];
-        for (s, &v) in cc.tb.lens().iter().enumerate() {
-            seed[s / 2] |= v << (4 * (s & 1));
-        }
-        seed.extend_from_slice(&(cc.src.len() as u16).to_le_bytes());
-        seed.extend_from_slice(&cc.blk);
+    for seed in decode_block_seeds() {
         fuzz_decode_block(&mut cs, &seed);
         for _ in 0..20 {
             fuzz_decode_block(&mut cs, &mutate(&mut x, &seed, 0));
@@ -64,13 +90,27 @@ fn fuzz_decode_block_fixed_seeded() {
     let mut cs = coders();
     let tabs = fixed_tables();
     let mut x = Xorshift64(0xF1ED);
-    for (i, cc) in corrupt_cases().iter().enumerate() {
-        let mut seed = vec![i as u8];
-        seed.extend_from_slice(&(cc.src.len() as u16).to_le_bytes());
-        seed.extend_from_slice(&cc.blk);
+    for seed in decode_block_fixed_seeds() {
         fuzz_decode_block_fixed(&mut cs, &tabs, &seed);
         for _ in 0..40 {
             fuzz_decode_block_fixed(&mut cs, &tabs, &mutate(&mut x, &seed, 1));
         }
     }
+}
+
+/// Adds the seeds of Go's pivco fuzzers, after the mode byte of the target, see
+/// [`crate::fuzz_seeds`].
+#[test]
+#[ignore = "writes fuzz/corpus, see fuzz/RUNBOOK.md §1"]
+fn write_fuzz_seeds() {
+    use crate::fuzz_seeds::save;
+    let mode = |m: u8, seeds: Vec<Vec<u8>>| seeds.into_iter().map(move |s| [vec![m], s].concat());
+    let decode = mode(0, decode_block_seeds()).chain(mode(1, decode_block_fixed_seeds()));
+    save("pivco_decode", decode);
+    save("pivco_roundtrip", super::block::round_trip_block_seeds());
+    let lengths = super::huffman::LENGTHS_SEEDS.map(<[u8]>::to_vec).to_vec();
+    save(
+        "pivco_table",
+        mode(0, super::table::table_seeds()).chain(mode(1, lengths)),
+    );
 }

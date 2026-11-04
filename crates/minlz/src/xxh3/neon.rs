@@ -73,6 +73,18 @@ impl Kernel for Neon {
     }
 
     #[inline(always)]
+    unsafe fn zero() -> Self::Acc {
+        // SAFETY: the caller checked NEON.
+        [unsafe { vdupq_n_u64(0) }; 4]
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: Self::Acc, b: Self::Acc) -> Self::Acc {
+        // SAFETY: the caller checked NEON.
+        core::array::from_fn(|i| unsafe { vaddq_u64(a[i], b[i]) })
+    }
+
+    #[inline(always)]
     unsafe fn stripe(acc: &mut Self::Acc, p: &[u8; STRIPE], k: &[u8; STRIPE]) {
         for (i, a) in acc.iter_mut().enumerate() {
             // SAFETY: the caller checked NEON; the loads read 16 bytes inside p and k.

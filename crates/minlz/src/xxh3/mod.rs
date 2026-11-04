@@ -319,8 +319,13 @@ impl Tier {
 /// The methods use the unit's CPU features: callers must have checked them.
 trait Kernel {
     type Acc: Copy;
+    /// Whether [`blocks_acc`] adds the stripes to four sums, which takes four times the registers.
+    const SPLIT: bool = true;
     unsafe fn load(a: &[u64; 8]) -> Self::Acc;
     unsafe fn store(acc: Self::Acc, a: &mut [u64; 8]);
+    unsafe fn zero() -> Self::Acc;
+    /// Adds the lanes of a and b.
+    unsafe fn add(a: Self::Acc, b: Self::Acc) -> Self::Acc;
     unsafe fn stripe(acc: &mut Self::Acc, p: &[u8; STRIPE], k: &[u8; STRIPE]);
     unsafe fn scramble(acc: &mut Self::Acc);
     #[inline(always)]
@@ -335,6 +340,9 @@ fn key(o: usize) -> &'static [u8; STRIPE] {
 }
 
 /// Accumulates the stripes of n blocks of p, scrambling after each.
+/// With [`Kernel::SPLIT`], the stripes of a block go round-robin to four sums, as in zeebo/xxh3:
+/// one sum chains two vector adds per stripe, and Zen 5 takes 2 cycles for each, which halved
+/// the speed.
 ///
 /// # Safety
 ///
@@ -342,15 +350,26 @@ fn key(o: usize) -> &'static [u8; STRIPE] {
 #[inline(always)]
 unsafe fn blocks_acc<K: Kernel>(acc: &mut K::Acc, p: &[u8], n: usize) {
     for b in p[..n * BLOCK].as_chunks::<BLOCK>().0 {
-        for (s, st) in b.as_chunks::<STRIPE>().0.iter().enumerate() {
-            // SAFETY: the caller checked K's features; prefetching never faults.
-            unsafe {
-                K::prefetch(st.as_ptr().wrapping_add(BLOCK));
-                K::stripe(acc, st, key(8 * s));
+        // SAFETY: the caller checked K's features; prefetching never faults.
+        unsafe {
+            if !K::SPLIT {
+                for (s, st) in b.as_chunks::<STRIPE>().0.iter().enumerate() {
+                    K::prefetch(st.as_ptr().wrapping_add(BLOCK));
+                    K::stripe(acc, st, key(8 * s));
+                }
+                K::scramble(acc);
+                continue;
             }
+            let mut t = [*acc, K::zero(), K::zero(), K::zero()];
+            for (q, st4) in b.as_chunks::<{ 4 * STRIPE }>().0.iter().enumerate() {
+                for (j, (t, st)) in t.iter_mut().zip(st4.as_chunks::<STRIPE>().0).enumerate() {
+                    K::prefetch(st.as_ptr().wrapping_add(BLOCK));
+                    K::stripe(t, st, key(8 * (4 * q + j)));
+                }
+            }
+            *acc = K::add(K::add(t[0], t[1]), K::add(t[2], t[3]));
+            K::scramble(acc);
         }
-        // SAFETY: the caller checked K's features.
-        unsafe { K::scramble(acc) };
     }
 }
 
@@ -404,6 +423,8 @@ struct Scalar;
 
 impl Kernel for Scalar {
     type Acc = [u64; 8];
+    // Four sums would spill: the eight lanes already make independent chains.
+    const SPLIT: bool = false;
 
     #[inline(always)]
     unsafe fn load(a: &[u64; 8]) -> [u64; 8] {
@@ -413,6 +434,16 @@ impl Kernel for Scalar {
     #[inline(always)]
     unsafe fn store(acc: [u64; 8], a: &mut [u64; 8]) {
         *a = acc;
+    }
+
+    #[inline(always)]
+    unsafe fn zero() -> [u64; 8] {
+        [0; 8]
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: [u64; 8], b: [u64; 8]) -> [u64; 8] {
+        core::array::from_fn(|i| a[i].wrapping_add(b[i]))
     }
 
     #[inline(always)]

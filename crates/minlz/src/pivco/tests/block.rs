@@ -357,18 +357,23 @@ fn concurrent_table() {
     });
 }
 
+/// Go FuzzRoundTripBlock's seeds: a flags byte, then the data.
+pub(super) fn round_trip_block_seeds() -> Vec<Vec<u8>> {
+    let with = |flags: u8, b: Vec<u8>| [vec![flags], b].concat();
+    vec![
+        b"\x00abcab".to_vec(),
+        with(5, sample(&dist_of("english"), 3000, 1)),
+        with(8, sample(&dist_of("proba80"), 9000, 1)),
+        with(1, sample(&dist_of("sym0_255"), 700, 1)),
+    ]
+}
+
 /// Go FuzzRoundTripBlock, over its seeds and seeded random inputs.
 #[test]
 #[cfg_attr(miri, ignore)] // slow under Miri
 fn fuzz_round_trip_block_seeded() {
     let mut cs = coders();
-    let with = |flags: u8, b: Vec<u8>| [vec![flags], b].concat();
-    let mut inputs = vec![
-        b"\x00abcab".to_vec(),
-        with(5, sample(&dist_of("english"), 3000, 1)),
-        with(8, sample(&dist_of("proba80"), 9000, 1)),
-        with(1, sample(&dist_of("sym0_255"), 700, 1)),
-    ];
+    let mut inputs = round_trip_block_seeds();
     let mut x = Xorshift64(0xB10C);
     for i in 0..60 {
         let n = [2, 9, 100, 1000, 20000][i % 5] + x.intn(50);

@@ -40,7 +40,9 @@ use super::format::{
     block_size_from_indicator, get_uvarint, read_chunk_len, read_u32_le,
 };
 use super::mt_pool::BufferPool;
-use super::reader::{Reader, decode_simd_chunk, min_lz_chunk_len, simd_chunk_header};
+use super::reader::{
+    Reader, decode_simd_chunk, min_lz_chunk_len, read_uncompressed, simd_chunk_header,
+};
 
 /// Worker job: decode one compressed chunk body, or the payload of a SIMD chunk.
 struct DecodeJob {
@@ -182,8 +184,8 @@ fn dispatch_loop<R: Read>(
                 }
                 // Acquire a pooled buffer, sized for the full chunk
                 // (incl. checksum prefix).  We strip the checksum below
-                // before the worker sees it.
-                let mut buf = compressed_pool.acquire();
+                // before the worker sees it.  The read overwrites it all.
+                let mut buf = compressed_pool.reuse();
                 buf.resize(chunk_len, 0);
                 read_exact_or_corrupt(&mut reader.r, &mut buf)?;
                 let checksum = read_u32_le(&buf[..CHECKSUM_SIZE]);
@@ -212,7 +214,7 @@ fn dispatch_loop<R: Read>(
                 if !reader.simd || chunk_len > max_buf_size(reader.max_block) {
                     return Err(io::Error::from(Error::Corrupt));
                 }
-                let mut buf = compressed_pool.acquire();
+                let mut buf = compressed_pool.reuse();
                 buf.resize(chunk_len, 0);
                 read_exact_or_corrupt(&mut reader.r, &mut buf)?;
                 let (dlen, _) = simd_chunk_header(&buf, reader.max_block)?;
@@ -242,13 +244,9 @@ fn dispatch_loop<R: Read>(
                 let mut cbuf = [0u8; CHECKSUM_SIZE];
                 read_exact_or_corrupt(&mut reader.r, &mut cbuf)?;
                 let checksum = read_u32_le(&cbuf);
-                let mut body = decoded_pool.acquire();
+                let mut body = decoded_pool.reuse();
                 body.resize(n, 0);
-                read_exact_or_corrupt(&mut reader.r, &mut body)?;
-                if !reader.ignore_crc && masked_crc32c(&body) != checksum {
-                    decoded_pool.release(body);
-                    return Err(io::Error::from(Error::Crc));
-                }
+                read_uncompressed(&mut reader.r, &mut body, checksum, reader.ignore_crc)?;
                 uncomp_emitted += n as u64;
                 let (tx, rx) = mpsc::sync_channel::<DecodeOutput>(1);
                 if order_tx.send(rx).is_err() {
@@ -418,10 +416,11 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
             compressed_pool,
             decoded_pool,
         } = job;
-        let mut decoded = decoded_pool.acquire();
+        let mut decoded = decoded_pool.reuse();
         let res: Result<Vec<u8>, Error> = (|| {
             if chunk_type == CHUNK_TYPE_MINLZ_SIMD {
                 let (n, block) = simd_chunk_header(&body, max_block)?;
+                // The decoder writes every byte, so the bytes a reused buffer holds need no zeroing.
                 decoded.resize(n, 0);
                 decode_simd_chunk(&mut decoded, &body, block, ignore_crc)?;
                 return Ok(std::mem::take(&mut decoded));
@@ -430,6 +429,7 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
             if dlen > max_block {
                 return Err(Error::TooLarge);
             }
+            decoded.clear();
             block::append_decoded_chunk_body(&mut decoded, &body)?;
             if !ignore_crc {
                 let to_crc: &[u8] = if chunk_type == CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC {

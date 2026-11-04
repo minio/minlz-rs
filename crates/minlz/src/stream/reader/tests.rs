@@ -54,10 +54,10 @@ fn push_uncompressed_block(out: &mut Vec<u8>, payload: &[u8]) {
 
 fn push_minlz_block(out: &mut Vec<u8>, payload: &[u8]) {
     let mut chunk_body = Vec::new();
-    let compressed =
-        block::append_encoded_chunk_body(&mut chunk_body, payload, block::Level::Balanced)
-            .expect("encode");
-    assert!(compressed, "test payload should compress");
+    let n = block::encode_chunk_body(&mut chunk_body, 0, payload, block::Level::Balanced)
+        .expect("encode");
+    assert!(n > 0, "test payload should compress");
+    chunk_body.truncate(n);
     let mut body = Vec::with_capacity(CHECKSUM_SIZE + chunk_body.len());
     body.extend_from_slice(&masked_crc32c(payload).to_le_bytes());
     body.extend_from_slice(&chunk_body);
@@ -708,8 +708,9 @@ fn comp_crc_chunk_round_trip() {
     // 0x03 = "compressed CRC" — CRC over compressed bytes after the varint.
     let payload = b"the quick brown fox the quick brown fox the quick brown fox";
     let mut chunk_body = Vec::new();
-    block::append_encoded_chunk_body(&mut chunk_body, payload, block::Level::Balanced)
+    let n = block::encode_chunk_body(&mut chunk_body, 0, payload, block::Level::Balanced)
         .expect("encode");
+    chunk_body.truncate(n);
     // Strip the leading varint(dlen) from chunk_body to get the raw
     // compressed bytes that the CRC covers for the 0x03 chunk type.
     let (_, n) = crate::stream::format::get_uvarint(&chunk_body).unwrap();
@@ -907,6 +908,24 @@ fn decode_concurrent_uncompressed_crc() {
             data.len() as u64,
             "concurrency {c}, ignoring the checksum"
         );
+    }
+}
+
+/// read_uncompressed reads and checksums in pieces: a flip in any piece must fail the checksum.
+#[test]
+#[cfg_attr(miri, ignore = "checksums 2 MB")]
+fn read_uncompressed_pieces() {
+    let data = rand_bytes(2, (2 << 20) + 1000);
+    let sum = masked_crc32c(&data);
+    let mut buf = vec![0xa5; data.len()];
+    super::read_uncompressed(&mut &data[..], &mut buf, sum, false).unwrap();
+    assert!(buf == data);
+    for pos in [0, 1 << 20, data.len() - 1] {
+        let mut bad = data.clone();
+        bad[pos] ^= 1;
+        let e = super::read_uncompressed(&mut &bad[..], &mut buf, sum, false).unwrap_err();
+        assert!(matches!(e, Error::Crc), "flip at {pos}: {e}");
+        super::read_uncompressed(&mut &bad[..], &mut buf, sum, true).unwrap();
     }
 }
 

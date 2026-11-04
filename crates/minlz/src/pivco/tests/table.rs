@@ -236,11 +236,8 @@ fn table_rebuild() {
     );
 }
 
-/// Go FuzzTable, over its seeds and seeded random mutations of them.
-#[test]
-#[cfg_attr(miri, ignore)] // slow under Miri
-fn fuzz_table_seeded() {
-    let mut cs = coders();
+/// Go FuzzTable's seeds: 128 bytes of length nibbles, then a payload.
+pub(super) fn table_seeds() -> Vec<Vec<u8>> {
     let mut seeds = Vec::new();
     for (i, l) in table_test_lens()[..40].iter().enumerate() {
         let mut b = vec![0u8; 128];
@@ -250,8 +247,16 @@ fn fuzz_table_seeded() {
         b.extend(core::iter::repeat_n(i as u8, i));
         seeds.push(b);
     }
+    seeds
+}
+
+/// Go FuzzTable, over its seeds and seeded random mutations of them.
+#[test]
+#[cfg_attr(miri, ignore)] // slow under Miri
+fn fuzz_table_seeded() {
+    let mut cs = coders();
     let mut x = Xorshift64(0xF022);
-    for seed in &seeds {
+    for seed in &table_seeds() {
         fuzz_table_lens(&mut cs, seed);
         for _ in 0..5 {
             let mut d = seed.clone();

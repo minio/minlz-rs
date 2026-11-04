@@ -58,6 +58,8 @@ struct Sse2;
 
 impl Kernel for Sse2 {
     type Acc = [__m128i; 4];
+    // Four sums would take all 16 registers.
+    const SPLIT: bool = false;
 
     #[inline(always)]
     unsafe fn load(a: &[u64; 8]) -> Self::Acc {
@@ -69,6 +71,18 @@ impl Kernel for Sse2 {
     unsafe fn store(acc: Self::Acc, a: &mut [u64; 8]) {
         // SAFETY: same size, and every bit pattern is valid for both.
         *a = unsafe { transmute::<Self::Acc, [u64; 8]>(acc) };
+    }
+
+    #[inline(always)]
+    unsafe fn zero() -> Self::Acc {
+        // SAFETY: SSE2 is baseline on x86-64.
+        [unsafe { _mm_setzero_si128() }; 4]
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: Self::Acc, b: Self::Acc) -> Self::Acc {
+        // SAFETY: SSE2 is baseline on x86-64.
+        core::array::from_fn(|i| unsafe { _mm_add_epi64(a[i], b[i]) })
     }
 
     #[inline(always)]
@@ -115,6 +129,18 @@ impl Kernel for Avx2 {
     unsafe fn store(acc: Self::Acc, a: &mut [u64; 8]) {
         // SAFETY: same size, and every bit pattern is valid for both.
         *a = unsafe { transmute::<Self::Acc, [u64; 8]>(acc) };
+    }
+
+    #[inline(always)]
+    unsafe fn zero() -> Self::Acc {
+        // SAFETY: the caller checked AVX2.
+        [unsafe { _mm256_setzero_si256() }; 2]
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: Self::Acc, b: Self::Acc) -> Self::Acc {
+        // SAFETY: the caller checked AVX2.
+        core::array::from_fn(|i| unsafe { _mm256_add_epi64(a[i], b[i]) })
     }
 
     #[inline(always)]
@@ -168,6 +194,18 @@ impl Kernel for Avx512 {
     unsafe fn store(acc: Self::Acc, a: &mut [u64; 8]) {
         // SAFETY: same size, and every bit pattern is valid for both.
         *a = unsafe { transmute::<Self::Acc, [u64; 8]>(acc) };
+    }
+
+    #[inline(always)]
+    unsafe fn zero() -> Self::Acc {
+        // SAFETY: the caller checked AVX-512F.
+        unsafe { _mm512_setzero_si512() }
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: Self::Acc, b: Self::Acc) -> Self::Acc {
+        // SAFETY: the caller checked AVX-512F.
+        unsafe { _mm512_add_epi64(a, b) }
     }
 
     #[inline(always)]

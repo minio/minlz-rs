@@ -25,7 +25,7 @@ use std::io::{self, BufRead, Read};
 use crate::Error as BlockError;
 use crate::block::{self, simd};
 
-use super::crc::masked_crc32c;
+use super::crc::{crc32c_update, mask_crc32c, masked_crc32c};
 use super::error::{Error, Result};
 use super::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
@@ -385,12 +385,8 @@ impl<R: Read> Reader<R> {
             self.ensure_buf(CHECKSUM_SIZE)?;
             read_exact_or_corrupt(&mut self.r, &mut self.buf[..CHECKSUM_SIZE])?;
             let checksum = read_u32_le(&self.buf[..CHECKSUM_SIZE]);
-            self.decoded.clear();
             self.decoded.resize(n2, 0);
-            read_exact_or_corrupt(&mut self.r, &mut self.decoded[..])?;
-            if !self.ignore_crc && masked_crc32c(&self.decoded) != checksum {
-                return Err(Error::Crc);
-            }
+            read_uncompressed(&mut self.r, &mut self.decoded, checksum, self.ignore_crc)?;
             self.decoded_pos = *n as usize;
             *n = 0;
         } else {
@@ -617,13 +613,9 @@ impl<R: Read> Reader<R> {
         read_exact_or_corrupt(&mut self.r, &mut self.buf[..CHECKSUM_SIZE])?;
         let checksum = read_u32_le(&self.buf[..CHECKSUM_SIZE]);
 
-        self.decoded.clear();
+        // The read overwrites the n bytes; errors are sticky, so a failed read exposes nothing.
         self.decoded.resize(n, 0);
-        read_exact_or_corrupt(&mut self.r, &mut self.decoded[..])?;
-
-        if !self.ignore_crc && masked_crc32c(&self.decoded) != checksum {
-            return Err(Error::Crc);
-        }
+        read_uncompressed(&mut self.r, &mut self.decoded, checksum, self.ignore_crc)?;
         self.decoded_pos = 0;
         Ok(())
     }
@@ -840,6 +832,32 @@ fn strip_dlen_varint(body: &[u8]) -> Result<&[u8]> {
 /// keep one copy as the sticky error and return another to the caller.
 fn clone_io_err(e: &io::Error) -> io::Error {
     io::Error::new(e.kind(), e.to_string())
+}
+
+/// Reads the data of an uncompressed chunk to `buf` and checks it against `checksum` unless
+/// `ignore_crc` (Go `readFullCRC`). It reads and checksums a piece at a time, while the piece is in
+/// cache: one copy of a 4 MiB block took 1.6x as long as the pieces. Pieces are 255 KiB, not Go's
+/// 32 KiB: each piece costs a read call, a syscall on an unbuffered `File` (30 KiB pieces made
+/// decoding incompressible data from one 1.35x slower), and a multiple of the CRC-32C loop's 3 KiB
+/// step avoids a remainder, which it runs 3x slower. A `BufReader` with more capacity than a piece
+/// copies each piece through its buffer.
+pub(super) fn read_uncompressed<R: Read>(
+    r: &mut R,
+    buf: &mut [u8],
+    checksum: u32,
+    ignore_crc: bool,
+) -> Result<()> {
+    let mut c = 0;
+    for p in buf.chunks_mut(255 << 10) {
+        read_exact_or_corrupt(r, p)?;
+        if !ignore_crc {
+            c = crc32c_update(c, p);
+        }
+    }
+    if !ignore_crc && mask_crc32c(c) != checksum {
+        return Err(Error::Crc);
+    }
+    Ok(())
 }
 
 /// `Read::read_exact` mapped to stream errors: `UnexpectedEof` becomes

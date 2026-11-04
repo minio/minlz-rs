@@ -20,8 +20,6 @@
 //! `u64`.  Dictionary support is intentionally omitted per the project
 //! rules — there is no `dict` parameter and no dictionary lookup paths.
 
-use std::cell::RefCell;
-
 use super::emit::{
     emit_copy, emit_copy_lits2, emit_copy_lits3, emit_copy_size, emit_literal, emit_literal_size_n,
     emit_repeat, emit_repeat_size, encode_copy2,
@@ -32,6 +30,7 @@ use super::format::{
 };
 use super::hash::{hash4, hash8};
 use super::load_store::{load32, load64};
+use super::table_pool::{self, U64_18, U64_20};
 
 const INPUT_MARGIN_L3: usize = 8 + 2;
 const L_TABLE_BITS: u32 = 20;
@@ -39,31 +38,6 @@ const L_TABLE_SIZE: usize = 1 << L_TABLE_BITS;
 const S_TABLE_BITS: u32 = 18;
 const S_TABLE_SIZE: usize = 1 << S_TABLE_BITS;
 const MAX_SKIP: usize = 64;
-
-thread_local! {
-    static L_TABLE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    static S_TABLE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-}
-
-fn with_tables<R>(f: impl FnOnce(&mut [u64], &mut [u64]) -> R) -> R {
-    L_TABLE.with(|lcell| {
-        S_TABLE.with(|scell| {
-            let mut lt = lcell.borrow_mut();
-            let mut st = scell.borrow_mut();
-            if lt.len() < L_TABLE_SIZE {
-                lt.resize(L_TABLE_SIZE, 0);
-            } else {
-                lt.iter_mut().for_each(|x| *x = 0);
-            }
-            if st.len() < S_TABLE_SIZE {
-                st.resize(S_TABLE_SIZE, 0);
-            } else {
-                st.iter_mut().for_each(|x| *x = 0);
-            }
-            f(&mut lt[..L_TABLE_SIZE], &mut st[..S_TABLE_SIZE])
-        })
-    })
-}
 
 #[inline(always)]
 fn get_cur(x: u64) -> usize {
@@ -97,10 +71,21 @@ pub(super) fn encode_block(dst: &mut [u8], src: &[u8]) -> usize {
     if src.len() < MIN_NON_LITERAL_BLOCK_SIZE {
         return 0;
     }
-    with_tables(|l_table, s_table| inner(dst, src, l_table, s_table))
+    // The SIMD Smallest parser shares the tables (Go's encBestLPool and encBestSPool).
+    let mut l_table = table_pool::get(&U64_20);
+    let mut s_table = table_pool::get(&U64_18);
+    let n = inner(dst, src, &mut l_table, &mut s_table);
+    table_pool::put(&U64_20, l_table);
+    table_pool::put(&U64_18, s_table);
+    n
 }
 
-fn inner(dst: &mut [u8], src: &[u8], l_table: &mut [u64], s_table: &mut [u64]) -> usize {
+fn inner(
+    dst: &mut [u8],
+    src: &[u8],
+    l_table: &mut [u64; L_TABLE_SIZE],
+    s_table: &mut [u64; S_TABLE_SIZE],
+) -> usize {
     let s_limit = src.len() - INPUT_MARGIN_L3;
     let dst_limit = src.len() - 5;
 

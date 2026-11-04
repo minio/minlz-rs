@@ -29,9 +29,13 @@ thread_local! {
     pub(super) static U32_14: Cell<Option<Box<[u32; 1 << 14]>>> = const { Cell::new(None) };
     /// Go's `encLPool`.
     pub(super) static U32_17: Cell<Option<Box<[u32; 1 << 17]>>> = const { Cell::new(None) };
+    /// Go's `encLPool64K`.
+    pub(super) static U16_15: Cell<Option<Box<[u16; 1 << 15]>>> = const { Cell::new(None) };
     /// Go's `encLPoolSIMD64K`.
     pub(super) static U16_16: Cell<Option<Box<[u16; 1 << 16]>>> = const { Cell::new(None) };
+    /// Go's `encBestLPool`.
     pub(super) static U64_20: Cell<Option<Box<[u64; 1 << 20]>>> = const { Cell::new(None) };
+    /// Go's `encBestSPool`.
     pub(super) static U64_18: Cell<Option<Box<[u64; 1 << 18]>>> = const { Cell::new(None) };
 }
 

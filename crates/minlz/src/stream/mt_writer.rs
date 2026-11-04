@@ -67,6 +67,9 @@ struct WorkerOutput {
     hdr: Option<[u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE]>,
     /// Encoded chunk (or raw uncompressed body for 0x01 chunks).
     body: Vec<u8>,
+    /// Bytes of `body` to write: a pooled obuf is longer than its chunk (see
+    /// [`encode_block`]).
+    body_len: usize,
     /// `true` if `body` aliases the input (incompressible 0x01 path).
     /// In that case `input_return` is empty; only `body` needs returning
     /// (to the input pool, since that's where it came from).
@@ -608,17 +611,19 @@ fn worker_loop(submit_rx: Receiver<BlockJob>) {
             obuf_pool,
         } = job;
         let uncomp_len = uncompressed.len() as u32;
-        let mut obuf = obuf_pool.acquire();
-        let compressed_ok = if uncompressed_mode {
-            false
+        let mut obuf = obuf_pool.reuse();
+        let n = if uncompressed_mode {
+            0
         } else {
             match encode_block(&mut obuf, &uncompressed, level) {
-                Ok(ok) => ok,
+                Ok(n) => n,
                 Err(e) => {
                     obuf_pool.release(obuf);
+                    let body = format!("encode: {e}").into_bytes();
                     let _ = result_tx.send(WorkerOutput {
                         hdr: Some(error_marker()),
-                        body: format!("encode: {e}").into_bytes(),
+                        body_len: body.len(),
+                        body,
                         body_is_input: false,
                         input_return: uncompressed,
                         uncomp_len,
@@ -631,7 +636,7 @@ fn worker_loop(submit_rx: Receiver<BlockJob>) {
         // through as the body — saves a copy and lets the writer thread
         // release it as the body afterwards.  `input_return` is left
         // empty so the writer doesn't double-release.
-        let (hdr, body, body_is_input, input_return) = if compressed_ok {
+        let (hdr, body, body_is_input, input_return) = if n > 0 {
             (None, obuf, false, uncompressed)
         } else {
             // Incompressible: discard the (empty/wasted) obuf, send the
@@ -641,9 +646,11 @@ fn worker_loop(submit_rx: Receiver<BlockJob>) {
             put_uncompressed_header(&mut hdr, &uncompressed);
             (Some(hdr), uncompressed, true, Vec::new())
         };
+        let body_len = if body_is_input { body.len() } else { n };
         let _ = result_tx.send(WorkerOutput {
             hdr,
             body,
+            body_len,
             body_is_input,
             input_return,
             uncomp_len,
@@ -695,6 +702,7 @@ fn writer_loop<W: Write + Send + 'static>(
                         let WorkerOutput {
                             hdr,
                             body,
+                            body_len,
                             body_is_input,
                             input_return,
                             uncomp_len,
@@ -706,11 +714,13 @@ fn writer_loop<W: Write + Send + 'static>(
                             idx.add(comp_written, uncomp_written)
                                 .map_err(|e| record(&err_slot, e.into()))?;
                         }
-                        let chunk_len = hdr.map_or(0, |h| h.len()) + body.len();
+                        let chunk_len = hdr.map_or(0, |h| h.len()) + body_len;
                         if let Some(hdr) = hdr {
                             w.write_all(&hdr).map_err(|e| record(&err_slot, e))?;
                         }
-                        let write_res = w.write_all(&body).map_err(|e| record(&err_slot, e));
+                        let write_res = w
+                            .write_all(&body[..body_len])
+                            .map_err(|e| record(&err_slot, e));
                         // Return buffers to their pools.  `body` came
                         // from input_pool if `body_is_input`, otherwise
                         // from obuf_pool.  `input_return` (if non-empty)

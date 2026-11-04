@@ -169,7 +169,7 @@ pub struct Writer<W> {
     w: W,
     /// Buffered uncompressed input (filled up to `block_size`, then flushed).
     ibuf: Vec<u8>,
-    /// Scratch for the encoded block body + chunk header + checksum.
+    /// Scratch for the chunk header + checksum + encoded block body; see [`encode_block`].
     obuf: Vec<u8>,
     block_size: usize,
     level: block::Level,
@@ -226,7 +226,6 @@ impl<W: Write> Writer<W> {
     pub fn reset(&mut self, w: W) {
         self.w = w;
         self.ibuf.clear();
-        self.obuf.clear();
         self.wrote_header = false;
         self.uncomp_written = 0;
         self.comp_written = 0;
@@ -402,10 +401,15 @@ impl<W: Write> Writer<W> {
         if let Some(idx) = self.index.as_mut() {
             idx.add(self.comp_written, self.uncomp_written)?;
         }
-        if !self.uncompressed && encode_block(&mut self.obuf, block, self.level)? {
+        let n = if self.uncompressed {
+            0
+        } else {
+            encode_block(&mut self.obuf, block, self.level)?
+        };
+        if n > 0 {
             // Borrow obuf separately so write_all_tracked can use self.w.
             let chunk = std::mem::take(&mut self.obuf);
-            let res = self.write_all_tracked(&chunk);
+            let res = self.write_all_tracked(&chunk[..n]);
             self.obuf = chunk;
             return res;
         }
@@ -535,18 +539,22 @@ pub(super) fn simd_stream(level: block::Level, uncompressed: bool) -> bool {
     !uncompressed && i32::from(level) >= i32::from(block::Level::SuperFastSimd)
 }
 
-/// Writes `src` as a compressed chunk to `dst`, replacing its contents, and reports whether
-/// `src` compresses (Go `Writer.encodeBlock`). `dst` is left empty if it doesn't.
-pub(super) fn encode_block(dst: &mut Vec<u8>, src: &[u8], level: block::Level) -> io::Result<bool> {
+/// Writes `src` as a compressed chunk to the start of `dst` and returns the chunk size, or 0 if
+/// `src` doesn't compress (Go `Writer.encodeBlock`). `dst` keeps its length, which only grows, so
+/// [`block::encode_chunk_body`] reuses its bytes.
+pub(super) fn encode_block(
+    dst: &mut Vec<u8>,
+    src: &[u8],
+    level: block::Level,
+) -> io::Result<usize> {
     let simd = simd_stream(level, false);
     let check = if simd { SIMD_HASH_SIZE } else { CHECKSUM_SIZE };
-    dst.clear();
-    dst.resize(CHUNK_HEADER_SIZE + check, 0);
-    if !block::append_encoded_chunk_body(dst, src, level).map_err(Error::Block)? {
-        dst.clear();
-        return Ok(false);
+    let n = block::encode_chunk_body(dst, CHUNK_HEADER_SIZE + check, src, level)
+        .map_err(Error::Block)?;
+    if n == 0 {
+        return Ok(0);
     }
-    let n = dst.len() - CHUNK_HEADER_SIZE;
+    let n = check + n;
     if simd {
         dst[CHUNK_HEADER_SIZE..][..check].copy_from_slice(&xxh3::hash(src).to_le_bytes());
         put_chunk_header(dst, CHUNK_TYPE_MINLZ_SIMD, n);
@@ -554,7 +562,7 @@ pub(super) fn encode_block(dst: &mut Vec<u8>, src: &[u8], level: block::Level) -
         dst[CHUNK_HEADER_SIZE..][..check].copy_from_slice(&masked_crc32c(src).to_le_bytes());
         put_chunk_header(dst, CHUNK_TYPE_MINLZ_COMPRESSED_DATA, n);
     }
-    Ok(true)
+    Ok(CHUNK_HEADER_SIZE + n)
 }
 
 /// Writes the header of a chunk with `n` bytes of content to `dst`.

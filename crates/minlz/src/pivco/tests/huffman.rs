@@ -205,12 +205,17 @@ fn sort_leaves_stable() {
     }
 }
 
+/// Go FuzzLengths' seeds: a frequency scale, then (symbol, u16 count) triples.
+pub(super) const LENGTHS_SEEDS: [&[u8]; 2] = [
+    &[0, b'a', 1, 0, b'b', 1, 0, b'c', 2, 0],
+    &[3, 0, 255, 255, 1, 255, 255, 2, 255, 255, 3, 255, 255],
+];
+
 /// Go FuzzLengths, over its seeds and seeded random inputs.
 #[test]
 #[cfg_attr(miri, ignore)] // slow under Miri
 fn fuzz_lengths_seeded() {
-    fuzz_lengths(&[0, b'a', 1, 0, b'b', 1, 0, b'c', 2, 0]);
-    fuzz_lengths(&[3, 0, 255, 255, 1, 255, 255, 2, 255, 255, 3, 255, 255]);
+    LENGTHS_SEEDS.into_iter().for_each(fuzz_lengths);
     let mut x = Xorshift64(0x5EED);
     for _ in 0..300 {
         let n = x.intn(800);

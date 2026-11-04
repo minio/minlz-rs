@@ -28,6 +28,10 @@
 //! op before running it, reads the input and writes exactly (masked tails), and its merges
 //! load 64 bytes at each child cursor, which stays inside the op's K-byte child, so they read
 //! at most 63 bytes past it ([`ARENA_SLACK`]).
+//!
+//! Zen 5 is sensitive to code shape beyond instruction counts: [`reg`] keeps merge sources in
+//! registers, [`disp_base`] gives the merge loads a displacement, and the partitions count
+//! their loop down.
 
 use core::arch::asm;
 use core::arch::x86_64::*;
@@ -258,15 +262,16 @@ unsafe fn part<const RIGHT: bool, const LEFT: bool>(
         nr: 0,
         nl: 0,
     };
-    let (mut s, mut rem) = (src, n);
-    while rem >= 64 {
+    let (mut s, rem) = (src, n & 63);
+    // Counted down, as Go's SUBQ/JAE: LLVM compiles `while rem >= 64` to ADD, CMP and JA,
+    // and that loop made part_none 1.24 times Go's time on a Ryzen 9 9950X (0.96 counted).
+    for _ in 0..n >> 6 {
         // SAFETY: the 64 bytes at s are inside src[..n]; nr, nl are at most the bytes
         // before s, so the stores fit the caller's slices.
         unsafe {
             p.step::<RIGHT, LEFT>(reg(_mm512_loadu_si512(s.cast())), u64::MAX, 64);
             s = s.add(64);
         }
-        rem -= 64;
     }
     if rem > 0 {
         let kv = low(rem);
@@ -1058,12 +1063,32 @@ unsafe fn tail_bits(bm: *const u8, rem: usize) -> (u64, u64) {
     (_mm_cvtsi128_si64(b) as u64 & kv, kv)
 }
 
+/// What the merge loads add to their cursors, on the base [`disp_base`] lowers by it.
+const DISP: usize = 64;
+
+/// Returns `a - DISP` through an empty asm, which LLVM can't see through, so the merge loads
+/// address the arena as base + cursor + DISP instead of folding DISP back into the base. Zen 5
+/// runs these loads faster with a displacement: Go's CV loop as inline asm took 283 ns with
+/// `[R13+R12+0]` (R13 needs one, as in Go's binary) or `[R8+R12+64]`, 309 ns with `[R8+R12]`;
+/// the merges went from 0.88 (CV) and 0.95 (VV) of Go's speed to 0.99 and 1.0.
+#[inline(always)]
+#[allow(
+    clippy::pointers_in_nomem_asm_block,
+    reason = "the asm only passes the pointer through a register"
+)]
+fn disp_base(a: *const u8) -> *const u8 {
+    let mut b = a.wrapping_sub(DISP);
+    // SAFETY: the template is empty; it neither reads nor writes memory.
+    unsafe { asm!("/* {0} */", inout(reg) b, options(pure, nomem, nostack, preserves_flags)) };
+    b
+}
+
 /// Returns 64 merged symbols: R's next ones in the lanes of t, and L's next ones (VV) or c
 /// (CV) in the lanes of nt (Go `expand`).
 ///
 /// # Safety
-/// The CPU has the tier's features; the arena at a has 64 readable bytes at r, and at l
-/// for VV.
+/// The CPU has the tier's features; b is [`disp_base`] of the arena, which has 64 readable
+/// bytes at r, and at l for VV.
 #[inline]
 #[target_feature(
     enable = "avx512f,avx512bw,avx512vl,avx512vbmi,avx512vbmi2,avx512vpopcntdq,bmi2,popcnt"
@@ -1071,24 +1096,29 @@ unsafe fn tail_bits(bm: *const u8, rem: usize) -> (u64, u64) {
 unsafe fn expand<const VV: bool>(
     t: u64,
     nt: u64,
-    a: *const u8,
+    b: *const u8,
     l: usize,
     r: usize,
     c: __m512i,
 ) -> __m512i {
-    // SAFETY: the caller's.
+    // SAFETY: the caller's; b + DISP is the arena.
     unsafe {
         let z = if VV {
-            let lv = reg(_mm512_loadu_si512(a.add(l).cast()));
+            let lv = reg(_mm512_loadu_si512(b.wrapping_add(DISP + l).cast()));
             _mm512_mask_expand_epi8(reg(_mm512_setzero_si512()), nt, lv)
         } else {
             c
         };
-        _mm512_mask_expand_epi8(z, t, reg(_mm512_loadu_si512(a.add(r).cast())))
+        _mm512_mask_expand_epi8(
+            z,
+            t,
+            reg(_mm512_loadu_si512(b.wrapping_add(DISP + r).cast())),
+        )
     }
 }
 
-/// One full 64-symbol step of [`merge`] (Go `vvStep`, `cvStep`).
+/// One full 64-symbol step of [`merge`] (Go `vvStep`, `cvStep`); a is [`disp_base`] of the
+/// arena.
 ///
 /// # Safety
 /// As for [`expand`]; bm has 8 readable bytes and out 64 writable.
@@ -1133,7 +1163,7 @@ unsafe fn merge<const VV: bool>(
     mut r: usize,
     c: u8,
 ) -> usize {
-    let c = _mm512_set1_epi8(c as i8);
+    let (c, a) = (_mm512_set1_epi8(c as i8), disp_base(a));
     // SAFETY: the steps cover out[..k] and bm[..ceil(k/8)]; the cursors stay below the end
     // of their child, so the 64-byte loads stay inside k+63 bytes.
     unsafe {

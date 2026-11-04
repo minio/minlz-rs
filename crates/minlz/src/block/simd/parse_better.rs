@@ -16,10 +16,11 @@
 //! `encodeBlockBetterGo64K` of Go's `encode_l2.go`.
 
 use super::MAX_LEN;
-use super::encode::{Encoder, load32, load64, match_at};
+use super::encode::{Encoder, match_at, match_back};
 use super::parse_block::Entry;
 use crate::block::format::INPUT_MARGIN;
 use crate::block::hash::{hash4, hash7};
+use crate::block::load_store::{load32, load64};
 use crate::block::table_pool::{self, U16_13, U16_16, U32_14, U32_17};
 
 /// simdBetterMaxOff returns the largest offsets of new 4 and 5 byte matches that Balanced SIMD
@@ -61,7 +62,12 @@ impl<'a> Encoder<'a> {
 
     /// The body of encodeBlockBetterGo and encodeBlockBetterGo64K, which differ only in their
     /// tables.
-    #[inline(always)]
+    ///
+    /// Its loads are unchecked, as Go's: src has more than MIN_SAVING bytes, s and the entries
+    /// of the zeroed tables stay at most s_limit, and the candidates read from the tables and
+    /// repeat sources are below s.
+    // Not inlined, see parse_fast.
+    #[inline(never)]
     fn parse_better<E: Entry, const L: usize, const S: usize>(
         &mut self,
         src: &'a [u8],
@@ -75,7 +81,8 @@ impl<'a> Encoder<'a> {
         let s_limit = src.len() - INPUT_MARGIN;
         let mut next_emit = 0;
         let mut s = 1;
-        let mut cv = load64(src, s);
+        // SAFETY: src.len() > MIN_SAVING.
+        let mut cv = unsafe { load64(src, s) };
         let mut repeat = 1;
 
         let max_off = better_max_off(src.len());
@@ -95,20 +102,22 @@ impl<'a> Encoder<'a> {
                 l_table[hash_l] = E::new(s);
                 s_table[hash_s] = E::new(s);
 
-                let val_long = load64(src, candidate_l);
-                let val_short = load64(src, candidate_s);
+                // SAFETY: the tables hold 0 or positions below s.
+                let val_long = unsafe { load64(src, candidate_l) };
+                let val_short = unsafe { load64(src, candidate_s) };
                 if cv == val_long {
                     break;
                 }
 
-                if cv & REPEAT_MASK == load64(src, s - repeat) & REPEAT_MASK {
+                // SAFETY: the repeat offset is at most the output, so at most s.
+                if cv & REPEAT_MASK == unsafe { load64(src, s - repeat) } & REPEAT_MASK {
                     base = s + CHECK_REP;
-                    let mut i = base - repeat;
-                    while base > next_emit && i > 0 && src[i - 1] == src[base - 1] {
-                        i -= 1;
-                        base -= 1;
-                    }
-                    (offset, length, rep) = (repeat, match_at(src, base, base - repeat), true);
+                    let i = base - repeat;
+                    // SAFETY: i < base <= s + 1.
+                    base -= unsafe { match_back(src, base, i, i.min(base - next_emit)) };
+                    // SAFETY: as i.
+                    let n = unsafe { match_at(src, base, base - repeat) };
+                    (offset, length, rep) = (repeat, n, true);
                     break;
                 }
 
@@ -119,32 +128,35 @@ impl<'a> Encoder<'a> {
                     hash_l = hash7(cv >> 8, l_bits) as usize;
                     candidate_l = l_table[hash_l].get();
                     l_table[hash_l] = E::new(s + 1);
-                    if (cv >> 8) as u32 == load32(src, candidate_l) {
+                    // SAFETY: as val_long; a position this loop stored is at most s.
+                    if (cv >> 8) as u32 == unsafe { load32(src, candidate_l) } {
                         s += 1;
                         break;
                     }
                     candidate_l = candidate_s;
                     break;
                 }
-                cv = load64(src, next_s);
+                // SAFETY: next_s <= s_limit.
+                cv = unsafe { load64(src, next_s) };
                 s = next_s;
             }
 
             if !rep {
-                while candidate_l > 0 && s > next_emit && src[candidate_l - 1] == src[s - 1] {
-                    candidate_l -= 1;
-                    s -= 1;
-                }
+                // SAFETY: candidate_l < s.
+                let n = unsafe { match_back(src, s, candidate_l, candidate_l.min(s - next_emit)) };
+                (candidate_l, s) = (candidate_l - n, s - n);
                 base = s;
                 offset = base - candidate_l;
-                length = match_at(src, base, candidate_l);
+                // SAFETY: as above.
+                length = unsafe { match_at(src, base, candidate_l) };
                 // Bail if the match is equal or worse to the encoding.
                 if length <= 5 && offset > max_off[length & 1] && repeat != offset {
                     s = next_s + 1;
                     if s >= s_limit {
                         break 'outer;
                     }
-                    cv = load64(src, s);
+                    // SAFETY: s < s_limit.
+                    cv = unsafe { load64(src, s) };
                     continue;
                 }
             }
@@ -182,10 +194,10 @@ impl<'a> Encoder<'a> {
             }
 
             let (mut index0, mut index1) = (base + 1, s - 2);
+            // SAFETY: s < s_limit and the indexes are below s, for the loads that follow.
             if rep {
                 while index0 < index1 {
-                    let cv0 = load64(src, index0);
-                    let cv1 = load64(src, index1);
+                    let (cv0, cv1) = unsafe { (load64(src, index0), load64(src, index1)) };
                     l_table[hash7(cv0, l_bits) as usize] = E::new(index0);
                     s_table[hash4(cv0 >> 8, s_bits) as usize] = E::new(index0 + 1);
                     l_table[hash7(cv1, l_bits) as usize] = E::new(index1);
@@ -193,24 +205,24 @@ impl<'a> Encoder<'a> {
                     index0 += 2;
                     index1 -= 2;
                 }
-                cv = load64(src, s);
+                cv = unsafe { load64(src, s) };
                 continue;
             }
 
-            let cv0 = load64(src, index0);
-            let cv1 = load64(src, index1);
+            let (cv0, cv1) = unsafe { (load64(src, index0), load64(src, index1)) };
             l_table[hash7(cv0, l_bits) as usize] = E::new(index0);
             s_table[hash4(cv0 >> 8, s_bits) as usize] = E::new(index0 + 1);
             l_table[hash7(cv1, l_bits) as usize] = E::new(index1);
             s_table[hash4(cv1 >> 8, s_bits) as usize] = E::new(index1 + 1);
             index0 += 1;
             index1 -= 1;
-            cv = load64(src, s);
+            cv = unsafe { load64(src, s) };
 
             let mut index2 = (index0 + index1 + 1) >> 1;
             while index2 < index1 {
-                l_table[hash7(load64(src, index0), l_bits) as usize] = E::new(index0);
-                l_table[hash7(load64(src, index2), l_bits) as usize] = E::new(index2);
+                let (cv0, cv2) = unsafe { (load64(src, index0), load64(src, index2)) };
+                l_table[hash7(cv0, l_bits) as usize] = E::new(index0);
+                l_table[hash7(cv2, l_bits) as usize] = E::new(index2);
                 index0 += 2;
                 index2 += 2;
             }

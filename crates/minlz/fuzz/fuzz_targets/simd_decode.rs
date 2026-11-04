@@ -15,17 +15,18 @@
 //! Go's `FuzzDecodeSIMD`: data[..4] is a little-endian `extra`, data[4..] a SIMD block body
 //! from its flags byte. The block gets a valid header of `body.len() + 4 + 64 + extra` bytes, and
 //! every exec tier must decode it as the reference decoder does. dst has exactly the decoded
-//! size as capacity, so writes past it are heap overflows under ASan.
+//! size as capacity, so writes past it are heap overflows under ASan, and is filled with garbage
+//! that varies with `extra` first.
 //!
-//! Seeds: the SIMD fixtures, with `simd_header`'s body and extra, as the in-crate
-//! `fuzz_decode_simd_seeded` test derives them.
+//! Seeds: SIMD blocks as `extra` and body, see `RUNBOOK.md` §1.
 //!
 //! Run with `cargo +nightly fuzz run simd_decode -- -max_total_time=60`.
 
 #![no_main]
 
+mod common;
+
 use libfuzzer_sys::fuzz_target;
-use minlz::cpu;
 use minlz::reference::decode_simd_block;
 
 /// Larger blocks only cost memory: every check is per chunk or per literal block.
@@ -48,19 +49,7 @@ fuzz_target!(|data: &[u8]| {
     src.push(v as u8);
     src.extend_from_slice(body);
     let want = decode_simd_block(&src);
-    // The best tier, then the lower ones, as Go's simdTiers.
-    for mask in [0, cpu::AVX512, cpu::AVX512 | cpu::AVX2 | cpu::NEON] {
-        cpu::disable(mask);
-        let mut dst = Vec::with_capacity(n);
-        let got = minlz::decode(&mut dst, &src);
-        cpu::enable_all();
-        assert_eq!(
-            got.is_ok(),
-            want.is_ok(),
-            "tiers without {mask:#x}: err {got:?}, reference {want:?}"
-        );
-        if let Ok(w) = &want {
-            assert!(dst == *w, "tiers without {mask:#x}: reference mismatch");
-        }
-    }
+    let want = want.as_deref().map_err(String::as_str);
+    let mut dst = Vec::with_capacity(n);
+    common::decode_tiers(&"reference", &src, want, &mut dst, 0xfe ^ extra[0]);
 });

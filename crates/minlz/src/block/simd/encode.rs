@@ -25,6 +25,7 @@ use super::{
     LL, MAX_CHUNKS, MAX_LEN, MIN_SAVING, OFFC, TOK,
 };
 use crate::block::format::put_uvarint;
+use crate::block::load_store::{load8, load64};
 use crate::pivco;
 
 /// Go's `LevelSuperFastSIMD` and the other int levels of [`encode_block_simd`].
@@ -307,30 +308,41 @@ pub(crate) fn encode_block_simd(dst: &mut [u8], src: &[u8], level: i32) -> usize
     n
 }
 
-/// Loads 4 bytes at b[i..].
+/// matchAt returns how many bytes match at src[a..] and src[b..], like matchLen.
+///
+/// # Safety
+/// `b < a <= src.len()` must hold.
 #[inline(always)]
-pub(super) fn load32(b: &[u8], i: usize) -> u32 {
-    u32::from_le_bytes(b[i..i + 4].try_into().unwrap())
-}
-
-/// Loads 8 bytes at b[i..].
-#[inline(always)]
-pub(super) fn load64(b: &[u8], i: usize) -> u64 {
-    u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
-}
-
-/// matchAt returns how many bytes match at src[a..] and src[b..], with b < a, like matchLen.
-#[inline(always)]
-pub(super) fn match_at(src: &[u8], a: usize, b: usize) -> usize {
+pub(super) unsafe fn match_at(src: &[u8], a: usize, b: usize) -> usize {
+    debug_assert!(b < a && a <= src.len());
     let mut n = 0;
     while a + n + 8 <= src.len() {
-        let diff = load64(src, a + n) ^ load64(src, b + n);
+        // SAFETY: b < a.
+        let diff = unsafe { load64(src, a + n) ^ load64(src, b + n) };
         if diff != 0 {
             return n + (diff.trailing_zeros() >> 3) as usize;
         }
         n += 8;
     }
-    while a + n < src.len() && src[a + n] == src[b + n] {
+    // SAFETY: as above.
+    while a + n < src.len() && unsafe { load8(src, a + n) == load8(src, b + n) } {
+        n += 1;
+    }
+    n
+}
+
+/// Returns how many bytes match before src[a] and src[b], at most max: the back-extension of
+/// the parsers, in a form that keeps LLVM from deriving an induction variable for every value
+/// used after it.
+///
+/// # Safety
+/// `max <= b < a <= src.len()` must hold.
+#[inline(always)]
+pub(super) unsafe fn match_back(src: &[u8], a: usize, b: usize, max: usize) -> usize {
+    debug_assert!(max <= b && b < a && a <= src.len());
+    let mut n = 0;
+    // SAFETY: b - n - 1 < a - n - 1 < a, and n < max <= b.
+    while n < max && unsafe { load8(src, a - n - 1) == load8(src, b - n - 1) } {
         n += 1;
     }
     n
@@ -546,7 +558,9 @@ impl<'a> Encoder<'a> {
         if ll > MAX_LEN {
             self.s.buf[n..n + ll].copy_from_slice(&src[from..from + ll]);
         } else {
-            self.s.buf[n..n + MAX_LEN].copy_from_slice(&src[from..from + MAX_LEN]);
+            // An array copy inlines, where LLVM merges two copy_from_slice into one memcpy call.
+            let d: &mut [u8; MAX_LEN] = (&mut self.s.buf[n..n + MAX_LEN]).try_into().unwrap();
+            *d = src[from..from + MAX_LEN].try_into().unwrap();
         }
         self.n_lits += ll;
         self.pos += ll;

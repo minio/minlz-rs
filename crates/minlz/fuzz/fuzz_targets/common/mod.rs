@@ -1,0 +1,77 @@
+// Copyright 2026 MinIO Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Checks shared by the block targets. ASan's redzones around libFuzzer's exact-size input
+//! and around exact-capacity outputs stand in for the guard pages of Go's fuzzers.
+
+// Each target uses a subset.
+#![allow(dead_code)]
+
+use std::fmt::Debug;
+use std::mem::MaybeUninit;
+
+use minlz::cpu;
+
+/// The best exec tier, then the lower ones, as Go's `simdTiers`.
+const TIERS: [u32; 3] = [0, cpu::AVX512, cpu::AVX512 | cpu::AVX2 | cpu::NEON];
+
+/// Reports whether `b` has a SIMD block header: a zero byte, then a size varint of at least
+/// 1 << 24, as the decoder tells them apart.
+pub fn is_simd(b: &[u8]) -> bool {
+    let mut v = 0u64;
+    for (i, &c) in b.iter().skip(1).take(10).enumerate() {
+        v |= u64::from(c & 0x7f) << (7 * i);
+        if c < 0x80 {
+            return b[0] == 0 && v >= 1 << 24;
+        }
+    }
+    false
+}
+
+/// Clears `dst` and fills its spare capacity with `fill`, so output must not depend on what dst
+/// held, as Go's fuzzers fill dst before decoding. `encode` and the SIMD decoder's Go tier zero
+/// their output first, so only the classic decoder and the vector tiers see the fill.
+pub fn garbage(dst: &mut Vec<u8>, fill: u8) {
+    dst.clear();
+    dst.spare_capacity_mut().fill(MaybeUninit::new(fill));
+}
+
+/// Decodes `block` into `dst` on every exec tier, which must all return `want`. `ctx` names
+/// the case in failures.
+pub fn decode_tiers(
+    ctx: &dyn Debug,
+    block: &[u8],
+    want: Result<&[u8], &str>,
+    dst: &mut Vec<u8>,
+    fill: u8,
+) {
+    for mask in TIERS {
+        garbage(dst, fill);
+        cpu::disable(mask);
+        let got = minlz::decode(dst, block);
+        cpu::enable_all();
+        assert_eq!(
+            got.is_ok(),
+            want.is_ok(),
+            "{ctx:?}, tiers without {mask:#x}: err {got:?}, want err {:?}",
+            want.err()
+        );
+        if let Ok(w) = want {
+            assert!(
+                dst[..] == *w,
+                "{ctx:?}, tiers without {mask:#x}: output mismatch"
+            );
+        }
+    }
+}

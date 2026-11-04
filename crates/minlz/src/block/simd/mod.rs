@@ -41,6 +41,42 @@ mod parse_fast;
 
 pub(crate) use encode::encode_block_simd;
 
+/// Appends the size bytes that block, a SIMD block from its flags byte, decodes to, to dst.
+///
+/// The vector tiers decode into the spare capacity of dst: zeroing it first cost 2-15% of a
+/// decode at 1-8 MB blocks. That relies on two properties of the decoder. On success it has written
+/// all size bytes: the operations write the output contiguously from 0, and the literals after
+/// them fill the rest. On error dst keeps its length, so nothing unwritten becomes visible. The
+/// fast loops load bytes past the output position before they write them (matches with offsets
+/// below their copy width, see the [memory rules](exec)); those bytes only reach output that later
+/// operations overwrite. The vector loops do that through raw pointers; the Go loops through
+/// slices, so the Go tier, the only one under Miri, gets a zeroed buffer.
+///
+/// Those loads, and the slice over unwritten bytes, are still undefined behavior in Rust's
+/// abstract machine, which Miri can't check on the vector tiers: decoder code outside the vector
+/// loops must only read output it has written.
+// Inlined, it made the classic decoder in block::append_decoded 3-4% slower at 4 MB blocks.
+#[inline(never)]
+pub(crate) fn append_decoded(dst: &mut Vec<u8>, size: usize, block: &[u8]) -> Result<(), Error> {
+    let start = dst.len();
+    let tier = exec::Tier::current();
+    if tier == exec::Tier::Go || !tier.usable() {
+        dst.resize(start + size, 0);
+        return decode_simd(&mut dst[start..], block).inspect_err(|_| dst.truncate(start));
+    }
+    dst.reserve(size);
+    debug_assert!(dst.capacity() - start >= size);
+    // SAFETY: reserve made size bytes of capacity from start, decode_simd writes all of them
+    // before it returns Ok, and an error skips set_len. The slice over uninitialized bytes breaks
+    // from_raw_parts_mut's contract (see above).
+    unsafe {
+        let out = core::slice::from_raw_parts_mut(dst.as_mut_ptr().add(start), size);
+        decode_simd(out, block)?;
+        dst.set_len(start + size);
+    }
+    Ok(())
+}
+
 pub(crate) const BLOCK_TYPE: u64 = 1;
 pub(crate) const MIN_SAVING: usize = 64;
 pub(crate) const MAX_CHUNK: usize = 1024 << 5;
@@ -263,5 +299,56 @@ mod tests {
         assert_eq!(rvarint(&[0x02, 0xac]), (300, 2));
         assert_eq!(rvarint(&[0x06, 0x8d, 0xa0]), (100000, 3));
         assert_eq!(rvarint(&[0x80]), (0, 0));
+    }
+
+    /// append_decoded writes every byte of the spare capacity it decodes into, on every tier,
+    /// and leaves dst as it was on error.
+    #[test]
+    #[cfg_attr(miri, ignore = "encodes and decodes 200 KiB at 7 levels")]
+    fn append_decoded_fills_spare_capacity() {
+        use crate::block::{Level, encode};
+        // Short repeats, overlapping matches and delta-friendly counters, over and under 64 KiB.
+        let mut src = Vec::new();
+        let mut x = 1u32;
+        while src.len() < 200_000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let n = (x >> 24) as usize % 48 + 1;
+            match x % 4 {
+                0 if src.len() > 64 => {
+                    let o = (x >> 8) as usize % 40 + 1;
+                    (0..n).for_each(|_| src.push(src[src.len() - o]));
+                }
+                1 => src.extend((0..n as u32).flat_map(|i| (i * 7 + x).to_le_bytes())),
+                _ => src.extend((0..n).map(|i| b"etaoin shrdlu"[(i + n) % 13])),
+            }
+        }
+        for level in [
+            Level::SuperFastSimd,
+            Level::FastestSimd,
+            Level::BalancedSimd,
+            Level::SmallestSimd,
+            Level::SuperFastSimdDelta,
+            Level::FastestSimdDelta,
+            Level::BalancedSimdDelta,
+        ] {
+            for src in [&src[..], &src[..30_000]] {
+                let mut block = Vec::new();
+                encode(&mut block, src, level).unwrap();
+                let typ = get_uvarint(&block[1..]).unwrap().0 >> 24;
+                assert_eq!(typ, BLOCK_TYPE, "{level:?}: not a SIMD block");
+                let mut bad = block.clone();
+                bad.remove(bad.len() / 2);
+                exec::simd_tiers(|tier| {
+                    let mut dst = vec![0x5a; 6 + src.len() + 64];
+                    dst.truncate(6);
+                    crate::block::append_decoded(&mut dst, &block).unwrap();
+                    assert!(dst[6..] == *src, "{level:?} {tier:?}");
+                    let mut dst = vec![0x5a; 6 + src.len()];
+                    dst.truncate(6);
+                    assert!(crate::block::append_decoded(&mut dst, &bad).is_err());
+                    assert_eq!(dst, [0x5a; 6], "{level:?} {tier:?}");
+                });
+            }
+        }
     }
 }

@@ -635,7 +635,8 @@ fn emitters_copy3() {
 
 /// Smoke test: decode every file in the cargo-fuzz seed corpus directory
 /// (if present).  Equivalent to running `decode_arbitrary` for one
-/// iteration per seed — must not panic or read OOB on any input.
+/// iteration per seed — must not panic or read OOB on any input, and SIMD
+/// blocks must decode as the reference decoder does.
 #[test]
 #[cfg_attr(
     miri,
@@ -657,7 +658,14 @@ fn decode_arbitrary_corpus_smoke() {
         };
         buf.clear();
         // Any error is acceptable; a panic is not.
-        let _ = decode(&mut buf, &bytes);
+        let res = decode(&mut buf, &bytes);
+        let simd = bytes.first() == Some(&0)
+            && format::get_uvarint(&bytes[1..]).is_some_and(|(v, _)| v >= 1 << 24);
+        if simd {
+            let want = crate::reference::decode_simd_block(&bytes);
+            assert_eq!(res.is_ok(), want.is_ok(), "{:?}", ent.path());
+            assert!(want.is_err() || buf == want.unwrap(), "{:?}", ent.path());
+        }
         count += 1;
     }
     eprintln!("decode_arbitrary_corpus_smoke: scanned {count} seeds");
@@ -1276,6 +1284,20 @@ fn overlap_tail_block(offset: usize, length: usize, trailing: usize) -> (Vec<u8>
     (encoded, want)
 }
 
+/// Adds the seeds Go's `FuzzDecodeBlock` and `FuzzEncodingBlocks` build in code, see
+/// [`crate::fuzz_seeds`].
+#[test]
+#[ignore = "writes fuzz/corpus, see fuzz/RUNBOOK.md §1"]
+fn write_fuzz_seeds() {
+    let offsets = [1, 3, 16, 17, 63, 64, 65, 4096, 65536];
+    let blocks = offsets
+        .into_iter()
+        .flat_map(|o| [127, 128, 4096].map(|l| overlap_tail_block(o, l, 0).0));
+    crate::fuzz_seeds::save("decode_arbitrary", blocks);
+    let inputs = (1..=2).filter_map(|delta| build_max_offset_boundary(0, delta));
+    crate::fuzz_seeds::save("roundtrip", inputs);
+}
+
 /// Ports `TestDecodeOverlapTail` (`decode_test.go`): copy-width boundaries.
 /// Go's check for writes outside the destination has no counterpart, as
 /// `decode` owns its `Vec`.
@@ -1340,5 +1362,69 @@ fn decode_overlap_tail_large() {
         let (encoded, want) = overlap_tail_block(offset, MAX_BLOCK_SIZE - offset - 64, 0);
         decode(&mut got, &encoded).unwrap_or_else(|e| panic!("offset={offset}: {e}"));
         assert!(got == want, "offset={offset}");
+    }
+}
+
+/// Text, LE counters for delta literals, and noise with repeats, each over and under 64 KiB.
+fn mixed_inputs() -> Vec<Vec<u8>> {
+    let mut rng = Xor64::new(7);
+    let counters: Vec<u8> = (0..30_000u32).flat_map(|i| (i * 3).to_le_bytes()).collect();
+    let mut noisy = Vec::new();
+    while noisy.len() < 100_000 {
+        let k = rng.next() as usize % 40 + 1;
+        if rng.next().is_multiple_of(3) && noisy.len() > 1000 {
+            let o = rng.next() as usize % 1000 + 1;
+            for _ in 0..k {
+                noisy.push(noisy[noisy.len() - o]);
+            }
+        } else {
+            noisy.extend((0..k).map(|_| rng.next() as u8 & 0x3f));
+        }
+    }
+    let mut v = vec![pangram_x(3000), counters, noisy];
+    v.extend(v.clone().iter().map(|b| b[..20_000].to_vec()));
+    v
+}
+
+const ALL_LEVELS: [Level; 10] = [
+    Level::Fastest,
+    Level::Balanced,
+    Level::Smallest,
+    Level::SuperFastSimd,
+    Level::FastestSimd,
+    Level::BalancedSimd,
+    Level::SmallestSimd,
+    Level::SuperFastSimdDelta,
+    Level::FastestSimdDelta,
+    Level::BalancedSimdDelta,
+];
+
+/// Streams reuse the buffer of [`encode_chunk_body`] without zeroing it, so a dirty buffer must
+/// give the same chunk body as a fresh one.
+#[test]
+#[cfg_attr(miri, ignore = "encodes 360 KiB at every level")]
+fn encode_chunk_body_reuses_dirty_buffer() {
+    let inputs = mixed_inputs();
+    for level in ALL_LEVELS {
+        let mut dirty = vec![0xa5; 7];
+        for (i, src) in inputs.iter().enumerate() {
+            let mut fresh = Vec::new();
+            let n = encode_chunk_body(&mut fresh, 7, src, level).unwrap();
+            dirty.iter_mut().for_each(|b| *b = !*b);
+            let m = encode_chunk_body(&mut dirty, 7, src, level).unwrap();
+            assert_eq!(fresh[7..7 + n], dirty[7..7 + m], "{level:?} input {i}");
+            if n == 0 {
+                continue;
+            }
+            let mut dec = Vec::new();
+            if i32::from(level) > 3 {
+                let mut blk = vec![0];
+                blk.extend_from_slice(&fresh[7..7 + n]);
+                decode(&mut dec, &blk).unwrap();
+            } else {
+                append_decoded_chunk_body(&mut dec, &fresh[7..7 + n]).unwrap();
+            }
+            assert!(dec == *src, "{level:?} input {i}: round trip");
+        }
     }
 }

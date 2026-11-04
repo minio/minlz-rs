@@ -486,10 +486,12 @@ cargo bench -p minlz --bench block   # criterion: block codec
 cargo bench -p minlz --bench stream  # criterion: stream codec (incl. MT and seek)
 ```
 
-Fuzzing lives at [`crates/minlz/fuzz/`](crates/minlz/fuzz/) with five
-targets (decode-arbitrary, roundtrip, stream-roundtrip,
-stream-decode-arbitrary, index-load).  See its
-[`RUNBOOK.md`](crates/minlz/fuzz/RUNBOOK.md) for setup.
+Fuzzing lives at [`crates/minlz/fuzz/`](crates/minlz/fuzz/) with nine
+targets: block (`roundtrip`, `decode_arbitrary`, `simd_decode`), stream
+(`stream_roundtrip`, `stream_decode_arbitrary`, `index_load`) and pivco
+(`pivco_decode`, `pivco_roundtrip`, `pivco_table`).  Seeds come from the ignored
+`write_fuzz_seeds` tests.  See its [`README.md`](crates/minlz/fuzz/README.md)
+and [`RUNBOOK.md`](crates/minlz/fuzz/RUNBOOK.md) for setup.
 
 MSRV: **Rust 1.89**.
 

@@ -20,6 +20,17 @@
 //! insert a `BSWAP`, which is correct but slower (BE is supported but not
 //! perf-tuned per the project rules).
 
+/// Load the byte at offset `i` in `b` with no bounds check.
+///
+/// # Safety
+/// `i < b.len()` must hold.
+#[inline(always)]
+pub(super) unsafe fn load8(b: &[u8], i: usize) -> u8 {
+    debug_assert!(i < b.len());
+    // SAFETY: caller guarantees `i < b.len()`.
+    unsafe { *b.as_ptr().add(i) }
+}
+
 /// Load a `u16` at offset `i` in `b` with no bounds check.
 ///
 /// # Safety
@@ -41,6 +52,7 @@ pub(super) unsafe fn load16(b: &[u8], i: usize) -> u16 {
 /// `i + 4 <= b.len()` must hold.
 #[inline(always)]
 pub(super) unsafe fn load32(b: &[u8], i: usize) -> u32 {
+    debug_assert!(i + 4 <= b.len());
     // SAFETY: see `load16`.
     unsafe { core::ptr::read_unaligned(b.as_ptr().add(i) as *const u32).to_le() }
 }
@@ -51,6 +63,7 @@ pub(super) unsafe fn load32(b: &[u8], i: usize) -> u32 {
 /// `i + 8 <= b.len()` must hold.
 #[inline(always)]
 pub(super) unsafe fn load64(b: &[u8], i: usize) -> u64 {
+    debug_assert!(i + 8 <= b.len());
     // SAFETY: see `load16`.
     unsafe { core::ptr::read_unaligned(b.as_ptr().add(i) as *const u64).to_le() }
 }
