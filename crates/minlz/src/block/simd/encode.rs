@@ -1341,7 +1341,7 @@ fn limited_lens(w: &[u64], lim: &[u8], l: &mut [u8]) {
             }
         }
         np = 0;
-        for p in cur[..nc].chunks_exact(2) {
+        for p in cur[..nc].as_chunks::<2>().0 {
             prev[np] = p[0] + p[1];
             np += 1;
         }

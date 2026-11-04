@@ -574,13 +574,13 @@ fn rust_encode(src: &[u8], level: i32) -> Vec<u8> {
 /// first entry, chunk or operation.
 fn block_diff(a: &[u8], b: &[u8]) -> String {
     let at = a.iter().zip(b).position(|(x, y)| x != y);
-    let mut d = format!(
+    let d = format!(
         "{} and {} bytes, first difference at byte {at:?}",
         a.len(),
         b.len()
     );
     #[cfg(feature = "reference")]
-    d.push_str(&walk::walk_diff(a, b));
+    let d = d + &walk::walk_diff(a, b);
     d
 }
 

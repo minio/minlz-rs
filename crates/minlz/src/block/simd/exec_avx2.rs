@@ -400,7 +400,7 @@ pub(super) unsafe fn tok_stats_avx2(b: &[u8]) -> (usize, usize, usize, usize, bo
     let [mut out, mut lit, mut rep, mut esc] = [zero; 4];
     let (m3f, m4, m2, m1, max) = (splat(0x3f), splat(4), splat(2), splat(1), splat(135));
     debug_assert!(b.len().is_multiple_of(32));
-    for c in b.chunks_exact(32) {
+    for c in b.as_chunks::<32>().0 {
         // SAFETY: c holds 32 bytes.
         let t = unsafe { load(c.as_ptr()) };
         valid = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_min_epu8(max, t), t), valid);
@@ -428,7 +428,7 @@ pub(super) unsafe fn ll_stats_avx2(b: &[u8]) -> (usize, usize, bool) {
     let (mut sum_v, mut cnt) = (zero, zero);
     let (c1, c33) = (splat(1), splat(33));
     debug_assert!(b.len().is_multiple_of(32));
-    for c in b.chunks_exact(32) {
+    for c in b.as_chunks::<32>().0 {
         // SAFETY: c holds 32 bytes.
         let t = unsafe { load(c.as_ptr()) };
         let x = _mm256_min_epu8(c33, _mm256_max_epu8(c1, t));
@@ -453,7 +453,7 @@ pub(super) unsafe fn off_stats_avx2(b: &[u8]) -> (usize, usize, bool) {
     let (mut sum_v, mut cnt) = (zero, zero);
     let (c1, c175, m1f) = (splat(1), splat(175), splat(0x1f));
     debug_assert!(b.len().is_multiple_of(32));
-    for c in b.chunks_exact(32) {
+    for c in b.as_chunks::<32>().0 {
         // SAFETY: c holds 32 bytes.
         let t = unsafe { load(c.as_ptr()) };
         let x = _mm256_min_epu8(c175, _mm256_max_epu8(c1, t));

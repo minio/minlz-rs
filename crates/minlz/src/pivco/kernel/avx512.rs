@@ -1664,10 +1664,10 @@ unsafe fn flush(
     thr: usize,
     h16: &mut [u16; 256],
 ) {
-    for (b, (n, hp)) in cnt.iter_mut().zip(h16.chunks_exact_mut(64)).enumerate() {
+    for (b, (n, hp)) in cnt.iter_mut().zip(h16.as_chunks_mut::<64>().0).enumerate() {
         if *n >= thr {
             // SAFETY: the caller's.
-            unsafe { consume(c, base.add(b * BIN_SIZE), *n, hp.try_into().unwrap()) };
+            unsafe { consume(c, base.add(b * BIN_SIZE), *n, hp) };
             *n = 0;
         }
     }
@@ -1761,7 +1761,12 @@ unsafe fn consume(c: &HistConsts, mut data: *mut u8, nb: usize, hp: &mut [u16; 6
 )]
 fn widen(h: &mut [u32; 256], h16: &[u16; 256]) {
     let lo16 = _mm512_set1_epi32(0xFFFF);
-    for (o, v) in h.chunks_exact_mut(32).zip(h16.chunks_exact(32)) {
+    for (o, v) in h
+        .as_chunks_mut::<32>()
+        .0
+        .iter_mut()
+        .zip(h16.as_chunks::<32>().0)
+    {
         // SAFETY: v has 32 u16s and o 32 u32s.
         unsafe {
             let v = _mm512_loadu_si512(v.as_ptr().cast());

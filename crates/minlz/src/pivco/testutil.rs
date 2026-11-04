@@ -956,7 +956,7 @@ pub fn fuzz_lengths(data: &[u8]) {
     }
     let shift = [0, 20, 40, 48][usize::from(data[0] & 3)];
     let mut h = [0u64; 256];
-    for p in data[1..].chunks_exact(3) {
+    for p in data[1..].as_chunks::<3>().0 {
         h[usize::from(p[0])] = (u64::from(p[1]) | u64::from(p[2]) << 8) << shift;
     }
     let (mut lens, mut again) = ([0u8; 256], [0u8; 256]);

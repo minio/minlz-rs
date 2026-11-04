@@ -179,14 +179,14 @@ fn limit_lengths(lens: &mut [u8; 256], used: &[u8]) {
     // which overflows for depths above 63) and then lumps them into m.
     let cl = |lens: &[u8; 256], s: u8| usize::from(lens[usize::from(s)].min(M as u8 + 1));
     let mut c4 = [[0u8; M + 2]; 4];
-    let mut q = used.chunks_exact(4);
-    for u in &mut q {
+    let (q, rest) = used.as_chunks::<4>();
+    for u in q {
         c4[0][cl(lens, u[0])] += 1;
         c4[1][cl(lens, u[1])] += 1;
         c4[2][cl(lens, u[2])] += 1;
         c4[3][cl(lens, u[3])] += 1;
     }
-    for &s in q.remainder() {
+    for &s in rest {
         c4[0][cl(lens, s)] += 1;
     }
     let mut count = [0usize; M + 2];

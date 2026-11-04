@@ -109,9 +109,8 @@ fn bump(c: &mut [u32; 256], b: u8) {
 /// zero-extension each.
 pub(super) fn histogram_generic(h: &mut [u32; 256], src: &[u8]) {
     let mut c = [[0u32; 256]; 4];
-    let mut chunks = src.chunks_exact(16);
-    for s in &mut chunks {
-        let s: &[u8; 16] = s.try_into().unwrap();
+    let (chunks, rest) = src.as_chunks::<16>();
+    for s in chunks {
         bump(&mut c[0], s[0]);
         bump(&mut c[1], s[1]);
         bump(&mut c[2], s[2]);
@@ -129,7 +128,7 @@ pub(super) fn histogram_generic(h: &mut [u32; 256], src: &[u8]) {
         bump(&mut c[2], s[14]);
         bump(&mut c[3], s[15]);
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         bump(&mut c[0], b);
     }
     for (i, x) in h.iter_mut().enumerate() {

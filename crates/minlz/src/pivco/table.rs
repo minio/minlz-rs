@@ -76,7 +76,11 @@ impl Table {
     pub fn set_lengths(&mut self, lens: &[u8; 256]) -> Result<(), Error> {
         self.nsched = 0;
         // build reads lengths as 4 bits.
-        let or = lens.chunks_exact(8).fold(0, |a, c| a | load64(c, 0));
+        let or = lens
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .fold(0, |a, c| a | load64(c, 0));
         if or & 0xF0F0F0F0F0F0F0F0 != 0 {
             return Err(ERR_CODE_LEN);
         }

@@ -341,12 +341,12 @@ fn key(o: usize) -> &'static [u8; STRIPE] {
 /// The CPU has K's features.
 #[inline(always)]
 unsafe fn blocks_acc<K: Kernel>(acc: &mut K::Acc, p: &[u8], n: usize) {
-    for b in p[..n * BLOCK].chunks_exact(BLOCK) {
-        for (s, st) in b.chunks_exact(STRIPE).enumerate() {
+    for b in p[..n * BLOCK].as_chunks::<BLOCK>().0 {
+        for (s, st) in b.as_chunks::<STRIPE>().0.iter().enumerate() {
             // SAFETY: the caller checked K's features; prefetching never faults.
             unsafe {
                 K::prefetch(st.as_ptr().wrapping_add(BLOCK));
-                K::stripe(acc, st.try_into().unwrap(), key(8 * s));
+                K::stripe(acc, st, key(8 * s));
             }
         }
         // SAFETY: the caller checked K's features.
@@ -383,8 +383,13 @@ unsafe fn accum<K: Kernel>(a: &mut [u64; 8], p: &[u8]) {
     unsafe {
         let mut acc = K::load(a);
         blocks_acc::<K>(&mut acc, p, n);
-        for (s, st) in rest[..rest.len() - 1].chunks_exact(STRIPE).enumerate() {
-            K::stripe(&mut acc, st.try_into().unwrap(), key(8 * s));
+        for (s, st) in rest[..rest.len() - 1]
+            .as_chunks::<STRIPE>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            K::stripe(&mut acc, st, key(8 * s));
         }
         K::stripe(
             &mut acc,

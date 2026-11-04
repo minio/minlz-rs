@@ -623,7 +623,7 @@ unsafe fn sums<const N: usize>(
         // A u16 lane takes 128 pair sums up to 510.
         for run in b.chunks(16 * 128) {
             let mut acc = [vdupq_n_u16(0); N];
-            for c in run.chunks_exact(16) {
+            for c in run.as_chunks::<16>().0 {
                 let (m, v) = f(vld1q_u8(c.as_ptr()));
                 mx = vmaxq_u8(m, mx);
                 for (a, v) in acc.iter_mut().zip(v) {

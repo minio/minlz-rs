@@ -281,9 +281,9 @@ impl<'a> Planner<'a> {
 
 /// Returns the number of set bits in b.
 fn ones(b: &[u8]) -> u32 {
-    let mut c = b.chunks_exact(8);
-    let n: u32 = (&mut c).map(|w| load64(w, 0).count_ones()).sum();
-    n + c.remainder().iter().map(|x| x.count_ones()).sum::<u32>()
+    let (c, rest) = b.as_chunks::<8>();
+    let n: u32 = c.iter().map(|w| load64(w, 0).count_ones()).sum();
+    n + rest.iter().map(|x| x.count_ones()).sum::<u32>()
 }
 
 /// Checks that the bits of the last byte of a bits-long region past its end are 0.
