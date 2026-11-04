@@ -111,6 +111,7 @@ const CHUNK_TYPE_LEGACY_COMPRESSED_DATA: u8 = 0x00;
 const CHUNK_TYPE_UNCOMPRESSED_DATA: u8 = 0x01;
 const CHUNK_TYPE_MINLZ_COMPRESSED_DATA: u8 = 0x02;
 const CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC: u8 = 0x03;
+const CHUNK_TYPE_MINLZ_SIMD: u8 = 0x10;
 const CHUNK_TYPE_EOF: u8 = 0x20;
 const CHUNK_TYPE_STREAM_IDENTIFIER: u8 = 0xff;
 const MAX_NON_SKIPPABLE_CHUNK: u8 = 0x3f;
@@ -118,6 +119,7 @@ const CHECKSUM_SIZE: usize = 4;
 const MAGIC_BODY_MINLZ: &[u8] = b"MinLz";
 const MAGIC_BODY_S2: &[u8] = b"sNaPpY";
 const MAGIC_BODY_LEN: usize = 6;
+const STREAM_FLAG_SIMD: u8 = 1 << 6;
 
 /// Pair of `(compressed, uncompressed)` stream offsets, in bytes from the
 /// start of the stream.  Sorted ascending by both fields inside an [`Index`].
@@ -194,6 +196,8 @@ impl Index {
     /// order.
     ///
     /// Matches Go `Index.add`:
+    /// * An entry at the last entry's uncompressed offset replaces its compressed
+    ///   offset, so the index points at the block after the chunks before it.
     /// * If the uncompressed gap from the last entry is `< est_block_uncomp`
     ///   (including a non-increasing offset), the call is a no-op — used to
     ///   thin the index during writing.
@@ -209,8 +213,12 @@ impl Index {
         if compressed > i64::MAX as u64 || uncompressed > i64::MAX as u64 {
             return Err(Error::Invalid("offset exceeds i64 wire range"));
         }
-        if let Some(&latest) = self.offsets.last() {
-            // Non-increasing uncompressed offset → gap 0 → skipped below.
+        if let Some(latest) = self.offsets.last_mut() {
+            if uncompressed == latest.uncompressed {
+                latest.compressed = compressed;
+                return Ok(());
+            }
+            // Decreasing uncompressed offset → gap 0 → skipped below.
             let gap = uncompressed.saturating_sub(latest.uncompressed);
             if gap < self.est_block_uncomp {
                 return Ok(());
@@ -581,7 +589,7 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
 
     let mut hdr = [0u8; 4];
     let mut buf = vec![0u8; MAX_USER_CHUNK_SIZE];
-    let mut read_header = false;
+    let (mut read_header, mut simd) = (false, false);
 
     loop {
         match read_exact_or_eof(&mut r, &mut hdr)? {
@@ -611,12 +619,22 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
         match chunk_type {
             CHUNK_TYPE_LEGACY_COMPRESSED_DATA
             | CHUNK_TYPE_MINLZ_COMPRESSED_DATA
-            | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC => {
+            | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC
+            | CHUNK_TYPE_MINLZ_SIMD => {
                 if chunk_len < CHECKSUM_SIZE {
                     return Err(Error::Invalid("data chunk shorter than CRC"));
                 }
-                let d_len = crate::block::decoded_len_chunk_body(&body[CHECKSUM_SIZE..])
-                    .map_err(|_| Error::Invalid("bad block size header"))?;
+                let d_len = if chunk_type == CHUNK_TYPE_MINLZ_SIMD {
+                    if !simd {
+                        return Err(Error::Invalid("SIMD chunk without the stream flag"));
+                    }
+                    crate::stream::simd_chunk_header(body, MAX_BLOCK_SIZE)
+                        .map_err(|_| Error::Invalid("bad SIMD block header"))?
+                        .0
+                } else {
+                    crate::block::decoded_len_chunk_body(&body[CHECKSUM_SIZE..])
+                        .map_err(|_| Error::Invalid("bad block size header"))?
+                };
                 if d_len > MAX_BLOCK_SIZE {
                     return Err(Error::Invalid("block exceeds max size"));
                 }
@@ -648,6 +666,8 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                 if head5 != MAGIC_BODY_MINLZ && &body[..MAGIC_BODY_LEN] != MAGIC_BODY_S2 {
                     return Err(Error::BadFormat("unknown stream magic"));
                 }
+                simd =
+                    head5 == MAGIC_BODY_MINLZ && body[MAGIC_BODY_LEN - 1] & STREAM_FLAG_SIMD != 0;
             }
             CHUNK_TYPE_EOF => {}
             t if t <= MAX_NON_SKIPPABLE_CHUNK => {

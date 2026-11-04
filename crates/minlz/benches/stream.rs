@@ -78,6 +78,7 @@ fn level_label(l: Level) -> &'static str {
         Level::Fastest => "L1",
         Level::Balanced => "L2",
         Level::Smallest => "L3",
+        _ => "SIMD",
     }
 }
 

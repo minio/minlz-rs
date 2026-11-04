@@ -33,17 +33,25 @@ fn roundtrip_at(input: &[u8], level: Level) -> Result<(), String> {
     Ok(())
 }
 
-/// Run a round-trip at every shipping level.
+/// Run a round-trip at levels 1-7, as Go's `roundtrip`.
 ///
-/// Under miri, L3 is skipped: its only unsafe code (`load32`/`load64`)
-/// is shared with L1+L2, while the L3 entry zeros 1.25M `u64`s of
-/// thread-local tables on every call — the dominant cost of miri
-/// runs on this crate.  Native builds still hit all three levels.
+/// Under miri, L3 and the SIMD levels are skipped: L3's only unsafe code
+/// (`load32`/`load64`) is shared with L1+L2, while the L3 entry zeros 1.25M
+/// `u64`s of thread-local tables on every call — the dominant cost of miri
+/// runs on this crate.  Native builds hit every level.
 fn roundtrip(input: &[u8]) -> Result<(), String> {
     let levels: &[Level] = if cfg!(miri) {
         &[Level::Fastest, Level::Balanced]
     } else {
-        &[Level::Fastest, Level::Balanced, Level::Smallest]
+        &[
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+            Level::SuperFastSimd,
+            Level::FastestSimd,
+            Level::BalancedSimd,
+            Level::SmallestSimd,
+        ]
     };
     for &level in levels {
         roundtrip_at(input, level).map_err(|e| format!("lvl {level:?}: {e}"))?;
@@ -838,4 +846,499 @@ fn l1_offset_at_max_copy3_boundary_roundtrips() {
         *slot = rng.next() as u8;
     }
     roundtrip_at(&data, Level::Fastest).expect("L1 boundary roundtrip");
+}
+
+/// Ports `TestEncodeLongMatch` (`encode_test.go`): a block that is one long
+/// match is not stored. Sizes cover the 64K and the general encoders.
+#[test]
+#[cfg_attr(miri, ignore = "1 MiB inputs too slow for miri")]
+fn encode_long_match() {
+    for size in [60000, 1 << 20] {
+        let data = repeat_bytes(b"abcdefghij", size);
+        for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+            let mut comp = Vec::new();
+            encode(&mut comp, &data, level).unwrap();
+            assert!(
+                comp.len() <= 1024,
+                "level {level:?}, size {size}: not compressed, got {} bytes",
+                comp.len()
+            );
+            let mut dec = Vec::new();
+            decode(&mut dec, &comp).unwrap();
+            assert!(dec == data, "level {level:?}, size {size}: decode mismatch");
+        }
+    }
+}
+
+/// Port of Go's `buildMaxOffsetBoundary`: a hash1/hash2 match at offset
+/// `MAX_COPY3_OFFSET + delta` (minio/minlz#75). Random bytes come from
+/// [`Xor64`], not Go's `math/rand`.
+fn build_max_offset_boundary(seed: u64, delta: usize) -> Option<Vec<u8>> {
+    use super::format::MAX_COPY3_OFFSET as M;
+    use super::hash::hash6;
+    let load64 = |b: &[u8], i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+    let p = 9;
+    let q = p + M + delta;
+    let n = q + 4096;
+    let mut rng = Xor64::new(seed);
+    let mut src: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
+    // Regular short matches keep nextEmit close, so the skip step stays small.
+    for i in (2000..).step_by(128).take_while(|i| i + 128 < n) {
+        src.copy_within(i + 64 - 1000..i + 128 - 1000, i + 64);
+    }
+    src.copy_within(q - 1202..q - 1002, q - 202);
+    let marker = b"\xfeSeNtInL";
+    src[p..p + 8].copy_from_slice(marker);
+    src[q..q + 8].copy_from_slice(marker);
+    src[q - 2] = src[q - 1002] ^ 0xff;
+    src[q - 1] = src[p - 1] ^ 0xff;
+    // Keep the marker's hash bucket holding p: scrub colliding filler windows.
+    let hm = hash6(load64(&src, p), 15);
+    let protected = |j: usize| (p..p + 8).contains(&j) || (q - 1210..q + 8).contains(&j);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..=n - 8 {
+            if i == p || i == q || hash6(load64(&src, i), 15) != hm {
+                continue;
+            }
+            let j = if protected(i + 5) { i } else { i + 5 };
+            if protected(j) {
+                return None;
+            }
+            src[j] ^= 0x5a;
+            changed = true;
+        }
+    }
+    Some(src)
+}
+
+/// Ports `TestMaxOffsetBoundary` (`encode_test.go`), with 3 seeds instead of
+/// Go's 10 to keep debug test time down.
+#[test]
+#[cfg_attr(miri, ignore = "2 MiB inputs too slow for miri")]
+fn max_offset_boundary() {
+    for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+        for delta in 0..4 {
+            for seed in 0..3 {
+                let Some(src) = build_max_offset_boundary(seed, delta) else {
+                    continue;
+                };
+                roundtrip_at(&src, level)
+                    .unwrap_or_else(|e| panic!("level={level:?} delta={delta} seed={seed}: {e}"));
+            }
+        }
+    }
+}
+
+/// A marker over zero filler and a 6-byte piece of it at offset k of a copy at
+/// distance `MAX_COPY3_OFFSET + delta`, so that only L1's probe at s+k can find
+/// the match: it must take it at delta 0 and reject it at delta 1
+/// (minio/minlz#75). [`max_offset_boundary`]'s Xor64 inputs only reach the s+2
+/// probe. The sizes are Go's (`-tags noasm`).
+#[test]
+#[cfg_attr(miri, ignore = "2 MiB inputs too slow for miri")]
+fn max_offset_probes() {
+    use super::format::MAX_COPY3_OFFSET as M;
+    const X: usize = 1000;
+    let mut rng = Xor64::new(7);
+    let marker: Vec<u8> = (0..16).map(|_| rng.next() as u8 | 1).collect();
+    let sizes = [55, 54, 53].map(|l1| [[l1, 63, 53], [57, 63, 53]]);
+    for (k, sizes) in sizes.into_iter().enumerate() {
+        for (delta, sizes) in sizes.into_iter().enumerate() {
+            let what = format!("k {k} delta {delta}");
+            let y = X + M + delta;
+            let mut src = vec![0u8; y + 4096];
+            src[X..X + 16].copy_from_slice(&marker);
+            for (i, b) in src[y..y + 16].iter_mut().enumerate() {
+                *b = marker[i] ^ if (k..k + 6).contains(&i) { 0 } else { 0x80 };
+            }
+            for (level, want) in [Level::Fastest, Level::Balanced, Level::Smallest]
+                .into_iter()
+                .zip(sizes)
+            {
+                let mut enc = Vec::new();
+                encode(&mut enc, &src, level).unwrap();
+                let mut dec = Vec::new();
+                decode(&mut dec, &enc).unwrap_or_else(|e| panic!("{level:?} {what}: {e}"));
+                assert!(dec == src, "{level:?} {what}: roundtrip mismatch");
+                assert_eq!(enc.len(), want, "{level:?} {what}");
+            }
+        }
+    }
+}
+
+/// Input with matches at the lengths and offsets where the encodings change
+/// size, repeated offsets, and copies of the block start. A Go copy of it made
+/// [`encode_matches_go`]'s golden values.
+fn border_mix(seed: u64, n: usize) -> Vec<u8> {
+    const LENS: [usize; 16] = [
+        3, 4, 5, 11, 12, 18, 19, 20, 29, 30, 31, 64, 65, 66, 285, 286,
+    ];
+    const OFFS: [usize; 6] = [8, 64, 1024, 1100, 70000, 3 << 20];
+    const RUNS: [usize; 3] = [4, 30, 300];
+    let mut rng = Xor64::new(seed);
+    let alpha = 2 + rng.next() as usize % 255;
+    let mut b = Vec::with_capacity(n + 300);
+    let mut last = 1;
+    while b.len() < n {
+        let r = rng.next() as usize;
+        if b.is_empty() || r.is_multiple_of(3) {
+            for _ in 0..1 + (r >> 2) % RUNS[(r >> 10) % 3] {
+                b.push((rng.next() as usize % alpha) as u8);
+            }
+            continue;
+        }
+        let mut off = 1 + (r >> 8) % OFFS[(r >> 6) % OFFS.len()].min(b.len());
+        match (r >> 12) % 8 {
+            0 => off = b.len(),
+            1 | 2 => off = last,
+            _ => {}
+        }
+        last = off;
+        for _ in 0..LENS[(r >> 2) % LENS.len()] {
+            b.push(b[b.len() - off]);
+        }
+    }
+    b.truncate(n);
+    b
+}
+
+/// Pins L1-L3 output to Go's (`-tags noasm`). The L3 border re-matching
+/// (minio/minlz#53) and candidate checks change the parse but not its
+/// validity, so only exact output catches a drift. Each row: seed, size and
+/// XXH3 of the input, then size and XXH3 of the L1, L2 and L3 blocks.
+#[test]
+#[cfg_attr(miri, ignore = "L3 on 100 KB inputs too slow for miri")]
+fn encode_matches_go() {
+    type Golden = [(usize, u64); 3];
+    let check = |what: &str, src: &[u8], want: Golden| {
+        let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+        for (level, want) in levels.into_iter().zip(want) {
+            let mut enc = Vec::new();
+            encode(&mut enc, src, level).unwrap();
+            assert_eq!(
+                (enc.len(), crate::xxh3::hash(&enc)),
+                want,
+                "{what} {level:?}"
+            );
+        }
+    };
+    #[rustfmt::skip]
+    let rows: [(u64, usize, u64, Golden); 6] = [
+        (1, 3000, 0x697d_1b8e_435e_602f,
+         [(1900, 0x516e_5924_8f03_2488), (1841, 0xf45e_d3fc_1105_4f51), (1838, 0x2d1c_3b3d_381c_b9b6)]),
+        (2, 5000, 0x9219_c182_3284_54e8,
+         [(2459, 0xe322_ab1c_ca55_f457), (2369, 0x4b0e_0a37_6c02_5342), (2348, 0x69b1_5c20_9c4b_be16)]),
+        (4, 9000, 0xe50b_16b4_a15a_70c6,
+         [(4932, 0x58ee_ec80_2766_c5e6), (4800, 0xff67_6f4c_aaab_91ac), (4731, 0x23a2_4a19_43a7_caa6)]),
+        (1102, 5000, 0x679b_ade3_4ce4_fadd,
+         [(1657, 0x2008_3de1_0682_12b3), (1669, 0x2821_9ec3_57f5_b8de), (1621, 0x1c3d_2075_8d4a_0676)]),
+        (0, 100_000, 0xd6d6_510d_1e34_5737,
+         [(41032, 0x892a_20fc_9488_d471), (40848, 0x78ae_eb66_eba1_edca), (39780, 0xf00d_14d4_3ed2_37b9)]),
+        (3, 100_000, 0x9cc4_f824_4875_c653,
+         [(38375, 0x5e85_d7dc_d338_9385), (38132, 0x7a01_abdb_dd60_ac49), (37032, 0x9984_13ca_707d_1411)]),
+    ];
+    for (seed, n, src_hash, want) in rows {
+        let src = border_mix(seed, n);
+        assert_eq!(
+            crate::xxh3::hash(&src),
+            src_hash,
+            "border_mix({seed}) differs from Go's"
+        );
+        check(&format!("border_mix({seed}, {n})"), &src, want);
+    }
+    if let Some(twain) = locate_testdata("Mark.Twain-Tom.Sawyer.txt") {
+        let want = [
+            (10337, 0xdeaf_18b8_501d_3beb),
+            (9301, 0x7c75_f53d_b2a8_7f17),
+            (8874, 0x0d8f_7ffb_1d66_e78c),
+        ];
+        check("twain", &twain, want);
+    }
+}
+
+/// Size of the shortest header that can encode a literal (or repeat) of n
+/// bytes. Port of Go's `literalHeaderLen`.
+fn literal_header_len(n: usize) -> usize {
+    match n {
+        ..=29 => 1,
+        30..=0x11d => 2,
+        0x11e..=0x1001d => 3,
+        _ => 4,
+    }
+}
+
+/// Calls `f(header_len, length, repeat)` for every literal and repeat tag in
+/// a block body. Port of Go's `walkLiteralHeaders`.
+fn walk_literal_headers(b: &[u8], mut f: impl FnMut(usize, usize, bool)) {
+    let mut s = 0;
+    while s < b.len() {
+        let tag = b[s];
+        match tag & 3 {
+            0 => {
+                let (hdr, length) = match tag >> 3 {
+                    x @ 0..29 => (1, x as usize + 1),
+                    29 => (2, 30 + b[s + 1] as usize),
+                    30 => (3, 30 + (b[s + 1] as usize | (b[s + 2] as usize) << 8)),
+                    _ => (
+                        4,
+                        30 + (b[s + 1] as usize
+                            | (b[s + 2] as usize) << 8
+                            | (b[s + 3] as usize) << 16),
+                    ),
+                };
+                let repeat = tag & 4 != 0;
+                f(hdr, length, repeat);
+                s += hdr;
+                if !repeat {
+                    s += length;
+                }
+            }
+            1 => s += if (tag >> 2) & 15 == 15 { 3 } else { 2 },
+            2 => {
+                s += match tag >> 2 {
+                    61 => 4,
+                    62 => 5,
+                    63 => 6,
+                    _ => 3,
+                }
+            }
+            _ => {
+                let lits = (tag >> 3) as usize & 3;
+                if tag & 4 == 0 {
+                    // Copy2 with 1-4 fused literals.
+                    s += 3 + lits + 1;
+                    continue;
+                }
+                s += 4 + lits;
+                s += match (tag >> 5) as usize | ((b[s - lits - 3] & 7) as usize) << 3 {
+                    61 => 1,
+                    62 => 2,
+                    63 => 3,
+                    _ => 0,
+                };
+            }
+        }
+    }
+    assert_eq!(
+        s,
+        b.len(),
+        "token walk ended at {s}, block is {} bytes",
+        b.len()
+    );
+}
+
+/// Ports `TestEncodeLiteralHeaderMinimal` (`encode_test.go`, minio/minlz#79):
+/// every encoder writes literals with the shortest header, in every size
+/// class. Go's `MaxBlockSize` row (non-short only) is left out.
+#[test]
+#[cfg_attr(miri, ignore = "multi-MiB inputs too slow for miri")]
+fn encode_literal_header_minimal() {
+    let mut rng = Xor64::new(1);
+    for n in [1000, 4000, 16000, 60000, 500_000, 2_000_000] {
+        // Keep the incompressible run small enough that every level still
+        // compresses the block.
+        let lit_lens = [
+            29,
+            30,
+            285,
+            286,
+            287,
+            n / 4,
+            30 + 0xffff,
+            31 + 0xffff,
+            70000,
+        ];
+        for lit_len in lit_lens.into_iter().filter(|&l| l <= n / 4) {
+            // Compressible filler around one run of random bytes.
+            let mut src: Vec<u8> = b"minlz literal headers "
+                .iter()
+                .copied()
+                .cycle()
+                .take(n)
+                .collect();
+            let start = (n - lit_len) / 2;
+            src[start..start + lit_len]
+                .iter_mut()
+                .for_each(|b| *b = rng.next() as u8);
+            for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+                let what = format!("n={n} litLen={lit_len} level={level:?}");
+                let mut enc = Vec::new();
+                encode(&mut enc, &src, level).unwrap();
+                let (literals, _, body, _) = parse_header(&enc).unwrap();
+                assert!(!literals, "{what}: block was not compressed");
+                let mut longest = 0;
+                walk_literal_headers(body, |hdr, length, repeat| {
+                    if !repeat {
+                        longest = longest.max(length);
+                    }
+                    let want = literal_header_len(length);
+                    assert_eq!(hdr, want, "{what}: repeat={repeat} length {length}");
+                });
+                assert!(
+                    longest + 16 >= lit_len,
+                    "{what}: longest literal is {longest} bytes; test input is not doing its job"
+                );
+            }
+        }
+    }
+}
+
+/// Ports `TestEncodeRandomStored` (`encode_test.go`): every level stores
+/// random input as an uncompressed block.
+#[test]
+#[cfg_attr(miri, ignore = "MiB inputs too slow for miri")]
+fn encode_random_stored() {
+    let mut rng = Xor64::new(0);
+    for size in [100, 1000, 10000, 100_000, 1_000_000] {
+        let src: Vec<u8> = (0..size).map(|_| rng.next() as u8).collect();
+        let mut want = Vec::new();
+        encode_uncompressed(&mut want, &src);
+        for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+            let mut got = Vec::new();
+            encode(&mut got, &src, level).unwrap();
+            assert!(
+                got == want,
+                "{size}/{level:?}: encoded to {} bytes, want a {} byte stored block",
+                got.len(),
+                want.len()
+            );
+        }
+    }
+}
+
+/// Port of Go's `mixedRuns`: `total` bytes of alternating incompressible and
+/// compressible runs of `run_len` each, from [`Xor64`].
+fn mixed_runs(rng: &mut Xor64, total: usize, run_len: usize) -> Vec<u8> {
+    const WORDS: [&[u8]; 6] = [
+        b"lorem",
+        b"ipsum",
+        b"dolor",
+        b"sit",
+        b"amet",
+        b"consectetur",
+    ];
+    let mut out = Vec::with_capacity(total + 2 * run_len);
+    while out.len() < total {
+        out.extend((0..run_len).map(|_| rng.next() as u8));
+        let start = out.len();
+        while out.len() - start < run_len {
+            out.extend_from_slice(WORDS[rng.next() as usize % WORDS.len()]);
+            out.push(b' ');
+        }
+        out.truncate(start + run_len);
+    }
+    out.truncate(total);
+    out
+}
+
+/// Golden version of Go's `TestBetterSkipClampMatchesAsm`: Balanced above
+/// 64 KiB clamps its adaptive skip at 100 (minio/minlz#61), so its output on
+/// long noise runs matches Go's (`-tags noasm`) byte for byte. Without the
+/// clamp the skip strides past the start of the next text run.
+#[test]
+#[cfg_attr(miri, ignore = "4 MiB inputs too slow for miri")]
+fn better_skip_clamp_golden() {
+    // (run length, Go output size, XXH3 of Go output)
+    let golden = [
+        (64 << 10, 2_430_986, 0x7314_5a0e_28bc_91cb_u64),
+        (256 << 10, 2_430_468, 0x29ff_9690_6550_4525),
+    ];
+    for (run_len, want_len, want_hash) in golden {
+        let src = mixed_runs(&mut Xor64::new(1), 4 << 20, run_len);
+        let mut got = Vec::new();
+        encode(&mut got, &src, Level::Balanced).unwrap();
+        assert_eq!(got.len(), want_len, "run length {run_len}");
+        assert_eq!(crate::xxh3::hash(&got), want_hash, "run length {run_len}");
+    }
+}
+
+/// Port of Go's `overlapTailBlock`: a block ending in an overlapping copy,
+/// with its exact expected output.
+fn overlap_tail_block(offset: usize, length: usize, trailing: usize) -> (Vec<u8>, Vec<u8>) {
+    // A preceding match keeps even short final copies smaller than raw input.
+    const PREFIX_MATCH: usize = 64;
+    let literal: Vec<u8> = (0..offset).map(|i| (i * 173 + i / 97) as u8).collect();
+    let head = offset + PREFIX_MATCH + length;
+    let mut want: Vec<u8> = (0..head).map(|i| literal[i % offset]).collect();
+    want.extend((0..trailing).map(|i| (i * 29 + 7) as u8));
+    let mut payload = vec![0u8; max_encoded_len(want.len()).unwrap() + 16];
+    let mut n = emit::emit_literal(&mut payload, &literal);
+    n += emit::emit_copy(&mut payload[n..], offset, PREFIX_MATCH);
+    n += emit::emit_copy(&mut payload[n..], offset, length);
+    if trailing != 0 {
+        n += emit::emit_literal(&mut payload[n..], &want[head..]);
+    }
+    let mut encoded = vec![0];
+    format::put_uvarint(&mut encoded, want.len() as u64);
+    encoded.extend_from_slice(&payload[..n]);
+    (encoded, want)
+}
+
+/// Ports `TestDecodeOverlapTail` (`decode_test.go`): copy-width boundaries.
+/// Go's check for writes outside the destination has no counterpart, as
+/// `decode` owns its `Vec`.
+#[test]
+#[cfg_attr(miri, ignore = "thousands of decodes too slow for miri")]
+fn decode_overlap_tail() {
+    let offsets = [
+        1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 255, 256, 1023, 1024,
+        4095, 4096, 65535, 65536, 65537,
+    ];
+    let lengths = [
+        4, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1023, 1024, 4096,
+    ];
+    let mut got = Vec::new();
+    for offset in offsets {
+        for length in lengths.into_iter().chain([7 * offset + 1, 7 * offset + 3]) {
+            for trailing in [0, 1, 32] {
+                let what = format!("offset{offset}/length{length}/trailing{trailing}");
+                let (encoded, want) = overlap_tail_block(offset, length, trailing);
+                decode(&mut got, &encoded).unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert!(got == want, "{what}");
+            }
+        }
+    }
+}
+
+/// Ports `TestDecodeOverlapTailCorrupt` (`decode_test.go`): length mismatches
+/// and truncated matches.
+#[test]
+fn decode_overlap_tail_corrupt() {
+    let mut dec = Vec::new();
+    for offset in [1, 3, 15, 16, 17, 63, 64, 65, 1024, 65536] {
+        let (encoded, want) = overlap_tail_block(offset, 7 * offset + 1, 0);
+        let (_, header) = format::get_uvarint(&encoded[1..]).unwrap();
+        for dlen in [want.len() - 1, want.len() + 1] {
+            let mut bad = vec![0];
+            format::put_uvarint(&mut bad, dlen as u64);
+            bad.extend_from_slice(&encoded[1 + header..]);
+            let res = decode(&mut dec, &bad);
+            assert!(
+                matches!(res, Err(Error::Corrupt(_))),
+                "offset={offset} dlen={dlen}"
+            );
+        }
+        for cut in 1..=3 {
+            let res = decode(&mut dec, &encoded[..encoded.len() - cut]);
+            assert!(
+                matches!(res, Err(Error::Corrupt(_))),
+                "offset={offset} cut={cut}"
+            );
+        }
+    }
+}
+
+/// Ports `TestDecodeOverlapTailLarge` (`decode_test.go`): overlapping copies
+/// at the maximum block size.
+#[test]
+#[cfg_attr(miri, ignore = "8 MiB decodes too slow for miri")]
+fn decode_overlap_tail_large() {
+    let mut got = Vec::new();
+    for offset in [1, 3, 16, 17, 63, 64, 65, 4096, 65536] {
+        let (encoded, want) = overlap_tail_block(offset, MAX_BLOCK_SIZE - offset - 64, 0);
+        decode(&mut got, &encoded).unwrap_or_else(|e| panic!("offset={offset}: {e}"));
+        assert!(got == want, "offset={offset}");
+    }
 }

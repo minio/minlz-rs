@@ -11,6 +11,10 @@ authors.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+# The clean-room reference decoder `minlz::reference`, an oracle for tests and fuzzing.
+reference = []
+
 [[example]]
 name = "bench"
 path = "examples/bench.rs"
@@ -23,9 +27,18 @@ harness = false
 name = "stream"
 harness = false
 
+[[bench]]
+name = "pivco"
+harness = false
+
+[[bench]]
+name = "xxh3"
+harness = false
+
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["html_reports"] }
 ureq = "3.3.0"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"

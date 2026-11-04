@@ -114,7 +114,8 @@ fn encode_better_inner_big(
         let candidate_l;
         let mut next_s: usize;
         loop {
-            next_s = s + ((s - next_emit) >> 7) + 1;
+            // Blocks can be long, limit max skipping.
+            next_s = s + (((s - next_emit) >> 7) + 1).min(100);
             if next_s > s_limit {
                 break 'outer;
             }

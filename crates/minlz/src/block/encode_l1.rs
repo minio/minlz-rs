@@ -24,6 +24,7 @@ use super::format::{
 };
 use super::hash::{hash5, hash6};
 use super::load_store::{load32, load64};
+use super::table_pool::{self, U32_15};
 
 /// Entry point: dispatches on `src.len()`.  Returns the number of bytes
 /// written into `dst` or `0` if the block is incompressible.
@@ -40,11 +41,16 @@ pub(super) fn encode_block(dst: &mut [u8], src: &[u8]) -> usize {
 
 /// L1 encoder for inputs > 64 KiB (port of `encodeBlockGo`).
 fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
+    let mut table = table_pool::get(&U32_15);
+    let n = encode_block_big_with(dst, src, &mut table);
+    table_pool::put(&U32_15, table);
+    n
+}
+
+fn encode_block_big_with(dst: &mut [u8], src: &[u8], table: &mut [u32; 1 << 15]) -> usize {
     const TABLE_BITS: u32 = 15;
-    const TABLE_SIZE: usize = 1 << TABLE_BITS;
     const SKIP_LOG: u32 = 6;
 
-    let mut table = vec![0u32; TABLE_SIZE].into_boxed_slice();
     let s_limit = src.len() - INPUT_MARGIN;
     let dst_limit = src.len() - (src.len() >> 5) - 6;
     let mut next_emit: usize = 0;
@@ -62,13 +68,9 @@ fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
             if next_s > s_limit {
                 break 'outer;
             }
-            // The c1 path shifts `s += 1` and the c2 path shifts `s += 2`
-            // *after* this check, so the effective repeat for those paths is
-            // `(s+1)-c1` and `(s+2)-c2` respectively.  Tightening `min_src_pos`
-            // by +2 prevents `repeat > MAX_COPY3_OFFSET`, which would cause
-            // `encode_copy3` to wrap the 21-bit offset field and emit a
-            // corrupt block (caught by `tests::regression_l1_offset_boundary`).
-            let min_src_pos = (s + 2).saturating_sub(MAX_COPY3_OFFSET);
+            // c1 and c2 match at s+1 and s+2; their bounds below keep the
+            // offset within MAX_COPY3_OFFSET (minio/minlz#75).
+            let min_src_pos = s as isize - MAX_COPY3_OFFSET as isize;
             let hash0 = hash6(cv, TABLE_BITS) as usize;
             let hash1 = hash6(cv >> 8, TABLE_BITS) as usize;
             let c0 = table[hash0] as usize;
@@ -124,19 +126,19 @@ fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
             // or `s+1` after hash-collision with hash0/hash1 — that's a
             // legitimate self-referential RLE-style match, handled by the
             // decoder's forward-copy path.
-            if c0 >= min_src_pos && (cv as u32) == unsafe { load32(src, c0) } {
+            if c0 as isize >= min_src_pos && (cv as u32) == unsafe { load32(src, c0) } {
                 candidate = c0;
                 break;
             }
             let c2 = table[hash2] as usize;
-            if c1 >= min_src_pos && ((cv >> 8) as u32) == unsafe { load32(src, c1) } {
+            if c1 as isize > min_src_pos && ((cv >> 8) as u32) == unsafe { load32(src, c1) } {
                 table[hash2] = (s + 2) as u32;
                 candidate = c1;
                 s += 1;
                 break;
             }
             table[hash2] = (s + 2) as u32;
-            if c2 >= min_src_pos && ((cv >> 16) as u32) == unsafe { load32(src, c2) } {
+            if c2 as isize >= min_src_pos + 2 && ((cv >> 16) as u32) == unsafe { load32(src, c2) } {
                 candidate = c2;
                 s += 2;
                 break;
@@ -173,7 +175,7 @@ fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
         if next_emit != base {
             let lit_count = base - next_emit;
             if lit_count > MAX_COPY3_LITS || repeat < MIN_COPY2_OFFSET {
-                if d + (s - next_emit) > dst_limit {
+                if d + (base - next_emit) > dst_limit {
                     return 0;
                 }
                 d += emit_literal(&mut dst[d..], &src[next_emit..base]);
@@ -353,7 +355,7 @@ fn encode_block_64k(dst: &mut [u8], src: &[u8]) -> usize {
         if next_emit != base {
             let lit_count = base - next_emit;
             if lit_count > MAX_COPY2_LITS || repeat < MIN_COPY2_OFFSET {
-                if d + (s - next_emit) > dst_limit {
+                if d + (base - next_emit) > dst_limit {
                     return 0;
                 }
                 d += emit_literal(&mut dst[d..], &src[next_emit..base]);

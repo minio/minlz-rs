@@ -212,3 +212,229 @@ fn auto_detect_decompress_from_extension() {
     );
     assert_eq!(fs::read(out).unwrap(), payload);
 }
+
+/// Runs `mz` with `input` on stdin and returns stdout.
+fn mz_pipe(bin: &std::path::Path, args: &[&str], input: &[u8]) -> Vec<u8> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let data = input.to_vec();
+    let feed = std::thread::spawn(move || stdin.write_all(&data));
+    let out = child.wait_with_output().unwrap();
+    feed.join().unwrap().unwrap();
+    assert!(
+        out.status.success(),
+        "{} {args:?}: {}",
+        bin.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// The stream identifier's flag byte has bit 6 set when the stream may hold SIMD chunks.
+fn simd_flag(stream: &[u8]) -> bool {
+    stream[9] & 1 << 6 != 0
+}
+
+/// Counts the 0x10 (SIMD) chunks of a stream.
+fn simd_chunks(stream: &[u8]) -> usize {
+    let (mut i, mut n) = (0, 0);
+    while i + 4 <= stream.len() {
+        n += usize::from(stream[i] == 0x10);
+        i += 4
+            + (usize::from(stream[i + 1])
+                | usize::from(stream[i + 2]) << 8
+                | usize::from(stream[i + 3]) << 16);
+    }
+    n
+}
+
+/// Reports whether `block` is a SIMD block: block type 1 in bits 24+ of the uvarint after the
+/// zero byte.
+fn simd_block(block: &[u8]) -> bool {
+    let mut v = 0u64;
+    for (i, &b) in block.iter().enumerate().skip(1).take(9) {
+        v |= u64::from(b & 0x7f) << (7 * (i - 1));
+        if b < 0x80 {
+            return block[0] == 0 && v >> 24 == 1;
+        }
+    }
+    false
+}
+
+/// Go mz's compress level flags and the level they write.
+const LEVEL_FLAGS: &[(&[&str], minlz::Level)] = {
+    use minlz::Level::*;
+    &[
+        (&[], BalancedSimd),
+        (&["-xfast"], SuperFastSimd),
+        (&["-1"], FastestSimd),
+        (&["-2"], BalancedSimd),
+        (&["-3"], SmallestSimd),
+        (&["-xfast", "--simd.delta"], SuperFastSimdDelta),
+        (&["-1", "--simd.delta"], FastestSimdDelta),
+        (&["--simd.delta"], BalancedSimdDelta),
+        (&["-1", "--classic"], Fastest),
+        (&["--classic"], Balanced),
+        (&["-3", "--classic"], Smallest),
+    ]
+};
+
+/// Compress writes SIMD blocks unless `--classic`, at the levels Go's mz maps its flags to:
+/// streams (one thread) and blocks equal the library's output at that level and round-trip.
+#[test]
+fn simd_level_flags() {
+    use std::io::Write as _;
+    let payload = sample_payload(17, 300 << 10);
+    for &(flags, level) in LEVEL_FLAGS {
+        let classic = flags.contains(&"--classic");
+        let args = [
+            &["c", "-c", "-q", "--cpu", "1", "--block-size", "64K"],
+            flags,
+            &["-"],
+        ]
+        .concat();
+        let stream = mz_pipe(&mz_bin(), &args, &payload);
+        let mut want = Vec::new();
+        let mut w = minlz::stream::WriterBuilder::new()
+            .level(level)
+            .block_size(64 << 10)
+            .append_index()
+            .build(&mut want)
+            .unwrap();
+        w.write_all(&payload).unwrap();
+        w.finish().unwrap();
+        assert!(stream == want, "{flags:?}: stream differs from {level:?}");
+        assert_eq!(simd_flag(&stream), !classic, "{flags:?}");
+        if classic {
+            assert_eq!(simd_chunks(&stream), 0, "{flags:?}");
+        }
+        for cpu in ["1", "4"] {
+            let got = mz_pipe(&mz_bin(), &["d", "-c", "-q", "--cpu", cpu, "-"], &stream);
+            assert!(got == payload, "{flags:?}: stream round trip, cpu {cpu}");
+        }
+
+        let args = [&["c", "--block", "-c", "-q"], flags, &["-"]].concat();
+        let block = mz_pipe(&mz_bin(), &args, &payload);
+        let mut want = Vec::new();
+        minlz::encode(&mut want, &payload, level).unwrap();
+        assert!(block == want, "{flags:?}: block differs from {level:?}");
+        assert!(!classic || !simd_block(&block), "{flags:?}");
+        let got = mz_pipe(&mz_bin(), &["d", "--block", "-c", "-q", "-"], &block);
+        assert!(got == payload, "{flags:?}: block round trip");
+    }
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-1", "-"], &payload);
+    assert!(simd_chunks(&stream) > 0);
+    let block = mz_pipe(
+        &mz_bin(),
+        &["c", "--block", "-c", "-q", "-1", "-"],
+        &payload,
+    );
+    assert!(simd_block(&block));
+}
+
+#[test]
+fn simd_flag_conflicts_fail() {
+    for flags in [
+        &["--simd.delta", "--classic"][..],
+        &["--simd.delta", "-0"],
+        &["--simd.delta", "-3"],
+        &["-xfast", "--classic"],
+    ] {
+        let out = Command::new(mz_bin())
+            .args([&["c", "-c", "-q"], flags, &["-"]].concat())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{flags:?} should fail");
+    }
+}
+
+/// The hidden CPU toggles only pick lower tiers, so output and decoding stay the same.
+#[test]
+fn cpu_toggles() {
+    let payload = sample_payload(23, 200 << 10);
+    let want = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-1", "-"], &payload);
+    for off in [&["-avx512=false"][..], &["-avx2=false", "--neon=false"]] {
+        let got = mz_pipe(
+            &mz_bin(),
+            &[off, &["c", "-c", "-q", "-1", "-"]].concat(),
+            &payload,
+        );
+        assert!(got == want, "{off:?}: output differs");
+        let dec = mz_pipe(&mz_bin(), &[off, &["d", "-c", "-q", "-"]].concat(), &got);
+        assert!(dec == payload, "{off:?}: round trip");
+    }
+}
+
+/// Cross-impl: Rust mz and a Go `cmd/mz` of the simd-blocks branch (`MINLZ_GO_CMD`) decode
+/// each other's streams (one thread, 64 KiB blocks) and blocks, by default (SIMD) and with
+/// `--classic`. Once Rust writes SIMD chunks at a level, its output equals Go's. Classic
+/// output is not compared: it matches Go only when Go is built with `-tags=noasm`.
+#[test]
+fn go_mz_cross() {
+    let Some(go) = std::env::var_os("MINLZ_GO_CMD").map(PathBuf::from) else {
+        return;
+    };
+    let dir = tmp_dir();
+    let src = dir.join("input.bin");
+    let payload = sample_payload(29, 300 << 10);
+    fs::write(&src, &payload).unwrap();
+    for &(flags, _) in LEVEL_FLAGS {
+        for block in [false, true] {
+            // Go's flag package takes one or two dashes, so both get the same flags, except
+            // for the block size.
+            let (mode, bs, ext): (&[&str], &[&str], _) = if block {
+                (&["-block"], &[], "mzb")
+            } else {
+                (&["-cpu=1"], &["-bs=64K", "--block-size=64K"], "mz")
+            };
+            let (rust, gos) = (dir.join(format!("r.{ext}")), dir.join(format!("g.{ext}")));
+            for (bin, bs, out) in [(mz_bin(), bs.get(1), &rust), (go.clone(), bs.first(), &gos)] {
+                run_ok(
+                    Command::new(bin)
+                        .args([&["c", "-q"], mode, flags].concat())
+                        .args(bs)
+                        .arg("-o")
+                        .arg(out)
+                        .arg(&src),
+                );
+            }
+            let dec = dir.join("decoded.bin");
+            for (bin, file) in [(&go, &rust), (&mz_bin(), &gos)] {
+                run_ok(
+                    Command::new(bin)
+                        .args([&["d", "-q"], mode].concat())
+                        .arg("-o")
+                        .arg(&dec)
+                        .arg(file),
+                );
+                assert!(
+                    fs::read(&dec).unwrap() == payload,
+                    "{flags:?} block={block}: {} d {}",
+                    bin.display(),
+                    file.display()
+                );
+            }
+            let (rust, gos) = (fs::read(&rust).unwrap(), fs::read(&gos).unwrap());
+            if flags.contains(&"--classic") {
+                continue;
+            }
+            let rust_simd = if block {
+                simd_block(&rust)
+            } else {
+                assert_eq!(simd_flag(&rust), simd_flag(&gos), "{flags:?}");
+                simd_chunks(&rust) > 0
+            };
+            assert!(
+                !rust_simd || rust == gos,
+                "{flags:?} block={block}: Rust output differs from Go's"
+            );
+        }
+    }
+}

@@ -23,14 +23,15 @@ use std::io::{self, Write};
 
 use crate::block;
 use crate::index::Index;
+use crate::xxh3;
 
 use super::crc::masked_crc32c;
 use super::error::Error;
 use super::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
-    CHUNK_TYPE_PADDING, CHUNK_TYPE_UNCOMPRESSED_DATA, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE,
-    MAX_USER_CHUNK_SIZE, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64, MIN_BLOCK_SIZE,
-    MIN_USER_SKIPPABLE_CHUNK, make_stream_header, put_uvarint,
+    CHUNK_TYPE_MINLZ_SIMD, CHUNK_TYPE_PADDING, CHUNK_TYPE_UNCOMPRESSED_DATA, DEFAULT_BLOCK_SIZE,
+    MAX_BLOCK_SIZE, MAX_USER_CHUNK_SIZE, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64,
+    MIN_BLOCK_SIZE, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, make_stream_header, put_uvarint,
 };
 
 /// Byte counts reported by [`Writer::written`].
@@ -90,6 +91,8 @@ impl WriterBuilder {
     }
 
     /// Set the compression level.
+    /// The SIMD levels write SIMD chunks, which need a decoder for MinLZ format specification
+    /// v1.1 or later.
     pub fn level(mut self, level: block::Level) -> Self {
         self.level = level;
         self.uncompressed = false;
@@ -314,7 +317,7 @@ impl<W: Write> Writer<W> {
     /// `append_index = true`, written to the stream after padding).
     fn close_inner(&mut self, build_index: bool) -> io::Result<Vec<u8>> {
         self.flush_ibuf()?;
-        self.ensure_header()?;
+        // An empty stream is the EOF chunk alone, as Go writes it.
         self.emit_eof()?;
 
         let mut index_bytes = Vec::new();
@@ -357,7 +360,7 @@ impl<W: Write> Writer<W> {
 
     fn ensure_header(&mut self) -> io::Result<()> {
         if !self.wrote_header {
-            let h = make_stream_header(self.block_size);
+            let h = make_stream_header(self.block_size, simd_stream(self.level, self.uncompressed));
             self.write_all_tracked(&h)?;
             self.wrote_header = true;
         }
@@ -392,47 +395,24 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    /// Emit a single block as either an 0x02 compressed-data chunk or a
-    /// 0x01 uncompressed-data chunk, depending on whether compression wins.
+    /// Emit a single block as a compressed chunk (0x02, or 0x10 at the SIMD
+    /// levels) or a 0x01 uncompressed-data chunk, depending on whether
+    /// compression wins.
     fn emit_block(&mut self, block: &[u8]) -> io::Result<()> {
         if let Some(idx) = self.index.as_mut() {
             idx.add(self.comp_written, self.uncomp_written)?;
         }
-        let crc = masked_crc32c(block);
-        // Try compression unless explicitly disabled.
-        let compressed_ok = if self.uncompressed {
-            false
-        } else {
-            self.obuf.clear();
-            block::append_encoded_chunk_body(&mut self.obuf, block, self.level)
-                .map_err(|e| io::Error::from(Error::Block(e)))?
-        };
-        if compressed_ok {
-            let chunk_len = CHECKSUM_SIZE + self.obuf.len();
-            let mut hdr = [0u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE];
-            hdr[0] = CHUNK_TYPE_MINLZ_COMPRESSED_DATA;
-            hdr[1] = chunk_len as u8;
-            hdr[2] = (chunk_len >> 8) as u8;
-            hdr[3] = (chunk_len >> 16) as u8;
-            hdr[4..8].copy_from_slice(&crc.to_le_bytes());
-            self.write_all_tracked(&hdr)?;
+        if !self.uncompressed && encode_block(&mut self.obuf, block, self.level)? {
             // Borrow obuf separately so write_all_tracked can use self.w.
-            let body = std::mem::take(&mut self.obuf);
-            let res = self.write_all_tracked(&body);
-            self.obuf = body;
-            self.obuf.clear();
-            res
-        } else {
-            let chunk_len = CHECKSUM_SIZE + block.len();
-            let mut hdr = [0u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE];
-            hdr[0] = CHUNK_TYPE_UNCOMPRESSED_DATA;
-            hdr[1] = chunk_len as u8;
-            hdr[2] = (chunk_len >> 8) as u8;
-            hdr[3] = (chunk_len >> 16) as u8;
-            hdr[4..8].copy_from_slice(&crc.to_le_bytes());
-            self.write_all_tracked(&hdr)?;
-            self.write_all_tracked(block)
+            let chunk = std::mem::take(&mut self.obuf);
+            let res = self.write_all_tracked(&chunk);
+            self.obuf = chunk;
+            return res;
         }
+        let mut hdr = [0u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE];
+        put_uncompressed_header(&mut hdr, block);
+        self.write_all_tracked(&hdr)?;
+        self.write_all_tracked(block)
     }
 
     fn emit_eof(&mut self) -> io::Result<()> {
@@ -547,6 +527,51 @@ impl<W: Write> Write for Writer<W> {
         self.flush_ibuf()?;
         self.w.flush()
     }
+}
+
+/// Reports whether a stream written at `level` has SIMD chunks, and so the flag in its
+/// identifier (Go `w.level >= LevelSuperFastSIMD`).
+pub(super) fn simd_stream(level: block::Level, uncompressed: bool) -> bool {
+    !uncompressed && i32::from(level) >= i32::from(block::Level::SuperFastSimd)
+}
+
+/// Writes `src` as a compressed chunk to `dst`, replacing its contents, and reports whether
+/// `src` compresses (Go `Writer.encodeBlock`). `dst` is left empty if it doesn't.
+pub(super) fn encode_block(dst: &mut Vec<u8>, src: &[u8], level: block::Level) -> io::Result<bool> {
+    let simd = simd_stream(level, false);
+    let check = if simd { SIMD_HASH_SIZE } else { CHECKSUM_SIZE };
+    dst.clear();
+    dst.resize(CHUNK_HEADER_SIZE + check, 0);
+    if !block::append_encoded_chunk_body(dst, src, level).map_err(Error::Block)? {
+        dst.clear();
+        return Ok(false);
+    }
+    let n = dst.len() - CHUNK_HEADER_SIZE;
+    if simd {
+        dst[CHUNK_HEADER_SIZE..][..check].copy_from_slice(&xxh3::hash(src).to_le_bytes());
+        put_chunk_header(dst, CHUNK_TYPE_MINLZ_SIMD, n);
+    } else {
+        dst[CHUNK_HEADER_SIZE..][..check].copy_from_slice(&masked_crc32c(src).to_le_bytes());
+        put_chunk_header(dst, CHUNK_TYPE_MINLZ_COMPRESSED_DATA, n);
+    }
+    Ok(true)
+}
+
+/// Writes the header of a chunk with `n` bytes of content to `dst`.
+fn put_chunk_header(dst: &mut [u8], chunk_type: u8, n: usize) {
+    dst[0] = chunk_type;
+    dst[1] = n as u8;
+    dst[2] = (n >> 8) as u8;
+    dst[3] = (n >> 16) as u8;
+}
+
+/// Writes the chunk header and checksum of an uncompressed chunk with `src` to `dst`.
+pub(super) fn put_uncompressed_header(
+    dst: &mut [u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE],
+    src: &[u8],
+) {
+    dst[CHUNK_HEADER_SIZE..].copy_from_slice(&masked_crc32c(src).to_le_bytes());
+    put_chunk_header(dst, CHUNK_TYPE_UNCOMPRESSED_DATA, CHECKSUM_SIZE + src.len());
 }
 
 fn clone_io_err(e: &io::Error) -> io::Error {

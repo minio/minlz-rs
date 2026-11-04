@@ -11,6 +11,10 @@ index-level robustness targets.
 | `stream_decode_arbitrary`  | Single- and multi-threaded stream decoders never panic / OOB / deadlock.      |
 | `stream_roundtrip`         | Stream `Writer` / `MtWriter` round-trip across concurrency × level × block size. |
 | `index_load`               | `Index::load` parses arbitrary bytes safely; `append_to` → `load` round-trips. |
+| `pivco_decode`             | pivco block decode on every kernel tier: tiers agree, errors fail closed, accepted blocks are canonical. |
+| `pivco_roundtrip`          | pivco encode + decode on every kernel tier with a table built from the data; tiers write identical blocks. |
+| `pivco_table`              | pivco `Table::set_lengths` / `build_lengths` on arbitrary lengths and histograms, round-tripping a payload. |
+| `simd_decode`              | SIMD block bodies with a valid header decode on every exec tier as the reference decoder does (Go `FuzzDecodeSIMD`). |
 
 ## Running
 

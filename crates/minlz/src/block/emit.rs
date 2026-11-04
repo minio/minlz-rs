@@ -41,7 +41,7 @@ pub(super) fn emit_literal(dst: &mut [u8], lit: &[u8]) -> usize {
             unsafe { store8(dst, 0, ((n as u8) << 3) | TAG_LITERAL) };
             1
         }
-        29..=283 => {
+        29..=284 => {
             // n - 29 fits in 1 byte.  29<<3|TAG_LITERAL == 0xe8.
             // SAFETY: `dst.len() >= 2`.
             unsafe {
@@ -50,7 +50,7 @@ pub(super) fn emit_literal(dst: &mut [u8], lit: &[u8]) -> usize {
             }
             2
         }
-        284..=65564 => {
+        285..=65564 => {
             let n2 = n - 29;
             // SAFETY: `dst.len() >= 3`.
             unsafe {
@@ -285,6 +285,9 @@ pub(super) fn emit_copy_lits2(dst: &mut [u8], lits: &[u8], offset: usize, length
 /// Return the number of bytes [`emit_literal`] would use for a literal of
 /// length `n` (the header only, not the payload).  Port of
 /// `encode.go:emitLiteralSizeN`.
+///
+/// Like Go's, it is one byte high for `n == 285` and `n == 65565`; L3 scores
+/// with it, so changing it would change the parse.
 #[inline]
 pub(super) fn emit_literal_size_n(n: usize) -> usize {
     if n == 0 {
@@ -396,9 +399,15 @@ mod tests {
             (255, b"\xe8\xe1"),
             (256, b"\xe8\xe2"),
             (257, b"\xe8\xe3"),
+            (284, b"\xe8\xfe"),
+            (285, b"\xe8\xff"),
+            (286, b"\xf0\x00\x01"),
+            (287, b"\xf0\x01\x01"),
             (65534, b"\xf0\xe0\xff"),
             (65535, b"\xf0\xe1\xff"),
             (65536, b"\xf0\xe2\xff"),
+            (65565, b"\xf0\xff\xff"),
+            (65566, b"\xf8\x00\x00\x01"),
             (165536, b"\xf8\x82\x86\x02"),
         ];
         let mut dst = vec![0u8; super::super::format::MAX_BLOCK_SIZE + 16];

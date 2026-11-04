@@ -19,8 +19,10 @@
 //! The first byte is a control byte encoding:
 //!   - bits 0-1: encode concurrency (1..=4)
 //!   - bits 2-3: decode concurrency (1..=4)
-//!   - bits 4-5: compression level (Fastest / Balanced / Smallest)
 //!   - bit 6:    block size — 4 KiB (small) or 2 MiB (default)
+//!
+//! The second byte picks the compression level from [`LEVELS`], the classic
+//! and the SIMD levels.
 //!
 //! Cap is 9 MiB so the payload crosses ≥ 1 block boundary at
 //! `MAX_BLOCK_SIZE` (8 MiB), exercising the multi-block path.
@@ -33,21 +35,29 @@ use libfuzzer_sys::fuzz_target;
 use minlz::Level;
 use minlz::stream::{ConcurrentDecode, MtWriterBuilder, Reader, WriterBuilder};
 
+const LEVELS: [Level; 10] = [
+    Level::Fastest,
+    Level::Balanced,
+    Level::Smallest,
+    Level::SuperFastSimd,
+    Level::FastestSimd,
+    Level::BalancedSimd,
+    Level::SmallestSimd,
+    Level::SuperFastSimdDelta,
+    Level::FastestSimdDelta,
+    Level::BalancedSimdDelta,
+];
+
 fuzz_target!(|data: &[u8]| {
-    if data.is_empty() || data.len() > 9 * 1024 * 1024 {
+    if data.len() < 2 || data.len() > 9 * 1024 * 1024 {
         return;
     }
     let mode = data[0];
-    let payload = &data[1..];
+    let level = LEVELS[data[1] as usize % LEVELS.len()];
+    let payload = &data[2..];
 
     let enc_conc = (mode & 0x3) as usize + 1;
     let dec_conc = ((mode >> 2) & 0x3) as usize + 1;
-    let level = match (mode >> 4) & 0x3 {
-        0 => Level::Fastest,
-        1 => Level::Balanced,
-        2 => Level::Smallest,
-        _ => Level::Balanced,
-    };
     let block_size = if mode & 0x40 != 0 {
         4 * 1024
     } else {

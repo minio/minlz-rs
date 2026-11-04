@@ -81,6 +81,7 @@ fn run_at(name: &str, src: &[u8], level: Level) {
         Level::Fastest => "L1",
         Level::Balanced => "L2",
         Level::Smallest => "L3",
+        _ => "SIMD",
     };
     println!(
         "{name:18} {lvl_label}  src={:>9}B enc={:>9}B ratio={:5.3}  enc={:7.1} MB/s  dec={:7.1} MB/s  ({} iters)",

@@ -14,14 +14,14 @@
 
 //! MinLZ — Rust port of the Go reference (`github.com/minio/minlz`).
 //!
-//! Implements the MinLZ v1.0 specification.  See `SPEC.md` §1–§4 in the
-//! upstream Go repository for the wire format.
+//! Implements the MinLZ v1.1 specification.  See `SPEC.md` §1–§4 and
+//! `SPEC_SIMD.md` in the upstream Go repository for the wire format.
 //!
 //! # What's here
 //!
 //! * Block codec — encode at three compression levels
-//!   ([`Level::Fastest`], [`Level::Balanced`], [`Level::Smallest`]) and a
-//!   safe decoder.  See [`mod@block`].
+//!   ([`Level::Fastest`], [`Level::Balanced`], [`Level::Smallest`]), SIMD
+//!   blocks at the `*Simd` levels, and a safe decoder.  See [`mod@block`].
 //! * Streaming codec — [`stream::Reader`] / [`stream::Writer`] over any
 //!   [`Read`](std::io::Read) / [`Write`](std::io::Write), with a
 //!   multi-threaded variant ([`stream::MtWriter`],
@@ -49,9 +49,20 @@
 #![deny(missing_docs)]
 
 pub mod block;
+#[doc(hidden)]
+pub mod cpu;
 mod error;
+#[cfg(test)]
+mod guard;
 pub mod index;
+#[doc(hidden)]
+pub mod pivco;
+#[cfg(any(test, feature = "reference"))]
+#[doc(hidden)]
+pub mod reference;
 pub mod stream;
+#[doc(hidden)]
+pub mod xxh3;
 
 pub use block::{
     Level, MAX_BLOCK_SIZE, append_decoded, append_encoded, decode, decoded_len, encode, is_minlz,

@@ -71,6 +71,7 @@ pub use format::{
 };
 pub use mt_reader::ConcurrentDecode;
 pub use mt_writer::{MtWriter, MtWriterBuilder};
+pub(crate) use reader::simd_chunk_header;
 pub use reader::{Reader, ReaderBuilder, UserChunkCb};
 pub use seek::ReadSeeker;
 pub use writer::{Writer, WriterBuilder, Written};

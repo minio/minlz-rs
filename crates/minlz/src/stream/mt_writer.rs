@@ -36,15 +36,14 @@ use crate::block;
 use crate::index::Index;
 
 use super::Concurrency;
-use super::crc::masked_crc32c;
 use super::error::Error;
 use super::format::{
-    CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
-    CHUNK_TYPE_PADDING, CHUNK_TYPE_UNCOMPRESSED_DATA, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE,
-    MAX_USER_CHUNK_SIZE, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64, MIN_BLOCK_SIZE,
-    MIN_USER_SKIPPABLE_CHUNK, make_stream_header, put_uvarint,
+    CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_PADDING, DEFAULT_BLOCK_SIZE,
+    MAX_BLOCK_SIZE, MAX_USER_CHUNK_SIZE, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64,
+    MIN_BLOCK_SIZE, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, make_stream_header, put_uvarint,
 };
 use super::mt_pool::BufferPool;
+use super::writer::{encode_block, put_uncompressed_header, simd_stream};
 
 /// One item in the per-stream order queue.  The writer thread drains
 /// this in submission order and writes the bytes to `W`.
@@ -63,9 +62,10 @@ enum OrderItem {
 /// the buffer round-trips on a single ownership chain without crossing
 /// the pool mutex twice per block.
 struct WorkerOutput {
-    /// 4-byte chunk header + 4-byte CRC.
-    hdr: [u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE],
-    /// Encoded body (or raw uncompressed body for 0x01 chunks).
+    /// 4-byte chunk header + 4-byte CRC of a 0x01 chunk; `None` if `body` is
+    /// the whole chunk.
+    hdr: Option<[u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE]>,
+    /// Encoded chunk (or raw uncompressed body for 0x01 chunks).
     body: Vec<u8>,
     /// `true` if `body` aliases the input (incompressible 0x01 path).
     /// In that case `input_return` is empty; only `body` needs returning
@@ -137,6 +137,8 @@ impl MtWriterBuilder {
     }
 
     /// Set the compression level.
+    /// The SIMD levels write SIMD chunks, which need a decoder for MinLZ format specification
+    /// v1.1 or later.
     pub fn level(mut self, level: block::Level) -> Self {
         self.level = level;
         self.uncompressed = false;
@@ -269,8 +271,11 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         let (finish_tx, finish_rx) = mpsc::sync_channel::<io::Result<W>>(1);
         let err: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
         let input_pool = Arc::new(BufferPool::new(concurrency + 1, b.block_size));
-        // Output buffer needs MaxEncodedLen(block_size) worst-case.
-        let obuf_cap = block::max_encoded_len(b.block_size).unwrap_or(b.block_size + 16);
+        // encode_block needs the chunk header, the checksum or hash, and MaxEncodedLen(block_size);
+        // a smaller buffer would double on its first full block.
+        let obuf_cap = CHUNK_HEADER_SIZE
+            + SIMD_HASH_SIZE
+            + block::max_encoded_len(b.block_size).unwrap_or(b.block_size + 16);
         let obuf_pool = Arc::new(BufferPool::new(concurrency + 1, obuf_cap));
 
         // Spawn workers.
@@ -378,8 +383,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
     pub fn finish(mut self) -> io::Result<W> {
         self.check_err()?;
         self.flush_ibuf()?;
-        self.ensure_header()?;
-        // EOF chunk.
+        // EOF chunk; an empty stream is this chunk alone, as Go writes it.
         let mut tmp = [0u8; CHUNK_HEADER_SIZE + MAX_VARINT_LEN_64];
         tmp[0] = CHUNK_TYPE_EOF;
         let n = put_uvarint(&mut tmp[CHUNK_HEADER_SIZE..], self.uncomp_written);
@@ -419,7 +423,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
             return Ok(());
         }
         self.wrote_header = true;
-        let hdr = make_stream_header(self.block_size);
+        let hdr = make_stream_header(self.block_size, simd_stream(self.level, self.uncompressed));
         self.submit_raw(hdr.to_vec())
     }
 
@@ -604,17 +608,16 @@ fn worker_loop(submit_rx: Receiver<BlockJob>) {
             obuf_pool,
         } = job;
         let uncomp_len = uncompressed.len() as u32;
-        let crc = masked_crc32c(&uncompressed);
         let mut obuf = obuf_pool.acquire();
         let compressed_ok = if uncompressed_mode {
             false
         } else {
-            match block::append_encoded_chunk_body(&mut obuf, &uncompressed, level) {
+            match encode_block(&mut obuf, &uncompressed, level) {
                 Ok(ok) => ok,
                 Err(e) => {
                     obuf_pool.release(obuf);
                     let _ = result_tx.send(WorkerOutput {
-                        hdr: error_marker(),
+                        hdr: Some(error_marker()),
                         body: format!("encode: {e}").into_bytes(),
                         body_is_input: false,
                         input_return: uncompressed,
@@ -628,34 +631,16 @@ fn worker_loop(submit_rx: Receiver<BlockJob>) {
         // through as the body — saves a copy and lets the writer thread
         // release it as the body afterwards.  `input_return` is left
         // empty so the writer doesn't double-release.
-        let (chunk_type, chunk_len, body, body_is_input, input_return) = if compressed_ok {
-            let chunk_len = CHECKSUM_SIZE + obuf.len();
-            (
-                CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
-                chunk_len,
-                obuf,
-                false,
-                uncompressed,
-            )
+        let (hdr, body, body_is_input, input_return) = if compressed_ok {
+            (None, obuf, false, uncompressed)
         } else {
             // Incompressible: discard the (empty/wasted) obuf, send the
             // input as the body.
             obuf_pool.release(obuf);
-            let chunk_len = CHECKSUM_SIZE + uncompressed.len();
-            (
-                CHUNK_TYPE_UNCOMPRESSED_DATA,
-                chunk_len,
-                uncompressed,
-                true,
-                Vec::new(),
-            )
+            let mut hdr = [0u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE];
+            put_uncompressed_header(&mut hdr, &uncompressed);
+            (Some(hdr), uncompressed, true, Vec::new())
         };
-        let mut hdr = [0u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE];
-        hdr[0] = chunk_type;
-        hdr[1] = chunk_len as u8;
-        hdr[2] = (chunk_len >> 8) as u8;
-        hdr[3] = (chunk_len >> 16) as u8;
-        hdr[4..8].copy_from_slice(&crc.to_le_bytes());
         let _ = result_tx.send(WorkerOutput {
             hdr,
             body,
@@ -702,7 +687,7 @@ fn writer_loop<W: Write + Send + 'static>(
                 }
                 OrderItem::Block(rx) => match rx.recv() {
                     Ok(out) => {
-                        if is_error_marker(&out.hdr) {
+                        if out.hdr.as_ref().is_some_and(is_error_marker) {
                             let msg = String::from_utf8_lossy(&out.body).into_owned();
                             let e = io::Error::new(io::ErrorKind::InvalidData, msg);
                             return Err(record(&err_slot, e));
@@ -721,8 +706,10 @@ fn writer_loop<W: Write + Send + 'static>(
                             idx.add(comp_written, uncomp_written)
                                 .map_err(|e| record(&err_slot, e.into()))?;
                         }
-                        let body_len = body.len();
-                        w.write_all(&hdr).map_err(|e| record(&err_slot, e))?;
+                        let chunk_len = hdr.map_or(0, |h| h.len()) + body.len();
+                        if let Some(hdr) = hdr {
+                            w.write_all(&hdr).map_err(|e| record(&err_slot, e))?;
+                        }
                         let write_res = w.write_all(&body).map_err(|e| record(&err_slot, e));
                         // Return buffers to their pools.  `body` came
                         // from input_pool if `body_is_input`, otherwise
@@ -737,7 +724,7 @@ fn writer_loop<W: Write + Send + 'static>(
                             input_pool.release(input_return);
                         }
                         write_res?;
-                        comp_written += (hdr.len() + body_len) as u64;
+                        comp_written += chunk_len as u64;
                         uncomp_written += uncomp_len as u64;
                     }
                     Err(_) => {
