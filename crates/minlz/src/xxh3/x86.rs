@@ -16,6 +16,7 @@
 //! puts the high half of a lane next to its low half for `mul_epu32`, and `shuffle 0x4e` swaps
 //! adjacent lanes for `acc[i ^ 1] += data[i]`.
 
+use core::arch::asm;
 use core::arch::x86_64::*;
 use core::mem::transmute;
 
@@ -177,12 +178,33 @@ impl Kernel for Avx2 {
         // SAFETY: prefetching never faults.
         unsafe { _mm_prefetch::<_MM_HINT_T0>(p.cast()) }
     }
+
+    // Summed first, as in Avx512::stripe. In the block loop, LLVM's order was 1% faster.
+    #[inline(always)]
+    unsafe fn tail(acc: &mut Self::Acc, p: &[u8; STRIPE], k: &[u8; STRIPE]) {
+        // SAFETY: the caller checked AVX2.
+        unsafe {
+            let mut x = Self::zero();
+            Self::stripe(&mut x, p, k);
+            *acc = Self::add(*acc, x.map(|x| ybar(x)));
+        }
+    }
+}
+
+/// Returns x, which LLVM cannot see through: see [`Kernel::opaque`].
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ybar(mut x: __m256i) -> __m256i {
+    // SAFETY: the template is empty; it neither reads nor writes memory.
+    unsafe { asm!("/* {0} */", inout(ymm_reg) x, options(pure, nomem, nostack, preserves_flags)) };
+    x
 }
 
 struct Avx512;
 
 impl Kernel for Avx512 {
     type Acc = __m512i;
+    const UNROLL: bool = true;
 
     #[inline(always)]
     unsafe fn load(a: &[u64; 8]) -> Self::Acc {
@@ -213,12 +235,14 @@ impl Kernel for Avx512 {
         // SAFETY: the caller checked AVX-512F; the loads read p and k.
         unsafe {
             let d = _mm512_loadu_si512(p.as_ptr().cast());
-            let dk = _mm512_xor_si512(d, _mm512_loadu_si512(k.as_ptr().cast()));
+            // In a register, the unrolled block loop loads the key once; folded into VPXORQ, it
+            // would be loaded for every stripe.
+            let dk = _mm512_xor_si512(d, zbar(_mm512_loadu_si512(k.as_ptr().cast())));
             let prod = _mm512_mul_epu32(dk, _mm512_shuffle_epi32::<0x31>(dk));
-            *acc = _mm512_add_epi64(
-                *acc,
-                _mm512_add_epi64(prod, _mm512_shuffle_epi32::<0x4e>(d)),
-            );
+            // Summed first, acc takes one dependent add instead of two: LLVM adds the product and
+            // data to it in turn. 1.2-1.4 times faster at 512 B to 1 KiB, 3-9% from 4 KiB.
+            let x = zbar(_mm512_add_epi64(prod, _mm512_shuffle_epi32::<0x4e>(d)));
+            *acc = _mm512_add_epi64(*acc, x);
         }
     }
 
@@ -240,4 +264,19 @@ impl Kernel for Avx512 {
         // SAFETY: prefetching never faults.
         unsafe { _mm_prefetch::<_MM_HINT_T0>(p.cast()) }
     }
+
+    #[inline(always)]
+    unsafe fn opaque(x: Self::Acc) -> Self::Acc {
+        // SAFETY: the caller checked AVX-512F.
+        unsafe { zbar(x) }
+    }
+}
+
+/// [`ybar`] for AVX-512.
+#[inline]
+#[target_feature(enable = "avx512f")]
+fn zbar(mut x: __m512i) -> __m512i {
+    // SAFETY: the template is empty; it neither reads nor writes memory.
+    unsafe { asm!("/* {0} */", inout(zmm_reg) x, options(pure, nomem, nostack, preserves_flags)) };
+    x
 }

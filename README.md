@@ -746,7 +746,8 @@ JSON for streams.  Ryzen 9 9950X, Windows 11.
 | Stream encode, 1 thread, vs Go parsers / Go asm     | 1.03–1.10× / 0.93–0.98× |
 | Stream decode, 32 threads                           |              1.09–1.34× |
 | Stream encode, 32 threads, vs Go parsers / Go asm   | 0.88–1.15× / 0.90–1.04× |
-| XXH3 vs `zeebo/xxh3`, 4 KB / 64 KB / 4 MB           |   1.09× / 1.16× / 0.99× |
+| XXH3 vs `zeebo/xxh3`, 4 KB / 64 KB / 4 MB           |   1.09× / 1.24× / 1.08× |
+| XXH3 vs `zeebo/xxh3` with #35, same sizes           |   0.92× / 1.00× / 1.08× |
 
 Single figures are geomeans, with the lowest and highest cell in
 parentheses.  Blocks are 1 and 4 MB at levels 4–7 and 260–262.
@@ -760,7 +761,10 @@ same output and which Go uses in `noasm` / `purego` builds.  An
 the 32-thread figures include that reuse.  Starting them fresh costs
 35–67K page faults per 1 GiB stream on Windows, and makes 32-thread
 encode 6–20% slower.  Multi-threaded results vary by up to ±10%
-between runs.
+between runs.  XXH3 is compared with `zeebo/xxh3` master (86009ce)
+and with its pending [PR #35](https://github.com/zeebo/xxh3/pull/35),
+which speeds up its AVX2 and AVX-512 loops.  The XXH3 figures are
+AVX-512; on AVX2, Rust is 0.97–0.99× of master and 0.91–0.96× of #35.
 
 ## CLI: `mz`
 

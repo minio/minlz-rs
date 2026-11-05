@@ -321,28 +321,68 @@ trait Kernel {
     type Acc: Copy;
     /// Whether [`blocks_acc`] adds the stripes to four sums, which takes four times the registers.
     const SPLIT: bool = true;
+    /// Whether [`blocks_acc`] unrolls a block, with the keys in registers and sums that start at
+    /// zero. AVX2 has too few registers: unrolled, its sums spilled, and rolled, adding stripes to
+    /// zero sums cost 3%.
+    const UNROLL: bool = false;
     unsafe fn load(a: &[u64; 8]) -> Self::Acc;
     unsafe fn store(acc: Self::Acc, a: &mut [u64; 8]);
     unsafe fn zero() -> Self::Acc;
     /// Adds the lanes of a and b.
     unsafe fn add(a: Self::Acc, b: Self::Acc) -> Self::Acc;
     unsafe fn stripe(acc: &mut Self::Acc, p: &[u8; STRIPE], k: &[u8; STRIPE]);
+    /// [`Kernel::stripe`] past the last block, where the adds to acc are the only chain.
+    #[inline(always)]
+    unsafe fn tail(acc: &mut Self::Acc, p: &[u8; STRIPE], k: &[u8; STRIPE]) {
+        // SAFETY: the caller checked the unit's features.
+        unsafe { Self::stripe(acc, p, k) }
+    }
     unsafe fn scramble(acc: &mut Self::Acc);
     #[inline(always)]
     unsafe fn prefetch(_p: *const u8) {}
+    /// Returns x, which LLVM cannot see through. LLVM gives the first add of a sum to the
+    /// loop-carried term, which chains that term through every add.
+    #[inline(always)]
+    unsafe fn opaque(x: Self::Acc) -> Self::Acc {
+        x
+    }
 }
 
-/// Returns the secret stripe at o.
+/// Returns the secret stripe at o, which is 8·r for r ≤ 16, or 121 for the last stripe.
 #[inline(always)]
 fn key(o: usize) -> &'static [u8; STRIPE] {
-    const K: &[u8; 192] = &KEY;
-    K[o..o + STRIPE].try_into().unwrap()
+    debug_assert!(o.is_multiple_of(8) && o <= KEY.len() - STRIPE || o == KEY.len() - STRIPE - 7);
+    &KEYS.0[if o.is_multiple_of(8) { o / 8 } else { 17 }]
 }
+
+/// The stripes [`key`] returns, each 64-byte aligned: most would cross a cache line in KEY.
+#[repr(C, align(64))]
+struct Keys([[u8; STRIPE]; 18]);
+
+static KEYS: Keys = {
+    let mut k = [[0; STRIPE]; 18];
+    let mut r = 0;
+    while r < k.len() {
+        let o = if r == 17 {
+            KEY.len() - STRIPE - 7
+        } else {
+            8 * r
+        };
+        let mut i = 0;
+        while i < STRIPE {
+            k[r][i] = KEY[o + i];
+            i += 1;
+        }
+        r += 1;
+    }
+    Keys(k)
+};
 
 /// Accumulates the stripes of n blocks of p, scrambling after each.
 /// With [`Kernel::SPLIT`], the stripes of a block go round-robin to four sums, as in zeebo/xxh3:
 /// one sum chains two vector adds per stripe, and Zen 5 takes 2 cycles for each, which halved
-/// the speed.
+/// the speed. With [`Kernel::UNROLL`], the sums start at zero in each block and acc takes them
+/// in one add, so the next block's stripes overlap this block's scramble.
 ///
 /// # Safety
 ///
@@ -360,15 +400,40 @@ unsafe fn blocks_acc<K: Kernel>(acc: &mut K::Acc, p: &[u8], n: usize) {
                 K::scramble(acc);
                 continue;
             }
-            let mut t = [*acc, K::zero(), K::zero(), K::zero()];
-            for (q, st4) in b.as_chunks::<{ 4 * STRIPE }>().0.iter().enumerate() {
-                for (j, (t, st)) in t.iter_mut().zip(st4.as_chunks::<STRIPE>().0).enumerate() {
-                    K::prefetch(st.as_ptr().wrapping_add(BLOCK));
-                    K::stripe(t, st, key(8 * (4 * q + j)));
+            let st4 = b.as_chunks::<{ 4 * STRIPE }>().0;
+            if K::UNROLL {
+                let mut t = [K::zero(); 4];
+                quad::<K>(&mut t, &st4[0], 0);
+                quad::<K>(&mut t, &st4[1], 1);
+                quad::<K>(&mut t, &st4[2], 2);
+                quad::<K>(&mut t, &st4[3], 3);
+                let sum = K::add(K::add(t[0], t[1]), K::add(t[2], t[3]));
+                *acc = K::add(*acc, K::opaque(sum));
+            } else {
+                let mut t = [*acc, K::zero(), K::zero(), K::zero()];
+                for (q, st4) in st4.iter().enumerate() {
+                    quad::<K>(&mut t, st4, q);
                 }
+                *acc = K::add(K::add(t[0], t[1]), K::add(t[2], t[3]));
             }
-            *acc = K::add(K::add(t[0], t[1]), K::add(t[2], t[3]));
             K::scramble(acc);
+        }
+    }
+}
+
+/// Adds stripes 4·q to 4·q+3 of a block, in st, to the sums t. With a constant q the keys are
+/// constants, which AVX-512 keeps in registers.
+///
+/// # Safety
+///
+/// The CPU has K's features.
+#[inline(always)]
+unsafe fn quad<K: Kernel>(t: &mut [K::Acc; 4], st: &[u8; 4 * STRIPE], q: usize) {
+    for (j, (t, st)) in t.iter_mut().zip(st.as_chunks::<STRIPE>().0).enumerate() {
+        // SAFETY: the caller checked K's features; prefetching never faults.
+        unsafe {
+            K::prefetch(st.as_ptr().wrapping_add(BLOCK));
+            K::stripe(t, st, key(8 * (4 * q + j)));
         }
     }
 }
@@ -408,9 +473,9 @@ unsafe fn accum<K: Kernel>(a: &mut [u64; 8], p: &[u8]) {
             .iter()
             .enumerate()
         {
-            K::stripe(&mut acc, st, key(8 * s));
+            K::tail(&mut acc, st, key(8 * s));
         }
-        K::stripe(
+        K::tail(
             &mut acc,
             p[p.len() - STRIPE..].try_into().unwrap(),
             key(KEY.len() - STRIPE - 7),
