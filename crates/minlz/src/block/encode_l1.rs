@@ -31,8 +31,10 @@ pub(super) fn encode_block(dst: &mut [u8], src: &[u8]) -> usize {
     if src.len() < MIN_NON_LITERAL_BLOCK_SIZE {
         return 0;
     }
-    if src.len() <= 65536 {
-        encode_block_64k(dst, src)
+    if src.len() <= SMALL_TABLE_MAX_LEN {
+        encode_block_64k::<SMALL_TABLE_SIZE>(dst, src)
+    } else if src.len() <= 65536 {
+        encode_block_64k::<{ 1 << 13 }>(dst, src)
     } else {
         encode_block_big(dst, src)
     }
@@ -242,12 +244,25 @@ fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
     d
 }
 
-/// L1 encoder for inputs ≤ 64 KiB (port of `encodeBlockGo64K`).
-fn encode_block_64k(dst: &mut [u8], src: &[u8]) -> usize {
-    const TABLE_BITS: u32 = 13;
-    const TABLE_SIZE: usize = 1 << TABLE_BITS;
+/// Inputs up to this length use a [`SMALL_TABLE_SIZE`]-entry hash table.
+const SMALL_TABLE_MAX_LEN: usize = 2 << 10;
+/// Hash table entries for inputs up to [`SMALL_TABLE_MAX_LEN`] (2 KiB of
+/// `u16`s).  Zeroing the full 16 KiB table would dominate the encode time
+/// for such inputs, and most of it would stay empty.
+const SMALL_TABLE_SIZE: usize = 1 << 10;
+
+/// L1 encoder for inputs ≤ 64 KiB (port of `encodeBlockGo64K`), with a
+/// `TABLE_SIZE`-entry hash table.
+///
+/// Go's `encodeBlockGo64K` always uses 8192 entries; small inputs use
+/// [`SMALL_TABLE_SIZE`] instead (Go's amd64 assembly encoders also size the
+/// table to the input).  Each size is a separate instantiation, so the hash
+/// shift is a constant and table indexing needs no bounds checks.
+fn encode_block_64k<const TABLE_SIZE: usize>(dst: &mut [u8], src: &[u8]) -> usize {
+    const { assert!(TABLE_SIZE.is_power_of_two()) };
     const SKIP_LOG: u32 = 5;
 
+    let table_bits = TABLE_SIZE.trailing_zeros();
     let mut table = [0u16; TABLE_SIZE];
     let s_limit = src.len() - INPUT_MARGIN;
     let dst_limit = src.len() - (src.len() >> 5) - 6;
@@ -265,13 +280,13 @@ fn encode_block_64k(dst: &mut [u8], src: &[u8]) -> usize {
             if next_s > s_limit {
                 break 'outer;
             }
-            let hash0 = hash5(cv, TABLE_BITS) as usize;
-            let hash1 = hash5(cv >> 8, TABLE_BITS) as usize;
+            let hash0 = hash5(cv, table_bits) as usize;
+            let hash1 = hash5(cv >> 8, table_bits) as usize;
             let c0 = table[hash0] as usize;
             let c1 = table[hash1] as usize;
             table[hash0] = s as u16;
             table[hash1] = (s + 1) as u16;
-            let hash2 = hash5(cv >> 16, TABLE_BITS) as usize;
+            let hash2 = hash5(cv >> 16, table_bits) as usize;
 
             // Repeat check at offset +1.
             let prev = s.wrapping_sub(repeat).wrapping_add(1);
@@ -374,9 +389,9 @@ fn encode_block_64k(dst: &mut [u8], src: &[u8]) -> usize {
             if d > dst_limit {
                 return 0;
             }
-            let m2_hash = hash5(x, TABLE_BITS) as usize;
+            let m2_hash = hash5(x, table_bits) as usize;
             let x_top = x >> 16;
-            let curr_hash = hash5(x_top, TABLE_BITS) as usize;
+            let curr_hash = hash5(x_top, table_bits) as usize;
             let cand = table[curr_hash] as usize;
             table[m2_hash] = (s - 2) as u16;
             table[curr_hash] = s as u16;
@@ -409,4 +424,68 @@ fn encode_block_64k(dst: &mut [u8], src: &[u8]) -> usize {
         d += emit_literal(&mut dst[d..], &src[next_emit..]);
     }
     d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::format::max_encoded_len;
+    use super::super::{Level, decode, encode};
+    use super::*;
+
+    /// `n` bytes of compressible text: random words from a 256-word
+    /// vocabulary of random letters.
+    fn words(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed | 1;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let vocab: Vec<Vec<u8>> = (0..256)
+            .map(|_| {
+                let len = 2 + next() % 7;
+                let mut w: Vec<u8> = (0..len).map(|_| b'a' + (next() % 26) as u8).collect();
+                w.push(b' ');
+                w
+            })
+            .collect();
+        let mut src = Vec::with_capacity(n + 16);
+        while src.len() < n {
+            src.extend_from_slice(&vocab[(next() % 256) as usize]);
+        }
+        src.truncate(n);
+        src
+    }
+
+    fn encode_with(src: &[u8], f: impl FnOnce(&mut [u8], &[u8]) -> usize) -> Vec<u8> {
+        let mut dst = vec![0; max_encoded_len(src.len()).unwrap()];
+        let n = f(&mut dst, src);
+        dst.truncate(n);
+        dst
+    }
+
+    /// Inputs up to `SMALL_TABLE_MAX_LEN` use the small table and longer ones
+    /// the full table; both round-trip.
+    #[test]
+    fn small_table_threshold() {
+        for n in [SMALL_TABLE_MAX_LEN, SMALL_TABLE_MAX_LEN + 1] {
+            let src = words(n, 1);
+            let small = encode_with(&src, encode_block_64k::<SMALL_TABLE_SIZE>);
+            let full = encode_with(&src, encode_block_64k::<{ 1 << 13 }>);
+            assert_ne!(small, full, "n={n}: input does not tell the tables apart");
+            let want = if n <= SMALL_TABLE_MAX_LEN {
+                small
+            } else {
+                full
+            };
+            assert_eq!(encode_with(&src, encode_block), want, "n={n}");
+
+            let mut enc = Vec::new();
+            encode(&mut enc, &src, Level::Fastest).unwrap();
+            let mut dec = Vec::new();
+            decode(&mut dec, &enc).unwrap();
+            assert_eq!(dec, src, "n={n}");
+        }
+    }
 }

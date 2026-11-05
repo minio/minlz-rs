@@ -17,7 +17,9 @@
 //! Mirrors Go's `BenchmarkTwainEncode1eN` / `BenchmarkTwainDecode1eN` shape
 //! (`benchmarks_test.go:123` / `:108`).  Reads
 //! `testdata/Mark.Twain-Tom.Sawyer.txt` from the upstream Go repo and runs
-//! encode + decode at each level for several scaled-up corpus sizes.
+//! encode + decode at each level for several corpus sizes, from 100 bytes
+//! to 1 MB.  Also encodes and decodes each file of the Snappy benchmark
+//! corpus (`BenchmarkEncodeBlockSingle` / `BenchmarkDecodeBlockSingle`).
 //!
 //! Run with:
 //!
@@ -88,6 +90,16 @@ fn expand(src: &[u8], n: usize) -> Vec<u8> {
     }
     dst
 }
+
+/// Twain corpus sizes, mirroring Go's `BenchmarkTwain{Encode,Decode}1eN`
+/// (without `1e1`, which is below the minimum compressible block size).
+const TWAIN_SIZES: &[(usize, &str)] = &[
+    (100, "1e2"),
+    (1_000, "1e3"),
+    (10_000, "1e4"),
+    (100_000, "1e5"),
+    (1_000_000, "1e6"),
+];
 
 fn level_label(l: Level) -> &'static str {
     match l {
@@ -236,13 +248,12 @@ const SNAPPY_FILES: &[SnappyFile] = &[
 
 fn bench_encode(c: &mut Criterion) {
     let twain = load_twain();
-    let sizes: &[(usize, &str)] = &[(100_000, "1e5"), (1_000_000, "1e6")];
     let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
 
     let mut g = c.benchmark_group("twain_encode");
     g.measurement_time(Duration::from_secs(8));
     g.warm_up_time(Duration::from_secs(2));
-    for (n, label) in sizes {
+    for (n, label) in TWAIN_SIZES {
         let src = expand(&twain, *n);
         g.throughput(Throughput::Bytes(*n as u64));
         for &level in &levels {
@@ -260,13 +271,12 @@ fn bench_encode(c: &mut Criterion) {
 
 fn bench_decode(c: &mut Criterion) {
     let twain = load_twain();
-    let sizes: &[(usize, &str)] = &[(100_000, "1e5"), (1_000_000, "1e6")];
     let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
 
     let mut g = c.benchmark_group("twain_decode");
     g.measurement_time(Duration::from_secs(8));
     g.warm_up_time(Duration::from_secs(2));
-    for (n, label) in sizes {
+    for (n, label) in TWAIN_SIZES {
         let src = expand(&twain, *n);
         g.throughput(Throughput::Bytes(*n as u64));
         for &level in &levels {
@@ -277,6 +287,34 @@ fn bench_decode(c: &mut Criterion) {
                 let mut buf = Vec::with_capacity(src.len() + 16);
                 b.iter(|| {
                     decode(&mut buf, enc).expect("decode");
+                });
+            });
+        }
+    }
+    g.finish();
+}
+
+/// Per-(file, level) encode bench mirroring Go's
+/// `BenchmarkEncodeBlockSingle` over the Snappy testdata corpus.  The
+/// size-limited entries (`*_128b`, `*_200b`, …) cover small blocks, where
+/// per-call setup costs dominate.
+fn bench_snappy_encode(c: &mut Criterion) {
+    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let mut g = c.benchmark_group("snappy_encode");
+    g.measurement_time(Duration::from_secs(2));
+    g.warm_up_time(Duration::from_secs(1));
+    for tf in SNAPPY_FILES {
+        let mut data = load_bench_file(tf.filename);
+        if tf.size_limit > 0 && data.len() > tf.size_limit {
+            data.truncate(tf.size_limit);
+        }
+        g.throughput(Throughput::Bytes(data.len() as u64));
+        for &level in &levels {
+            let id = BenchmarkId::new(tf.label, level_label(level));
+            g.bench_with_input(id, &data, |b, data| {
+                let mut buf = Vec::with_capacity(data.len() + 16);
+                b.iter(|| {
+                    encode(&mut buf, data, level).expect("encode");
                 });
             });
         }
@@ -312,5 +350,11 @@ fn bench_snappy_decode(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_decode, bench_snappy_decode);
+criterion_group!(
+    benches,
+    bench_encode,
+    bench_decode,
+    bench_snappy_encode,
+    bench_snappy_decode
+);
 criterion_main!(benches);
