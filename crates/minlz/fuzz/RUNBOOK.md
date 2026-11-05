@@ -127,7 +127,7 @@ cargo +nightly fuzz run simd_decode             -- -max_total_time=1200 -jobs=8 
 from `/mnt` on WSL it mirrors the tree to `WORK_ROOT` on ext4).
 
 Every `-jobs` process first replays the whole corpus. With the full seed
-set that is 20 minutes for `roundtrip` at 24 jobs (10 levels per input,
+set that is 20 minutes for `roundtrip` at 24 jobs (11 levels per input,
 up to 2.5 MB inputs), so the whole budget goes to replay and nothing gets
 mutated, and each job grows to 1.1 GB RSS. `stream_roundtrip`'s corpus is
 twice that size. Run those two in libFuzzer's fork mode, which

@@ -20,11 +20,11 @@
 //!
 //! # What's here
 //!
-//! * Block codec — encode at three classic levels ([`Level::Fastest`],
-//!   [`Level::Balanced`], [`Level::Smallest`]) or as SIMD blocks at the
-//!   `*Simd` levels, and a safe decoder for both.  See [`mod@block`], and
-//!   [SIMD blocks](block#simd-blocks) for when the SIMD levels pay off and
-//!   who can read them.
+//! * Block codec — encode at four classic levels ([`Level::SuperFast`],
+//!   [`Level::Fastest`], [`Level::Balanced`], [`Level::Smallest`]) or as
+//!   SIMD blocks at the `*Simd` levels, and a safe decoder for both.  See
+//!   [`mod@block`], and [SIMD blocks](block#simd-blocks) for when the SIMD
+//!   levels pay off and who can read them.
 //! * SIMD decoding with AVX-512 or AVX2 on x86-64 and NEON on aarch64,
 //!   picked at runtime by CPU feature detection, with portable code
 //!   everywhere else.  The SIMD encoders write the same bytes as Go's.
@@ -42,9 +42,9 @@
 //!
 //! # What's *not* here
 //!
-//! Dictionaries, Go's classic `LevelSuperFast`, LZ4 conversion, and the
-//! Snappy/S2 fallback decoder paths are explicitly out of scope.  Block
-//! search tables (`SPEC.md` §4.13) are not implemented in this crate.
+//! Dictionaries, LZ4 conversion, and the Snappy/S2 fallback decoder paths
+//! are explicitly out of scope.  Block search tables (`SPEC.md` §4.13) are
+//! not implemented in this crate.
 //!
 //! [`SPEC.md`]: https://github.com/minio/minlz/blob/main/SPEC.md
 //! [`SPEC_SIMD.md`]: https://github.com/minio/minlz/blob/main/SPEC_SIMD.md

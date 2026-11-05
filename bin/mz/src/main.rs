@@ -50,7 +50,7 @@ Options (compress):
                       unless --classic.  Default: -2.
   --level N           Same, explicit (1, 2 or 3).
   -xfast              Compress fastest, with a major compression loss.
-                      SIMD blocks only.
+                      SIMD unless --classic.
   -0                  Uncompressed; emit 0x01 chunks only.
   --classic           Write classic MinLZ blocks, which all MinLZ decoders
                       can read.  Without it, SIMD blocks are written, which

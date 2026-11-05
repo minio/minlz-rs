@@ -279,6 +279,7 @@ const LEVEL_FLAGS: &[(&[&str], minlz::Level)] = {
         (&["-xfast", "--simd.delta"], SuperFastSimdDelta),
         (&["-1", "--simd.delta"], FastestSimdDelta),
         (&["--simd.delta"], BalancedSimdDelta),
+        (&["-xfast", "--classic"], SuperFast),
         (&["-1", "--classic"], Fastest),
         (&["--classic"], Balanced),
         (&["-3", "--classic"], Smallest),
@@ -344,7 +345,6 @@ fn simd_flag_conflicts_fail() {
         &["--simd.delta", "--classic"][..],
         &["--simd.delta", "-0"],
         &["--simd.delta", "-3"],
-        &["-xfast", "--classic"],
     ] {
         let out = Command::new(mz_bin())
             .args([&["c", "-c", "-q"], flags, &["-"]].concat())

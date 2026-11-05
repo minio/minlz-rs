@@ -46,7 +46,12 @@ fn main() {
 }
 
 fn run(name: &str, src: &[u8]) {
-    for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+    for level in [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ] {
         run_at(name, src, level);
     }
 }
@@ -78,6 +83,7 @@ fn run_at(name: &str, src: &[u8], level: Level) {
     let dec_mbs = mb_in / dec_dt.as_secs_f64();
     let ratio = enc.len() as f64 / src.len() as f64;
     let lvl_label = match level {
+        Level::SuperFast => "L-1",
         Level::Fastest => "L1",
         Level::Balanced => "L2",
         Level::Smallest => "L3",

@@ -42,7 +42,8 @@ use libfuzzer_sys::fuzz_target;
 use minlz::Level;
 use minlz::stream::{ConcurrentDecode, MtWriterBuilder, Reader, WriterBuilder};
 
-const LEVELS: [Level; 10] = [
+// SuperFast is last, so the level bytes of existing seeds below 10 keep their level.
+const LEVELS: [Level; 11] = [
     Level::Fastest,
     Level::Balanced,
     Level::Smallest,
@@ -53,6 +54,7 @@ const LEVELS: [Level; 10] = [
     Level::SuperFastSimdDelta,
     Level::FastestSimdDelta,
     Level::BalancedSimdDelta,
+    Level::SuperFast,
 ];
 
 /// A sink whose length can be read while a `Writer` owns it.

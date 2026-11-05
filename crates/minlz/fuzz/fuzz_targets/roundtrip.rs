@@ -30,7 +30,8 @@ use libfuzzer_sys::fuzz_target;
 use minlz::reference::decode_simd_block_strict;
 use minlz::{Level, encode, max_encoded_len};
 
-const LEVELS: [Level; 10] = [
+const LEVELS: [Level; 11] = [
+    Level::SuperFast,
     Level::Fastest,
     Level::Balanced,
     Level::Smallest,

@@ -266,8 +266,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     })
 }
 
-/// The level Go's `mainCompress` writes: SIMD blocks unless `--classic`. `-xfast` is parsed as
-/// [`Level::SuperFastSimd`], since Rust has no classic SuperFast level.
+/// The level Go's `mainCompress` writes: SIMD blocks unless `--classic`.
 fn write_level(opts: &Options) -> Result<Level, ParseError> {
     let level = opts.level.unwrap_or(Level::Balanced);
     if opts.simd_delta && (opts.classic || opts.uncompressed || level == Level::Smallest) {
@@ -277,16 +276,11 @@ fn write_level(opts: &Options) -> Result<Level, ParseError> {
         ));
     }
     if opts.classic {
-        if level == Level::SuperFastSimd {
-            return Err(ParseError::InvalidValue(
-                "-xfast".into(),
-                "classic SuperFast blocks are not supported; drop --classic".into(),
-            ));
-        }
         return Ok(level);
     }
     Ok(match (level, opts.simd_delta) {
-        (Level::SuperFastSimd, true) => Level::SuperFastSimdDelta,
+        (Level::SuperFast, false) => Level::SuperFastSimd,
+        (Level::SuperFast, true) => Level::SuperFastSimdDelta,
         (Level::Fastest, false) => Level::FastestSimd,
         (Level::Fastest, true) => Level::FastestSimdDelta,
         (Level::Balanced, false) => Level::BalancedSimd,
@@ -363,7 +357,7 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
         "help" => opts.help = true,
         "no-index" => opts.index = false,
         "follow" => opts.follow = true,
-        "xfast" => opts.level = Some(Level::SuperFastSimd),
+        "xfast" => opts.level = Some(Level::SuperFast),
         "classic" => opts.classic = true,
         "simd.delta" => opts.simd_delta = true,
         // The CPU toggles may only turn features off.
@@ -565,6 +559,8 @@ mod tests {
 
     #[test]
     fn level_flags() {
+        let cli = parse_argv(&["-xfast", "--classic", "x"]).unwrap();
+        assert_eq!(cli.options.level, Some(Level::SuperFast));
         let cli = parse_argv(&["-1", "--classic", "x"]).unwrap();
         assert_eq!(cli.options.level, Some(Level::Fastest));
         let cli = parse_argv(&["-3", "-classic", "x"]).unwrap();
@@ -603,7 +599,6 @@ mod tests {
             &["--simd.delta", "--classic"][..],
             &["--simd.delta", "-0"],
             &["--simd.delta", "-3"],
-            &["-xfast", "--classic"],
             &["-xfast", "-0"],
         ] {
             assert!(

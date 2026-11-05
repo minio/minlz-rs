@@ -132,7 +132,12 @@ fn encode_allocs() {
     let src = text();
     let mut dst = Vec::with_capacity(max_encoded_len(src.len()).unwrap());
     for n in [1 << 10, 64 << 10, src.len()] {
-        for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+        for level in [
+            Level::SuperFast,
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+        ] {
             check_allocs(&format!("size {n} level {level:?}"), || {
                 encode(&mut dst, &src[..n], level).unwrap();
             });

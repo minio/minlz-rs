@@ -105,8 +105,10 @@ fn level_label(l: Level) -> String {
     format!("L{}", i32::from(l))
 }
 
-/// The levels of Go's `benchEncode`: the classic levels, then the SIMD levels 4 to 7.
-const ENCODE_LEVELS: [Level; 7] = [
+/// The levels of Go's `benchEncode` plus SuperFast: the classic levels, then the SIMD levels 4
+/// to 7.
+const ENCODE_LEVELS: [Level; 8] = [
+    Level::SuperFast,
     Level::Fastest,
     Level::Balanced,
     Level::Smallest,
@@ -278,7 +280,12 @@ fn bench_encode(c: &mut Criterion) {
 
 fn bench_decode(c: &mut Criterion) {
     let twain = load_twain();
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let levels = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ];
 
     let mut g = c.benchmark_group("twain_decode");
     g.measurement_time(Duration::from_secs(8));
@@ -331,7 +338,12 @@ fn bench_snappy_encode(c: &mut Criterion) {
 /// Per-(file, level) decode bench mirroring Go's
 /// `BenchmarkDecodeBlockSingle` over the Snappy testdata corpus.
 fn bench_snappy_decode(c: &mut Criterion) {
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let levels = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ];
     let mut g = c.benchmark_group("snappy_decode");
     g.measurement_time(Duration::from_secs(2));
     g.warm_up_time(Duration::from_secs(1));

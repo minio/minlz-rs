@@ -54,6 +54,7 @@
 
 mod decode;
 mod emit;
+mod encode_l0;
 mod encode_l1;
 mod encode_l2;
 mod encode_l3;
@@ -79,6 +80,10 @@ use crate::Error;
 /// or more. See [SIMD blocks](crate::block#simd-blocks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
+    /// The fastest compression level. It takes significant shortcuts and usually compresses
+    /// much worse; use it only if [`Level::Fastest`] is confirmed to be too slow.
+    /// Maps to Go's `LevelSuperFast` (-1) / `encodeFastBlockGo`.
+    SuperFast,
     /// Single-pass with a 15-bit (or 13-bit for ≤64 KiB inputs) hash table.
     /// Maps to Go's `LevelFastest` / `encodeBlockGo`.
     Fastest,
@@ -115,10 +120,11 @@ pub enum Level {
 impl TryFrom<i32> for Level {
     type Error = Error;
 
-    /// Convert from Go's int levels (`1`-`7`, `260`-`262`); any other value
+    /// Convert from Go's int levels (`-1`, `1`-`7`, `260`-`262`); any other value
     /// is [`Error::InvalidLevel`].
     fn try_from(v: i32) -> Result<Self, Error> {
         match v {
+            -1 => Ok(Level::SuperFast),
             1 => Ok(Level::Fastest),
             2 => Ok(Level::Balanced),
             3 => Ok(Level::Smallest),
@@ -137,6 +143,7 @@ impl TryFrom<i32> for Level {
 impl From<Level> for i32 {
     fn from(l: Level) -> i32 {
         match l {
+            Level::SuperFast => -1,
             Level::Fastest => 1,
             Level::Balanced => 2,
             Level::Smallest => 3,
@@ -181,6 +188,7 @@ pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(),
     dst.resize(start + max, 0);
 
     let n = match level {
+        Level::SuperFast => encode_l0::encode_block(&mut dst[body_start..], src),
         Level::Fastest => encode_l1::encode_block(&mut dst[body_start..], src),
         Level::Balanced => encode_l2::encode_block(&mut dst[body_start..], src),
         Level::Smallest => encode_l3::encode_block(&mut dst[body_start..], src),
@@ -219,6 +227,7 @@ pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, E
     dst.resize(start + max, 0);
 
     let n = match level {
+        Level::SuperFast => encode_l0::encode_block(&mut dst[body_start..], src),
         Level::Fastest => encode_l1::encode_block(&mut dst[body_start..], src),
         Level::Balanced => encode_l2::encode_block(&mut dst[body_start..], src),
         Level::Smallest => encode_l3::encode_block(&mut dst[body_start..], src),
@@ -400,6 +409,7 @@ pub(crate) fn encode_chunk_body(
     }
     let dst = &mut dst[start..start + max];
     let encode_block = match level {
+        Level::SuperFast => encode_l0::encode_block,
         Level::Fastest => encode_l1::encode_block,
         Level::Balanced => encode_l2::encode_block,
         Level::Smallest => encode_l3::encode_block,

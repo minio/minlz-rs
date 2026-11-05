@@ -1,6 +1,6 @@
 // Command simdgo runs the Go MinLZ block codec for the Rust port's cross checks, and writes its SIMD fixtures.
 //
-//	simdgo enc -level N IN OUT    minlz.Encode at Go's int level N (4-7, 260-262 = SIMD|LevelSIMDDelta)
+//	simdgo enc -level N IN OUT    minlz.Encode at Go's int level N (-1 to 3 classic, 4-7 SIMD, 260-262 = SIMD|LevelSIMDDelta)
 //	simdgo dec IN OUT             minlz.Decode
 //	simdgo fixtures [-text FILE] ZIP
 //
@@ -16,7 +16,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: simdgo enc -level N IN OUT | dec IN OUT | fixtures [-text FILE] ZIP")
+	fmt.Fprintln(os.Stderr, "usage: simdgo enc -level N IN OUT (N: -1 to 7, 260-262) | dec IN OUT | fixtures [-text FILE] ZIP")
 	os.Exit(2)
 }
 

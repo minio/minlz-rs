@@ -16,11 +16,11 @@ are **not** implemented.
 
 ## What you get
 
-- **Seven compression levels** — the classic `Level::Fastest` (1),
-  `Level::Balanced` (2, default), `Level::Smallest` (3), and the SIMD
-  levels `Level::SuperFastSimd` (4), `FastestSimd` (5), `BalancedSimd`
-  (6), `SmallestSimd` (7), the first three also with delta literals.
-  See [SIMD blocks](#simd-blocks).
+- **Eight compression levels** — the classic `Level::SuperFast` (-1),
+  `Level::Fastest` (1), `Level::Balanced` (2, default), `Level::Smallest`
+  (3), and the SIMD levels `Level::SuperFastSimd` (4), `FastestSimd`
+  (5), `BalancedSimd` (6), `SmallestSimd` (7), the first three also with
+  delta literals.  See [SIMD blocks](#simd-blocks).
 - **SIMD decoding** — AVX-512 or AVX2 on x86-64 and NEON on aarch64,
   picked at runtime by CPU feature detection, with portable code on
   every other target.  The SIMD encoders write the same bytes as the Go
@@ -164,7 +164,8 @@ Working examples for these patterns live under
 
 | Level                         | Use when…                                             | Notes                                                                                   |
 |-------------------------------|-------------------------------------------------------|-----------------------------------------------------------------------------------------|
-| `Level::Fastest`  (1)         | Throughput is the constraint.                         | Highest classic encode speed; modest ratio.                                             |
+| `Level::SuperFast` (-1)       | `Level::Fastest` is confirmed to be too slow.         | New matches need 8 bytes and are not extended back; usually much worse ratio than L1.   |
+| `Level::Fastest`  (1)         | Throughput is the constraint.                         | Fast classic encode; modest ratio.                                                      |
 | `Level::Balanced` (2)         | The default — what you want unless you have a reason. | 0.6–0.7× L1's encode speed; meaningfully better ratio.                                  |
 | `Level::Smallest` (3)         | Archival; output is read many times.                  | Encode is roughly an order of magnitude slower than L2.  Decode speed is similar to L2. |
 | `Level::SuperFastSimd` (4)    | SIMD encode speed matters most.                       | 1.3–1.4× L5's encode speed for 9–11 % larger output.  The fastest decode.               |
@@ -790,8 +791,9 @@ mz verify input.json.mz                # validate without writing output
 As in Go's `cmd/mz`, compression writes SIMD blocks by default:
 `-xfast`, `-1`, `-2` (the default) and `-3` select
 `Level::SuperFastSimd`, `FastestSimd`, `BalancedSimd` and
-`SmallestSimd`.  `--classic` writes classic blocks at `-1` to `-3`,
-which every MinLZ decoder can read; `-xfast` has no classic level here.
+`SmallestSimd`.  `--classic` writes classic blocks, which every MinLZ
+decoder can read: `Level::SuperFast` at `-xfast`, and `Fastest` to
+`Smallest` at `-1` to `-3`.
 `--simd.delta` adds delta literals at `-xfast`, `-1` and `-2`.  The
 default block size is 8 MiB, as in Go.  `mz --help` lists every flag.
 
@@ -805,7 +807,6 @@ implemented (versus the Go reference):
 - Snappy / S2 fallback decoding for streams whose first byte indicates a
   legacy magic.
 - Block search tables (`SPEC.md` §4.13), and with them `mz search`.
-- Go's classic `LevelSuperFast` (level -1).
 - The `mz stats` and `mz d -block-debug` diagnostics.
 
 ## Development

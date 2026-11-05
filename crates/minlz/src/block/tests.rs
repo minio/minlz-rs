@@ -33,7 +33,7 @@ fn roundtrip_at(input: &[u8], level: Level) -> Result<(), String> {
     Ok(())
 }
 
-/// Run a round-trip at levels 1-7, as Go's `roundtrip`.
+/// Run a round-trip at levels 1-7, as Go's `roundtrip`, and at -1.
 ///
 /// Under miri, L3 and the SIMD levels are skipped: L3's only unsafe code
 /// (`load32`/`load64`) is shared with L1+L2, while the L3 entry zeros 1.25M
@@ -41,9 +41,10 @@ fn roundtrip_at(input: &[u8], level: Level) -> Result<(), String> {
 /// runs on this crate.  Native builds hit every level.
 fn roundtrip(input: &[u8]) -> Result<(), String> {
     let levels: &[Level] = if cfg!(miri) {
-        &[Level::Fastest, Level::Balanced]
+        &[Level::SuperFast, Level::Fastest, Level::Balanced]
     } else {
         &[
+            Level::SuperFast,
             Level::Fastest,
             Level::Balanced,
             Level::Smallest,
@@ -388,10 +389,15 @@ fn encode_noise_then_repeats() {
 /// Ports `TestEncodeHuge` from `encode_test.go:26`.
 /// Encode + decode at MAX_BLOCK_SIZE for every level.
 #[test]
-#[cfg_attr(miri, ignore = "8 MiB input × 3 levels is impractical under miri")]
+#[cfg_attr(miri, ignore = "8 MiB input × 4 levels is impractical under miri")]
 fn encode_huge() {
     let data = vec![0u8; MAX_BLOCK_SIZE];
-    for &level in &[Level::Fastest, Level::Balanced, Level::Smallest] {
+    for &level in &[
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ] {
         let mut enc = Vec::new();
         encode(&mut enc, &data, level).unwrap();
         let mut dec = Vec::new();
@@ -697,7 +703,12 @@ fn roundtrip_corpus_smoke() {
         if bytes.len() > MAX_BLOCK_SIZE {
             continue;
         }
-        for &level in &[Level::Fastest, Level::Balanced, Level::Smallest] {
+        for &level in &[
+            Level::SuperFast,
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+        ] {
             enc.clear();
             encode(&mut enc, &bytes, level).expect("encode");
             dec.clear();
@@ -706,7 +717,7 @@ fn roundtrip_corpus_smoke() {
         }
         count += 1;
     }
-    eprintln!("roundtrip_corpus_smoke: scanned {count} seeds across 3 levels");
+    eprintln!("roundtrip_corpus_smoke: scanned {count} seeds across 4 levels");
     assert!(
         count > 0,
         "corpus directory exists but had no readable files"
@@ -736,7 +747,12 @@ fn max_encoded_len_corpus_smoke() {
         let Some(mel) = max_encoded_len(bytes.len()) else {
             continue;
         };
-        for &level in &[Level::Fastest, Level::Balanced, Level::Smallest] {
+        for &level in &[
+            Level::SuperFast,
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+        ] {
             enc.clear();
             encode(&mut enc, &bytes, level).expect("encode");
             assert!(
@@ -758,7 +774,7 @@ fn max_encoded_len_corpus_smoke() {
 /// a few minutes.  Runs natively too — just much faster.
 #[test]
 fn miri_decoder_unsafe_paths() {
-    // Round-trip each small input at L1 (exercises every encoder unsafe
+    // Round-trip each small input at L0 and L1 (exercises every encoder unsafe
     // load/store and every decoder tag class via emit_copy / emit_literal
     // / emit_repeat).
     let inputs: &[&[u8]] = &[
@@ -775,12 +791,17 @@ fn miri_decoder_unsafe_paths() {
         // Long-ish English (exercises copy2 + emit_literal extension).
         b"the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog.",
     ];
-    // L1 alone exercises every encoder unsafe load/store; L2/L3 add
+    // L0 and L1 alone exercise every encoder unsafe load/store; L2/L3 add
     // table-zeroing cost (esp. L3's 1.25M `u64`s) without new UB coverage.
     let levels: &[Level] = if cfg!(miri) {
-        &[Level::Fastest]
+        &[Level::SuperFast, Level::Fastest]
     } else {
-        &[Level::Fastest, Level::Balanced, Level::Smallest]
+        &[
+            Level::SuperFast,
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+        ]
     };
     for &input in inputs {
         for &level in levels {
@@ -879,9 +900,14 @@ fn encode_long_match() {
         } else {
             &[]
         };
-        for &level in [Level::Fastest, Level::Balanced, Level::Smallest]
-            .iter()
-            .chain(simd)
+        for &level in [
+            Level::SuperFast,
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+        ]
+        .iter()
+        .chain(simd)
         {
             let mut comp = Vec::new();
             encode(&mut comp, &data, level).unwrap();
@@ -897,12 +923,13 @@ fn encode_long_match() {
     }
 }
 
-/// Miri: the >64 KiB L1 and L2 encoders, which are separate code from their 64 KiB versions, on
+/// Miri: the >64 KiB L0, L1 and L2 encoders, which are separate code from their 64 KiB versions, on
 /// segments from 16 seeds that repeat a few KiB back, right after each other, or with a changed
 /// byte (a repeat offset), and a last segment that repeats the first, over 64 KiB back.
 /// encode_long_match's single match skips most of their loops, and Miri ignores
 /// l1_offset_at_max_copy3_boundary_roundtrips. The SIMD parsers share their code with the 64 KiB
-/// versions, which simd_encode_short runs. 27 s under Miri; each SIMD level would add 17 s.
+/// versions, which simd_encode_short runs. 27 s under Miri without L0, which adds 30%; each
+/// SIMD level would add 17 s.
 #[cfg(miri)]
 #[test]
 fn big_encoders_mixed_miri() {
@@ -928,7 +955,7 @@ fn big_encoders_mixed_miri() {
         }
     }
     data.extend(seg(1 << 40, 64));
-    for level in [Level::Fastest, Level::Balanced] {
+    for level in [Level::SuperFast, Level::Fastest, Level::Balanced] {
         roundtrip_at(&data, level).unwrap_or_else(|e| panic!("{level:?}: {e}"));
     }
 }
@@ -981,7 +1008,12 @@ pub(super) fn build_max_offset_boundary(seed: u64, delta: usize) -> Option<Vec<u
 #[test]
 #[cfg_attr(miri, ignore = "2 MiB inputs too slow for miri")]
 fn max_offset_boundary() {
-    for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+    for level in [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ] {
         for delta in 0..4 {
             for seed in 0..3 {
                 let Some(src) = build_max_offset_boundary(seed, delta) else {
@@ -1067,16 +1099,23 @@ fn border_mix(seed: u64, n: usize) -> Vec<u8> {
     b
 }
 
-/// Pins L1-L3 output to Go's (`-tags noasm`). The L3 border re-matching
+/// Pins L0-L3 output to Go's (`-tags noasm`). The L3 border re-matching
 /// (minio/minlz#53) and candidate checks change the parse but not its
 /// validity, so only exact output catches a drift. Each row: seed, size and
-/// XXH3 of the input, then size and XXH3 of the L1, L2 and L3 blocks.
+/// XXH3 of the input, then size and XXH3 of the L0, L1, L2 and L3 blocks.
+/// The L0 column is `simdgo enc -level -1` (`_helpers/simdgo` built with
+/// `-tags noasm`) of the same inputs.
 #[test]
 #[cfg_attr(miri, ignore = "L3 on 100 KB inputs too slow for miri")]
 fn encode_matches_go() {
-    type Golden = [(usize, u64); 3];
+    type Golden = [(usize, u64); 4];
     let check = |what: &str, src: &[u8], want: Golden| {
-        let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+        let levels = [
+            Level::SuperFast,
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+        ];
         for (level, want) in levels.into_iter().zip(want) {
             let mut enc = Vec::new();
             encode(&mut enc, src, level).unwrap();
@@ -1090,17 +1129,23 @@ fn encode_matches_go() {
     #[rustfmt::skip]
     let rows: [(u64, usize, u64, Golden); 6] = [
         (1, 3000, 0x697d_1b8e_435e_602f,
-         [(1900, 0x516e_5924_8f03_2488), (1841, 0xf45e_d3fc_1105_4f51), (1838, 0x2d1c_3b3d_381c_b9b6)]),
+         [(2100, 0xe5e2_4e27_04e5_892b), (1900, 0x516e_5924_8f03_2488),
+          (1841, 0xf45e_d3fc_1105_4f51), (1838, 0x2d1c_3b3d_381c_b9b6)]),
         (2, 5000, 0x9219_c182_3284_54e8,
-         [(2459, 0xe322_ab1c_ca55_f457), (2369, 0x4b0e_0a37_6c02_5342), (2348, 0x69b1_5c20_9c4b_be16)]),
+         [(2987, 0xe70b_e55a_b5d4_795d), (2459, 0xe322_ab1c_ca55_f457),
+          (2369, 0x4b0e_0a37_6c02_5342), (2348, 0x69b1_5c20_9c4b_be16)]),
         (4, 9000, 0xe50b_16b4_a15a_70c6,
-         [(4932, 0x58ee_ec80_2766_c5e6), (4800, 0xff67_6f4c_aaab_91ac), (4731, 0x23a2_4a19_43a7_caa6)]),
+         [(5594, 0xe9fb_3b57_3b02_986b), (4932, 0x58ee_ec80_2766_c5e6),
+          (4800, 0xff67_6f4c_aaab_91ac), (4731, 0x23a2_4a19_43a7_caa6)]),
         (1102, 5000, 0x679b_ade3_4ce4_fadd,
-         [(1657, 0x2008_3de1_0682_12b3), (1669, 0x2821_9ec3_57f5_b8de), (1621, 0x1c3d_2075_8d4a_0676)]),
+         [(1780, 0xd28f_7747_3d6e_117f), (1657, 0x2008_3de1_0682_12b3),
+          (1669, 0x2821_9ec3_57f5_b8de), (1621, 0x1c3d_2075_8d4a_0676)]),
         (0, 100_000, 0xd6d6_510d_1e34_5737,
-         [(41032, 0x892a_20fc_9488_d471), (40848, 0x78ae_eb66_eba1_edca), (39780, 0xf00d_14d4_3ed2_37b9)]),
+         [(44093, 0x326f_2c96_acf0_264c), (41032, 0x892a_20fc_9488_d471),
+          (40848, 0x78ae_eb66_eba1_edca), (39780, 0xf00d_14d4_3ed2_37b9)]),
         (3, 100_000, 0x9cc4_f824_4875_c653,
-         [(38375, 0x5e85_d7dc_d338_9385), (38132, 0x7a01_abdb_dd60_ac49), (37032, 0x9984_13ca_707d_1411)]),
+         [(41217, 0x3ec6_24f2_e7f3_d23d), (38375, 0x5e85_d7dc_d338_9385),
+          (38132, 0x7a01_abdb_dd60_ac49), (37032, 0x9984_13ca_707d_1411)]),
     ];
     for (seed, n, src_hash, want) in rows {
         let src = border_mix(seed, n);
@@ -1113,6 +1158,7 @@ fn encode_matches_go() {
     }
     if let Some(twain) = locate_testdata("Mark.Twain-Tom.Sawyer.txt") {
         let want = [
+            (14170, 0x465a_b3f8_2fba_3339),
             (10337, 0xdeaf_18b8_501d_3beb),
             (9301, 0x7c75_f53d_b2a8_7f17),
             (8874, 0x0d8f_7ffb_1d66_e78c),
@@ -1225,7 +1271,12 @@ fn encode_literal_header_minimal() {
             src[start..start + lit_len]
                 .iter_mut()
                 .for_each(|b| *b = rng.next() as u8);
-            for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+            for level in [
+                Level::SuperFast,
+                Level::Fastest,
+                Level::Balanced,
+                Level::Smallest,
+            ] {
                 let what = format!("n={n} litLen={lit_len} level={level:?}");
                 let mut enc = Vec::new();
                 encode(&mut enc, &src, level).unwrap();
@@ -1258,7 +1309,12 @@ fn encode_random_stored() {
         let src: Vec<u8> = (0..size).map(|_| rng.next() as u8).collect();
         let mut want = Vec::new();
         encode_uncompressed(&mut want, &src);
-        for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+        for level in [
+            Level::SuperFast,
+            Level::Fastest,
+            Level::Balanced,
+            Level::Smallest,
+        ] {
             let mut got = Vec::new();
             encode(&mut got, &src, level).unwrap();
             assert!(
@@ -1267,6 +1323,37 @@ fn encode_random_stored() {
                 got.len(),
                 want.len()
             );
+        }
+    }
+}
+
+/// The classic levels round-trip at the sizes where their encoders change: the shortest
+/// compressed block, the limit of the 64 KiB encoders, and past the copy3 offset limit, where
+/// the end of the input repeats its start.
+#[test]
+#[cfg_attr(miri, ignore = "3 MiB inputs too slow for miri")]
+fn classic_edge_sizes() {
+    let mut rng = Xor64::new(5);
+    for n in [15, 16, 17, 33, 34, 35, 65535, 65536, 65537, 3 << 20] {
+        let noise: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
+        let mut far = noise.clone();
+        far.copy_within(..n / 4, n - n / 4);
+        let inputs = [
+            repeat_bytes(&noise[..n.min(100)], n),
+            vec![0; n],
+            noise,
+            far,
+        ];
+        for (i, src) in inputs.iter().enumerate() {
+            for level in [
+                Level::SuperFast,
+                Level::Fastest,
+                Level::Balanced,
+                Level::Smallest,
+            ] {
+                roundtrip_at(src, level)
+                    .unwrap_or_else(|e| panic!("{level:?} n={n} input {i}: {e}"));
+            }
         }
     }
 }
@@ -1443,7 +1530,8 @@ fn mixed_inputs() -> Vec<Vec<u8>> {
     v
 }
 
-const ALL_LEVELS: [Level; 10] = [
+const ALL_LEVELS: [Level; 11] = [
+    Level::SuperFast,
     Level::Fastest,
     Level::Balanced,
     Level::Smallest,

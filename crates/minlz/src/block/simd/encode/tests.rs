@@ -383,8 +383,8 @@ fn simd_encode() {
 /// Go's int levels convert to Level and back; all other ints are invalid.
 #[test]
 fn level_ints() {
-    for l in -1..=300 {
-        let valid = matches!(l, 1..=7 | 260..=262);
+    for l in -2..=300 {
+        let valid = matches!(l, -1 | 1..=7 | 260..=262);
         match Level::try_from(l) {
             Ok(v) => assert!(valid && i32::from(v) == l, "level {l}"),
             Err(e) => assert!(!valid && e == crate::Error::InvalidLevel, "level {l}"),

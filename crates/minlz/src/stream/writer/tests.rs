@@ -15,6 +15,7 @@
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 
 use crate::index::{Index, index_stream};
+use crate::stream::crc::masked_crc32c;
 use crate::stream::format::{
     CHECKSUM_SIZE, CHUNK_TYPE_MINLZ_COMPRESSED_DATA, CHUNK_TYPE_MINLZ_SIMD,
     CHUNK_TYPE_UNCOMPRESSED_DATA, MAGIC_BODY_LEN, SIMD_HASH_SIZE, STREAM_FLAG_SIMD,
@@ -301,11 +302,11 @@ fn lcg(seed: u64) -> impl FnMut() -> u8 {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "200 trials × 2 levels × ≤40 KiB is impractical under miri"
+    ignore = "200 trials × 3 levels × ≤40 KiB is impractical under miri"
 )]
 fn stress_random_inputs_roundtrip() {
     // 200 inputs at sizes 0..40 KiB (crosses the 4 KiB minimum block size at
-    // L1 etc.).  Two compression levels to keep runtime moderate.
+    // L1 etc.).  Three compression levels to keep runtime moderate.
     for trial in 0..200u64 {
         let mut rng = lcg(0xc0ffee ^ trial.wrapping_mul(0x9e37));
         let size = (trial as usize * 211) % (40 * 1024);
@@ -323,7 +324,11 @@ fn stress_random_inputs_roundtrip() {
                 *b = rng();
             }
         }
-        for level in [crate::Level::Fastest, crate::Level::Smallest] {
+        for level in [
+            crate::Level::SuperFast,
+            crate::Level::Fastest,
+            crate::Level::Smallest,
+        ] {
             let mut w = WriterBuilder::new()
                 .block_size(crate::stream::MIN_BLOCK_SIZE)
                 .level(level)
@@ -648,20 +653,32 @@ fn writer_simd() {
     }
 }
 
-/// Ports `TestWriterSIMDChunks`: the layout of SIMD chunks against the block encoder.
+/// Ports `TestWriterSIMDChunks`: the layout of SIMD chunks against the block encoder. The
+/// classic levels are added, since only the `encode` goldens pin their encoders to Go.
 #[test]
 #[cfg_attr(miri, ignore = "300 KiB streams too slow for miri")]
 fn writer_simd_chunks() {
     let data = simd_test_data(300 << 10);
     const BS: usize = 16 << 10;
-    for level in SIMD_LEVELS {
+    let classic = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ];
+    for level in classic.into_iter().chain(SIMD_LEVELS) {
+        let (kind, sum_size) = if classic.contains(&level) {
+            (CHUNK_TYPE_MINLZ_COMPRESSED_DATA, CHECKSUM_SIZE)
+        } else {
+            (CHUNK_TYPE_MINLZ_SIMD, SIMD_HASH_SIZE)
+        };
         for conc in [1, 2] {
             let mut w = AnyWriter::new(Some(level), BS, conc, 0);
             w.encode_buffer(&data).unwrap();
             let (stream, _) = w.finish();
             let mut comp = &stream[MAGIC_BODY_LEN + 4..];
-            let (mut off, mut types, mut want_simd) = (0, [0usize; 256], 0);
-            let mut block = Vec::new();
+            let (mut off, mut types) = (0, [0usize; 256]);
+            let (mut block, mut whole) = (Vec::new(), Vec::new());
             while !comp.is_empty() {
                 let l = comp[1] as usize | (comp[2] as usize) << 8 | (comp[3] as usize) << 16;
                 let payload = &comp[4..4 + l];
@@ -669,16 +686,21 @@ fn writer_simd_chunks() {
                 let src = &data[off..(off + BS).min(data.len())];
                 let what = format!("level {}, concurrency {conc}", i32::from(level));
                 match comp[0] {
-                    CHUNK_TYPE_MINLZ_SIMD => {
+                    t if t == kind => {
                         block.clear();
                         assert!(try_encode(&mut block, src, level).unwrap(), "{what}");
+                        crate::encode(&mut whole, src, level).unwrap();
+                        let sum = match kind {
+                            CHUNK_TYPE_MINLZ_SIMD => xxh3::hash(src),
+                            _ => masked_crc32c(src).into(),
+                        };
                         assert!(
-                            payload[..SIMD_HASH_SIZE] == xxh3::hash(src).to_le_bytes()
-                                && payload[SIMD_HASH_SIZE..] == block[1..],
-                            "{what}: SIMD chunk at {off} differs from try_encode"
+                            block == whole
+                                && payload[..sum_size] == sum.to_le_bytes()[..sum_size]
+                                && payload[sum_size..] == block[1..],
+                            "{what}: chunk at {off} differs from encode"
                         );
                         off += src.len();
-                        want_simd += 1;
                     }
                     CHUNK_TYPE_UNCOMPRESSED_DATA => {
                         assert!(
@@ -693,8 +715,7 @@ fn writer_simd_chunks() {
             }
             assert_eq!(off, data.len());
             assert!(types[CHUNK_TYPE_UNCOMPRESSED_DATA as usize] > 0);
-            assert_eq!(types[CHUNK_TYPE_MINLZ_SIMD as usize], want_simd);
-            assert!(want_simd > 0, "level {}", i32::from(level));
+            assert!(types[kind as usize] > 0, "level {}", i32::from(level));
         }
     }
 }
@@ -705,10 +726,15 @@ fn writer_simd_chunks() {
 #[cfg_attr(miri, ignore = "40 SIMD and classic streams are slow under miri")]
 fn writer_simd_identifier() {
     let data = make_test_data(10 << 10);
-    let levels = [None, Some(Level::Fastest), Some(Level::Balanced)]
-        .into_iter()
-        .chain([Some(Level::Smallest)])
-        .chain(SIMD_LEVELS.map(Some));
+    let levels = [
+        None,
+        Some(Level::SuperFast),
+        Some(Level::Fastest),
+        Some(Level::Balanced),
+    ]
+    .into_iter()
+    .chain([Some(Level::Smallest)])
+    .chain(SIMD_LEVELS.map(Some));
     for level in levels {
         for i in 0..4 {
             let (user_first, conc) = (i & 1 != 0, 1 + (i >> 1));
@@ -763,9 +789,14 @@ fn writer_simd_hash() {
 #[cfg_attr(miri, ignore = "1 MiB streams too slow for miri")]
 fn data_roundtrips_longblock() {
     let data = vec![0u8; 1 << 20];
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest]
-        .into_iter()
-        .chain(SIMD_LEVELS);
+    let levels = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ]
+    .into_iter()
+    .chain(SIMD_LEVELS);
     for level in levels {
         for conc in [1, 4] {
             let mut w = AnyWriter::new(Some(level), crate::stream::DEFAULT_BLOCK_SIZE, conc, 0);

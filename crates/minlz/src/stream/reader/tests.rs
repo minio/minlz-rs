@@ -1583,7 +1583,7 @@ fn mutate(rng: &mut impl FnMut() -> u64, b: &[u8]) -> Vec<u8> {
 fn fuzz_stream_encode_seeded() {
     // (level, block size, concurrency, padding)
     let encoders = [
-        (block::Level::Fastest, 128 << 10, 1, 0),
+        (block::Level::SuperFast, 128 << 10, 1, 0),
         (block::Level::FastestSimd, 4 << 10, 1, 0),
         (block::Level::BalancedSimdDelta, 16 << 10, 2, 1 << 10),
         (block::Level::SuperFastSimd, 64 << 10, 2, 0),

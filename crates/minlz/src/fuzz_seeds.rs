@@ -210,7 +210,7 @@ fn write_fuzz_seeds() {
     save("simd_decode", simd);
     save("stream_decode_arbitrary", sdec);
     // Go's four stream encoders as (mode, level index), one per input, with its write method.
-    const ENCODERS: [(u8, u8); 4] = [(0x04, 0), (0x44, 4), (0xc5, 9), (0x05, 3)];
+    const ENCODERS: [(u8, u8); 4] = [(0x04, 10), (0x44, 4), (0xc5, 9), (0x05, 3)];
     save(
         "stream_roundtrip",
         inputs.iter().enumerate().map(|(i, b)| {

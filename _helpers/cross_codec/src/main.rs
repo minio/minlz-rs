@@ -21,7 +21,8 @@ use minlz::Level;
 const DEFAULT_LIMIT: u64 = 1 << 30;
 const DEFAULT_ITERS: u32 = 3;
 
-const MINLZ: [Level; 10] = [
+const MINLZ: [Level; 11] = [
+    Level::SuperFast,
     Level::Fastest,
     Level::Balanced,
     Level::Smallest,
@@ -59,6 +60,7 @@ impl Codec {
     fn name(self) -> &'static str {
         match self {
             Codec::MinLz(l) | Codec::MinLzMt(l) => match l {
+                Level::SuperFast => "minlz-xfast",
                 Level::Fastest => "minlz-1",
                 Level::Balanced => "minlz-2",
                 Level::Smallest => "minlz-3",
