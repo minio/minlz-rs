@@ -222,10 +222,7 @@ fn pangram_x(times: usize) -> Vec<u8> {
 
 /// Encoder must actually compress varied repetitive input (parity vs Go noasm).
 ///
-/// Pure period-7 data (e.g. "foobar " * N) is *not* compressed by either
-/// the Go `noasm` encoder or this Rust port: the single huge run-length
-/// match exceeds `dstLimit`, both implementations return 0 → uncompressed
-/// fallback.  The varied pangram input doesn't have this pathology.
+/// Single-period input is covered by `l1_repeated_fragment_compresses`.
 #[test]
 #[cfg_attr(miri, ignore = "20 KiB input is impractical under miri")]
 fn encoder_compresses_natural_repetition() {
@@ -838,4 +835,34 @@ fn l1_offset_at_max_copy3_boundary_roundtrips() {
         *slot = rng.next() as u8;
     }
     roundtrip_at(&data, Level::Fastest).expect("L1 boundary roundtrip");
+}
+
+/// Regression: the L1 encoders guarded the literal-then-copy emit with
+/// `d + (s - next_emit) > dst_limit` after `s` had been extended to the end
+/// of the match, so the match length was counted as literals.  When the
+/// first match ran to near the end of the input the guard tripped and the
+/// block was stored uncompressed.  Go's `encode_l1.go` guards with the
+/// literals alone.  Covers `encode_block_64k` (64 KiB) and
+/// `encode_block_big` (200 KiB), with fragments on both sides of
+/// `MIN_COPY2_OFFSET`.
+#[test]
+#[cfg_attr(miri, ignore = "64 KiB and 200 KiB inputs are impractical under miri")]
+fn l1_repeated_fragment_compresses() {
+    let mut rng = Xor64::new(0x5eed);
+    for &size in &[64 << 10, 200 << 10] {
+        for &frag_len in &[16usize, 63, 64, 251, 4096] {
+            let frag: Vec<u8> = (0..frag_len).map(|_| rng.next() as u8).collect();
+            let src = repeat_bytes(&frag, size);
+            let mut enc = Vec::new();
+            encode(&mut enc, &src, Level::Fastest).unwrap();
+            assert!(
+                enc.len() < src.len() / 10,
+                "size={size} frag_len={frag_len}: got {} encoded bytes",
+                enc.len()
+            );
+            let mut dec = Vec::new();
+            decode(&mut dec, &enc).unwrap();
+            assert!(dec == src, "size={size} frag_len={frag_len}: mismatch");
+        }
+    }
 }
