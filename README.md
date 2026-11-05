@@ -749,8 +749,8 @@ JSON for streams.  Ryzen 9 9950X, Windows 11.
 | SIMD block encode, SuperFast and Fastest, vs Go asm |              0.92–0.96× |
 | Stream decode, 1 thread                             |              1.01–1.18× |
 | Stream encode, 1 thread, vs Go parsers / Go asm     | 1.03–1.10× / 0.93–0.98× |
-| Stream decode, 32 threads                           |              1.03–1.31× |
-| Stream encode, 32 threads, vs Go parsers / Go asm   | 0.86–1.04× / 0.83–0.91× |
+| Stream decode, 32 threads                           |              1.09–1.34× |
+| Stream encode, 32 threads, vs Go parsers / Go asm   | 0.88–1.15× / 0.90–1.04× |
 | XXH3 vs `zeebo/xxh3`, 4 KB / 64 KB / 4 MB           |   1.09× / 1.16× / 0.99× |
 
 Single figures are geomeans, with the lowest and highest cell in
@@ -762,9 +762,10 @@ are not ported; "Go parsers" are its portable parsers, which write the
 same output and which Go uses in `noasm` / `purego` builds.  An
 `MtWriter` keeps its worker threads and buffers for about 10 s after
 `finish`, for the next one with the same concurrency and block size;
-starting them fresh costs 35–67K page faults per 1 GiB stream on
-Windows.  Multi-threaded results vary by up to
-±10% between runs.
+the 32-thread figures include that reuse.  Starting them fresh costs
+35–67K page faults per 1 GiB stream on Windows, and makes 32-thread
+encode 6–20% slower.  Multi-threaded results vary by up to ±10%
+between runs.
 
 ## CLI: `mz`
 
