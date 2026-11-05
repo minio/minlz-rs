@@ -240,26 +240,34 @@ pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, E
 
 /// Decode a MinLZ block into `dst`.
 ///
-/// `dst` is cleared.  On success the decoded bytes are appended.
+/// On success `dst` holds the decoded bytes; on error it is empty.
 /// Equivalent to Go's `Decode(dst, src)` (without the Snappy/S2 fallback).
+///
+/// As Go's `Decode` reuses `dst`, a SIMD block decodes over the bytes `dst` holds and zero-fills
+/// only the rest of its output first, so clearing a reused `Vec` costs a zero-fill.
 pub fn decode(dst: &mut Vec<u8>, src: &[u8]) -> Result<(), Error> {
-    dst.clear();
-    append_decoded(dst, src)
+    decode_at(dst, 0, src)
 }
 
-/// Append the decoded form of `src` to `dst`.
+/// Append the decoded form of `src` to `dst`. On error `dst` is unchanged.
 ///
-/// Equivalent to Go's `AppendDecoded(dst, src)`.
+/// Equivalent to Go's `AppendDecoded(dst, src)`. A SIMD block zero-fills the spare capacity it
+/// decodes into.
 pub fn append_decoded(dst: &mut Vec<u8>, src: &[u8]) -> Result<(), Error> {
-    let (literals, simd, body, dlen) = parse_header(src)?;
+    decode_at(dst, dst.len(), src)
+}
+
+/// Decodes `src` into `dst` from `start`, keeping `dst[..start]`, all `dst` keeps on error.
+fn decode_at(dst: &mut Vec<u8>, start: usize, src: &[u8]) -> Result<(), Error> {
+    let (literals, simd, body, dlen) = parse_header(src).inspect_err(|_| dst.truncate(start))?;
+    if simd {
+        return simd::decode_at(dst, start, dlen, body);
+    }
+    dst.truncate(start);
     if literals {
         dst.extend_from_slice(body);
         return Ok(());
     }
-    if simd {
-        return simd::append_decoded(dst, dlen, body);
-    }
-    let start = dst.len();
     // The decoder uses LZ4-style 16-byte overshoot stores in its hot path;
     // give it `OVERSHOOT_PAD` bytes of writable padding past `dlen`.
     dst.reserve(dlen + decode::OVERSHOOT_PAD);
@@ -411,7 +419,7 @@ pub(crate) fn append_decoded_chunk_body(dst: &mut Vec<u8>, body: &[u8]) -> Resul
     let (dlen, compressed) = checked_chunk_body(body)?;
     let start = dst.len();
     dst.reserve(dlen + decode::OVERSHOOT_PAD);
-    // SAFETY: same invariants as `append_decoded` — we just reserved
+    // SAFETY: same invariants as `decode_at` — we just reserved
     // `dlen + OVERSHOOT_PAD` writable bytes past `start`.
     unsafe {
         let dst_ptr = dst.as_mut_ptr().add(start);

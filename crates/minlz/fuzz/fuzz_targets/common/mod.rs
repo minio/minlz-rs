@@ -19,7 +19,6 @@
 #![allow(dead_code)]
 
 use std::fmt::Debug;
-use std::mem::MaybeUninit;
 
 use minlz::cpu;
 
@@ -39,12 +38,12 @@ pub fn is_simd(b: &[u8]) -> bool {
     false
 }
 
-/// Clears `dst` and fills its spare capacity with `fill`, so output must not depend on what dst
-/// held, as Go's fuzzers fill dst before decoding. `encode` and the SIMD decoder's Go tier zero
-/// their output first, so only the classic decoder and the vector tiers see the fill.
+/// Fills `dst` with `fill` to its capacity, so output must not depend on what dst held, as Go's
+/// fuzzers fill dst before decoding. `decode` decodes SIMD blocks over the fill, and classic
+/// blocks into the memory under it; `encode` zeroes its output first.
 pub fn garbage(dst: &mut Vec<u8>, fill: u8) {
     dst.clear();
-    dst.spare_capacity_mut().fill(MaybeUninit::new(fill));
+    dst.resize(dst.capacity(), fill);
 }
 
 /// Decodes `block` into `dst` on every exec tier, which must all return `want`. `ctx` names

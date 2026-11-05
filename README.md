@@ -49,13 +49,8 @@ are **not** implemented.
   paths use `unsafe` inside: the classic block decoder and encoders, the
   SIMD encoders' parsers (unchecked loads with `debug_assert!`ed
   bounds), the SIMD operation loops and entropy-coding kernels
-  (`core::arch` intrinsics), and the CRC32C and XXH3 kernels.  On the
-  vector tiers `decode` writes SIMD blocks into the `Vec`'s spare
-  capacity without zeroing it first.  No unwritten byte reaches the
-  caller, but the decoder's slice over, and loads of, uninitialized bytes
-  are undefined behaviour in Rust's abstract machine, and Miri cannot
-  check them: it runs the portable tier, which zeroes.  The crate is
-  `#![deny(missing_docs)]` and CI runs Clippy, Miri and cargo-fuzz.
+  (`core::arch` intrinsics), and the CRC32C and XXH3 kernels.  The crate
+  is `#![deny(missing_docs)]` and CI runs Clippy, Miri and cargo-fuzz.
 
 ## Quick start
 

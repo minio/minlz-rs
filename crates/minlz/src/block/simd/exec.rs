@@ -42,10 +42,10 @@
 //!    read the literal length and offset symbol of every operation and mask them.
 //! 4. **Offsets are clamped** to the output position, so matches and delta references never
 //!    reach before `dst[0]`.
-//! 5. **Unwritten output.** On the vector tiers `dst` may be uninitialized past `st[0]`
-//!    ([`append_decoded`](super::append_decoded)). Only the vector loops load such bytes, and
-//!    only into output that later operations overwrite; other decoder code reads only output it
-//!    has written.
+//! 5. **Output past the position** is initialized but arbitrary: past `st[0]`, `dst` holds what
+//!    the caller's buffer held or zeroes ([`decode_at`](super::decode_at)), and the writes of
+//!    rule 1. The fast loops may load those bytes, but only into output that later operations
+//!    overwrite.
 //!
 //! The Go loops here index slices, so a broken rule panics instead of reaching out of bounds. The
 //! tests run every tier on buffers that end where the rules say (Go's `TestSIMDExec`).

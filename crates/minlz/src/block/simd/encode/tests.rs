@@ -1068,9 +1068,9 @@ fn simd_encode_huge() {
 /// `fuzz/FuzzEncodingBlocks`. Tom Sawyer is added; Go's bench files are left out, as
 /// `simd_encode` runs them. Every level encodes from a source against either guard page, as the
 /// parsers read ahead and extend matches back, within `max_encoded_len`; SIMD blocks decode on
-/// every exec tier into a `dst` with garbage in its spare capacity, and with the strict reference
-/// decoder. `decoded_len` agrees, as Go's `FuzzDecodeBlock` checks on its seeds, SIMD blocks of
-/// the same inputs.
+/// every exec tier into a `dst` holding garbage, and with the strict reference decoder.
+/// `decoded_len` agrees, as Go's `FuzzDecodeBlock` checks on its seeds, SIMD blocks of the same
+/// inputs.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn fuzz_encoding_blocks_seeded() {
@@ -1095,7 +1095,7 @@ fn fuzz_encoding_blocks_seeded() {
             }
             super::super::exec::simd_tiers(|t| {
                 dec.clear();
-                dec.spare_capacity_mut()[..data.len()].fill(core::mem::MaybeUninit::new(0xfe));
+                dec.resize(data.len(), 0xfe);
                 decode(&mut dec, &enc).unwrap_or_else(|e| panic!("{what}, {t:?}: {e}"));
                 assert!(dec == *data, "{what}, {t:?}: mismatch");
             });
