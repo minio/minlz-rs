@@ -49,7 +49,8 @@ fn vectors() -> (Vec<(usize, u64)>, Vec<(usize, u64, Vec<usize>)>) {
 }
 
 fn src() -> Vec<u8> {
-    gen_input(3 << 20)
+    // Miri hashes a few KB a second, and its tests stay below two blocks.
+    gen_input(if cfg!(miri) { 2113 } else { 3 << 20 })
 }
 
 /// Writes b in pieces of the given sizes, cycled, as the Go helper does.
@@ -66,6 +67,10 @@ fn write_split(h: &mut Hasher, b: &[u8], sizes: &[usize]) {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "parsing the vectors takes a minute; c_reference covers the scalar path"
+)]
 fn one_shot_matches_go() {
     let (one, _) = vectors();
     assert_eq!(one.len(), 4097 + 12);
@@ -81,6 +86,10 @@ fn one_shot_matches_go() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "parsing the vectors takes a minute; streaming_splits covers the scalar path"
+)]
 fn streaming_matches_go() {
     let (_, split) = vectors();
     assert!(split.len() > 200);
@@ -106,15 +115,25 @@ fn streaming_splits() {
         x ^= x << 17;
         (x % m) as usize
     };
+    // Miri: one block and a stripe, without the many short writes of round 0.
+    let (ns, firsts, rounds): (&[usize], &[usize], _) = if cfg!(miri) {
+        (&[0, 65, 1089], &[0, 64, 1088], 1..4)
+    } else {
+        (
+            &[
+                0, 1, 63, 64, 65, 240, 241, 1023, 1024, 1025, 1087, 1088, 1089, 2111, 2113, 9000,
+            ],
+            &[
+                0, 1, 63, 64, 65, 960, 1023, 1024, 1025, 1087, 1088, 1089, 2112, 2113,
+            ],
+            0..4,
+        )
+    };
     for t in tiers() {
         let mut h = Hasher::with_tier(t);
-        for n in [
-            0, 1, 63, 64, 65, 240, 241, 1023, 1024, 1025, 1087, 1088, 1089, 2111, 2113, 9000,
-        ] {
-            for first in [
-                0, 1, 63, 64, 65, 960, 1023, 1024, 1025, 1087, 1088, 1089, 2112, 2113,
-            ] {
-                for round in 0..4 {
+        for &n in ns {
+            for &first in firsts {
+                for round in rounds.clone() {
                     h.reset();
                     let mut i = first.min(n);
                     h.write(&src[..i]);
@@ -149,9 +168,18 @@ fn streaming_splits() {
 fn tiers_agree_on_unaligned_input() {
     let src = src();
     let mut buf = vec![0u8; (1 << 20) + 64 + 64];
-    for n in [241, 1000, 1024, 1025, 4096, 65543, 1 << 20] {
+    // Miri has only the scalar tier, and hashes slowly.
+    let (ns, offs): (&[usize], &[usize]) = if cfg!(miri) {
+        (&[241, 1025], &[1, 63])
+    } else {
+        (
+            &[241, 1000, 1024, 1025, 4096, 65543, 1 << 20],
+            &[1, 3, 8, 13, 31, 32, 63],
+        )
+    };
+    for &n in ns {
         let want = hash_tier(Tier::Scalar, &src[..n]);
-        for off in [1, 3, 8, 13, 31, 32, 63] {
+        for &off in offs {
             buf[off..off + n].copy_from_slice(&src[..n]);
             let b = &buf[off..off + n];
             for t in tiers() {

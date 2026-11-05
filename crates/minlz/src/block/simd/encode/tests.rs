@@ -278,6 +278,10 @@ fn simd_encode_short() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "Miri adds error to log2, so exact powers of two round up"
+)]
 fn tables_match_go_formulas() {
     for (k, &n) in CODE_BYTES.iter().enumerate() {
         assert_eq!(

@@ -327,6 +327,10 @@ mod tests {
 
     /// Decodes the examples of SPEC_PIVCO.md appendix A, and changed copies of them.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "hundreds of reference decodes, which run no unsafe code"
+    )]
     fn pivco_examples() {
         let a1 = table(&[
             (b'a', 3),

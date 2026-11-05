@@ -166,7 +166,9 @@ fn add_user_chunk_round_trip_via_callback() {
 #[test]
 fn cross_concurrency_round_trips() {
     let payload: Vec<u8> = (0..32 * 1024).map(|i| (i * 17) as u8).collect();
-    for &n in &[1, 2, 4, 8] {
+    // Miri: one worker and a pool of four.
+    let ns: &[usize] = if cfg!(miri) { &[1, 4] } else { &[1, 2, 4, 8] };
+    for &n in ns {
         let got = round_trip_concurrency(&payload, n);
         assert_eq!(got, payload, "concurrency = {n}");
     }

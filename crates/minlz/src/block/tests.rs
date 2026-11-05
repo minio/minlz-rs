@@ -839,6 +839,10 @@ impl Xor64 {
 /// reaches the boundary without finding earlier matches, and asserts
 /// round-trip equality.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "2 MiB of random input: minutes; big_encoders_mixed_miri runs the >64 KiB L1 encoder"
+)]
 fn l1_offset_at_max_copy3_boundary_roundtrips() {
     use crate::block::format::MAX_COPY3_OFFSET as MAX;
     let total = MAX + 32;
@@ -859,11 +863,29 @@ fn l1_offset_at_max_copy3_boundary_roundtrips() {
 /// Ports `TestEncodeLongMatch` (`encode_test.go`): a block that is one long
 /// match is not stored. Sizes cover the 64K and the general encoders.
 #[test]
-#[cfg_attr(miri, ignore = "1 MiB inputs too slow for miri")]
 fn encode_long_match() {
-    for size in [60000, 1 << 20] {
+    // Miri: smaller, but still one size for the 64 KiB encoders and one for the general ones.
+    let sizes = if cfg!(miri) {
+        [2000, 70000]
+    } else {
+        [60000, 1 << 20]
+    };
+    for size in sizes {
         let data = repeat_bytes(b"abcdefghij", size);
-        for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+        // Miri also runs the SIMD parsers over 64 KiB here, as no other Miri test does.
+        let simd: &[Level] = if cfg!(miri) && size > 64 << 10 {
+            &[
+                Level::SuperFastSimd,
+                Level::FastestSimd,
+                Level::BalancedSimd,
+            ]
+        } else {
+            &[]
+        };
+        for &level in [Level::Fastest, Level::Balanced, Level::Smallest]
+            .iter()
+            .chain(simd)
+        {
             let mut comp = Vec::new();
             encode(&mut comp, &data, level).unwrap();
             assert!(
@@ -875,6 +897,42 @@ fn encode_long_match() {
             decode(&mut dec, &comp).unwrap();
             assert!(dec == data, "level {level:?}, size {size}: decode mismatch");
         }
+    }
+}
+
+/// Miri: the >64 KiB L1 and L2 encoders, which are separate code from their 64 KiB versions, on
+/// segments from 16 seeds that repeat a few KiB back, right after each other, or with a changed
+/// byte (a repeat offset), and a last segment that repeats the first, over 64 KiB back.
+/// encode_long_match's single match skips most of their loops, and Miri ignores
+/// l1_offset_at_max_copy3_boundary_roundtrips. The SIMD parsers share their code with the 64 KiB
+/// versions, which simd_encode_short runs. 27 s under Miri; each SIMD level would add 17 s.
+#[cfg(miri)]
+#[test]
+fn big_encoders_mixed_miri() {
+    let seg = |seed: u64, n: usize| {
+        let mut g = Xor64::new(seed);
+        (0..n).map(move |_| g.next() as u8)
+    };
+    let mut rng = Xor64::new(9);
+    let mut data: Vec<u8> = seg(1 << 40, 64).collect();
+    while data.len() < 70_000 {
+        let r = rng.next();
+        let n = 4 + r as usize % 90;
+        // A quarter of the segments are new.
+        let seed = if r >> 8 & 3 == 0 {
+            u64::from(r) << 8
+        } else {
+            u64::from(r >> 10 & 15)
+        };
+        let at = data.len();
+        data.extend(seg(seed, n));
+        if r >> 16 & 7 == 0 {
+            data[at + n / 2] ^= 0x55;
+        }
+    }
+    data.extend(seg(1 << 40, 64));
+    for level in [Level::Fastest, Level::Balanced] {
+        roundtrip_at(&data, level).unwrap_or_else(|e| panic!("{level:?}: {e}"));
     }
 }
 
@@ -1329,7 +1387,9 @@ fn decode_overlap_tail() {
 #[test]
 fn decode_overlap_tail_corrupt() {
     let mut dec = Vec::new();
-    for offset in [1, 3, 15, 16, 17, 63, 64, 65, 1024, 65536] {
+    // Miri: 65536 builds and decodes 512 KiB five times; 2048 is a copy2 as well.
+    let copy2 = if cfg!(miri) { 2048 } else { 65536 };
+    for offset in [1, 3, 15, 16, 17, 63, 64, 65, 1024, copy2] {
         let (encoded, want) = overlap_tail_block(offset, 7 * offset + 1, 0);
         let (_, header) = format::get_uvarint(&encoded[1..]).unwrap();
         for dlen in [want.len() - 1, want.len() + 1] {

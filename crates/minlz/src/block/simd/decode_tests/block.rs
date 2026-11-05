@@ -120,6 +120,7 @@ fn caption(line: &str) -> Option<(&str, usize, usize)> {
 
 /// Compares the class layouts with the arrays in SPEC_SIMD.md appendix A.
 #[test]
+#[cfg_attr(miri, ignore = "parses the spec text slowly and runs no unsafe code")]
 fn simd_layouts_spec() {
     let spec = include_str!("../../../reference/testdata/SPEC_SIMD_appendix_a.md");
     let streams = [
@@ -242,7 +243,13 @@ fn simd_decode_built() {
 /// blocks.
 #[test]
 fn simd_stored_keeps_table() {
-    let mut ops = vec![op(4, 200, 40); 3 * 64];
+    // Miri: 2 KiB of output, not 39 KiB; the builder and reference are slow per output byte.
+    let (chunk, ml, lit_block) = if cfg!(miri) {
+        (16, 40, 64)
+    } else {
+        (64, 200, 256)
+    };
+    let mut ops = vec![op(4, ml, 40); 3 * chunk];
     // The first match must not be clamped below 32 (4.3).
     ops[0].ll = 40;
     let mut b = TestBuilder::default();
@@ -250,8 +257,8 @@ fn simd_stored_keeps_table() {
     let (e, want) = b.build(&TestBlock {
         lits: b"abcd".repeat(ops.len() + 9),
         ops,
-        chunk: 64,
-        lit_block: 256,
+        chunk,
+        lit_block,
         modes: modes.clone(),
         lit_modes: modes.clone(),
         ..Default::default()
@@ -335,12 +342,14 @@ fn simd_long_match_tail() {
 /// of them.
 #[test]
 fn simd_tail() {
+    // Miri: shorter blocks and every eighth tail.
+    let (n_ops, step) = if cfg!(miri) { (60, 8) } else { (200, 1) };
     simd_tiers(|_| {
         let mut rng = Rng(3);
         let mut b = TestBuilder::default();
-        for tail in 0..40 {
+        for tail in (0..40).step_by(step) {
             for delta in [0, 1] {
-                let (mut ops, mut lits) = test_ops(&mut rng, 200, b"abcd", 288, 1000);
+                let (mut ops, mut lits) = test_ops(&mut rng, n_ops, b"abcd", 288, 1000);
                 for _ in 0..20 {
                     let (ll, ml) = (rng.intn(3), rng.intn(4));
                     let off = rng.intn(2) * (1 + rng.intn(10));
@@ -388,7 +397,8 @@ fn simd_guard_page() {
     simd_tiers(|_| {
         let mut b = TestBuilder::default();
         let mut blocks = Vec::new();
-        for n in (1..=300).step_by(13) {
+        // Miri: the shorter blocks, whose last raw bits still end at each bit position.
+        for n in (1..=if cfg!(miri) { 92 } else { 300 }).step_by(13) {
             // 17 raw bits per operation.
             let mut ops = vec![op(1, 32, 1 << 20)];
             ops.extend((0..n).map(|i| op(0, 32, (1 << 20) + i)));
@@ -1164,23 +1174,45 @@ fn validation_cases() -> Vec<VCase> {
 
 #[test]
 fn simd_validation() {
+    // Miri: 60 short operations, still in three chunks and literal blocks. It skips the cases
+    // of 64 KiB or more, and the slowest valid blocks, whose decoding simd_reference and
+    // simd_class_len_16 cover. Literal blocks of 80 leave the last one longer than the literals
+    // after the operations, so "literal over-read" still fails in an operation.
+    let (n_ops, max_ml, chunk, lit_block) = if cfg!(miri) {
+        (60, 64, 24, 80)
+    } else {
+        (2000, 288, 600, 3000)
+    };
+    let miri_skip = [
+        "literal block of 65536",
+        "literal block of 65535",
+        "65536 escapes",
+        "coded 65536 escapes",
+        "offset bits cut",
+        "valid coded",
+        "valid class",
+        "chunk at limit",
+    ];
     simd_tiers(|_| {
         let mut b = TestBuilder::default();
         for tc in validation_cases() {
             let name = tc.name;
+            if cfg!(miri) && miri_skip.contains(&name) {
+                continue;
+            }
             let modes = if tc.modes.is_empty() {
                 vec![STORED]
             } else {
                 tc.modes.clone()
             };
-            let (ops, lits) = test_ops(&mut Rng(4), 2000, b"abcdefgh", 288, 4000);
+            let (ops, lits) = test_ops(&mut Rng(4), n_ops, b"abcdefgh", max_ml, 4000);
             let mut tb = TestBlock {
                 ops,
                 lits,
                 modes: modes.clone(),
                 lit_modes: modes,
-                lit_block: 3000,
-                chunk: 600,
+                lit_block,
+                chunk,
                 ..Default::default()
             };
             if let Some(ops) = &tc.ops {
@@ -1279,6 +1311,10 @@ fn simd_validation_chunks() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "builds and decodes 8 MiB blocks; simd_block_api checks the size limit"
+)]
 fn simd_validation_max_size() {
     let max = crate::MAX_BLOCK_SIZE;
     let mut ops = vec![op(40, 288, 32)];
@@ -1330,21 +1366,28 @@ fn simd_validation_64_bytes() {
 /// cached decoder keeps.
 #[test]
 fn simd_corrupt_clears() {
+    // Miri: a twentieth of the operations, still in three chunks and literal blocks, and Z
+    // bytes past their literals.
+    let (zs, n_ops, chunk, lit_block) = if cfg!(miri) {
+        (2000, 100, 40, 150)
+    } else {
+        (80000, 2000, 600, 3000)
+    };
     simd_tiers(|_| {
         let mut b = TestBuilder::default();
         let (e, _) = b.build(&TestBlock {
-            lits: b"Z".repeat(80000),
+            lits: b"Z".repeat(zs),
             lit_modes: vec![CODE_LENS],
             ..Default::default()
         });
         crate::decode(&mut Vec::new(), &e.bytes()).unwrap();
         // The "literal over-read" block of simd_validation.
-        let (ops, lits) = test_ops(&mut Rng(4), 2000, b"abcdefgh", 288, 4000);
+        let (ops, lits) = test_ops(&mut Rng(4), n_ops, b"abcdefgh", 288, 4000);
         let mut tb = TestBlock {
             ops,
             lits,
-            lit_block: 3000,
-            chunk: 600,
+            lit_block,
+            chunk,
             ..Default::default()
         };
         let (mut e, want) = test_pad(&mut b, &mut tb);
@@ -1518,7 +1561,12 @@ fn simd_reference() {
         ];
         // Literals of every value, so the literal class layouts matter.
         let all: Vec<u8> = (0..=255).collect();
-        let (blocks, changes) = (100, 60);
+        // Miri: the edge blocks and one of each kind after them, each small.
+        let (blocks, changes, max_ops) = if cfg!(miri) {
+            (10, 3, 40)
+        } else {
+            (100, 60, 1500)
+        };
         let mut valid = 0;
         for i in 0..blocks {
             let alphabet: &[u8] = if i % 2 == 0 {
@@ -1526,7 +1574,7 @@ fn simd_reference() {
             } else {
                 b"aaabbcdef\x00\xff"
             };
-            let n = 1 + rng.intn(1500);
+            let n = 1 + rng.intn(max_ops);
             let max_off = 1 << rng.intn(25);
             let (mut ops, mut lits) = test_ops(&mut rng, n, alphabet, 288, max_off);
             if i < edge.len() {
@@ -1593,7 +1641,8 @@ fn simd_reference() {
 #[test]
 fn simd_token_components() {
     let (mut ops, mut short, mut long) = (vec![op(1, 0, 0)], vec![op(1, 4, 0)], vec![op(1, 32, 0)]);
-    for i in 0..200 {
+    // Miri: fewer operations, still every short match length.
+    for i in 0..if cfg!(miri) { 60 } else { 200 } {
         ops.push(op(0, 32, 0));
         short.push(op(0, 4 + i % 28, 0));
         long.push(op(0, 32, 0));
@@ -1894,7 +1943,9 @@ fn simd_lit_lazy() {
 fn simd_lit_fill() {
     let mut rng = Rng(12);
     let mut b = TestBuilder::default();
-    let lits: Vec<u8> = (0..50000).map(|_| b"abcdefgh"[rng.intn(8)]).collect();
+    // Miri: five literal blocks, in every mode.
+    let n = if cfg!(miri) { 12000 } else { 50000 };
+    let lits: Vec<u8> = (0..n).map(|_| b"abcdefgh"[rng.intn(8)]).collect();
     let mut e = TestEnc {
         typ: BLOCK_TYPE,
         size: lits.len(),

@@ -17,6 +17,8 @@ jobs:
   miri:
     name: cargo miri test
     runs-on: ubuntu-latest
+    # About 3x the expected run, so a slow test fails fast instead of running for 6 h.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -29,11 +31,12 @@ jobs:
         # rust-toolchain.toml pins stable, so `cargo miri setup` would
         # try (and fail) to resolve miri on stable.  Force nightly.
         run: cargo +nightly miri setup
-      # Heavy tests are #[cfg_attr(miri, ignore)]'d in source; the lighter
-      # set takes ~15 min on a 4-core runner.
+      # Heavy tests are #[cfg_attr(miri, ignore)]'d or shrunk under cfg!(miri)
+      # in source; the lighter set takes ~23 min on a 4-core runner.
       - name: cargo +nightly miri test --lib
         # --report-time appends `<X.YZs>` to each test line so slow tests
-        # are visible in the CI log without rerunning.
+        # are visible in the CI log without rerunning. Under isolation that is
+        # Miri's virtual clock, which can read several times below wall time.
         run: cargo +nightly miri test --lib -- -Z unstable-options --report-time
         env:
           # Tree borrows would also work; stacked borrows is the

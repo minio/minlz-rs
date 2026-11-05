@@ -674,6 +674,7 @@ mod tests {
     /// Compares the class layouts with the arrays of SPEC_SIMD.md Appendix A: the copy in testdata,
     /// and the Go repository's spec when it is checked out next to this one.
     #[test]
+    #[cfg_attr(miri, ignore = "parses the spec text slowly and runs no unsafe code")]
     fn simd_layouts_spec() {
         check_layouts(include_str!("testdata/SPEC_SIMD_appendix_a.md"));
         let go = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../minlz/SPEC_SIMD.md");

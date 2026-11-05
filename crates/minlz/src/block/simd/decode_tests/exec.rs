@@ -82,9 +82,11 @@ fn simd_exec() {
     let mut b = TestBuilder::default();
     // A match longer than 32 bytes has an offset below 32, without and with the no-overlap flag.
     let mut cases: Vec<(Vec<TestOp>, Vec<u8>, bool, bool)> = Vec::new();
-    for d0 in (1..=40).step_by(3) {
-        for off in 1..=40 {
-            for ml in (0..=40).step_by(3) {
+    // Miri: only the values on either side of MAX_LEN, and a few short random cases.
+    let pick = |v: usize, edges: &[usize]| !cfg!(miri) || edges.contains(&v);
+    for d0 in (1..=40).step_by(3).filter(|&d| pick(d, &[1, 28])) {
+        for off in (1..=40).filter(|&o| pick(o, &[1, 32])) {
+            for ml in (0..=40).step_by(3).filter(|&m| pick(m, &[30, 33])) {
                 let mut lits = vec![0; d0 + 40];
                 rng.read(&mut lits);
                 // The second match starts at d0+5. The no-overlap flag raises its offset to 32.
@@ -95,8 +97,9 @@ fn simd_exec() {
             }
         }
     }
-    for _ in 0..200 {
-        let n = 1 + rng.intn(300);
+    let (n_random, max_ops) = if cfg!(miri) { (6, 40) } else { (200, 300) };
+    for _ in 0..n_random {
+        let n = 1 + rng.intn(max_ops);
         let max_off = 1 << rng.intn(16);
         let (ops, lits) = test_ops(&mut rng, n, b"abcab\x00", 288, max_off);
         cases.push((ops, lits, false, false));
@@ -204,19 +207,23 @@ fn simd_exec_empty() {
 /// operations runs, as before the exact loop.
 #[test]
 fn simd_exec_random() {
-    const HIST: usize = 1 << 24;
+    // Miri: a 64 KiB history, which clamps the far offsets, and fewer, shorter chunks.
+    let (hist, room, max_ops, cases) = if cfg!(miri) {
+        (1 << 16, 1 << 16, 40, 12)
+    } else {
+        (1 << 24, 1 << 20, 300, 3000)
+    };
     let mut rng = Rng(8);
-    let mut base = vec![0; HIST + (1 << 20)];
+    let mut base = vec![0; hist + room];
     rng.read(&mut base);
-    let mut lits = vec![0; 400 * (MAX_LEN + 256) + 1000 + PAD];
-    let cases = 3000;
+    let mut lits = vec![0; (max_ops + 100) * (MAX_LEN + 256) + 1000 + PAD];
     simd_tiers(|tier| {
         let (mut want, mut got) = (base.clone(), base.clone());
         for i in 0..cases {
             let (delta, flat) = (i & 1 != 0, i % 5 == 2);
             // Mostly new offsets with 20 raw bits span the most raw bytes per 16 operations.
             let wide = i % 3 == 1;
-            let (mut d0, l0, mut last) = (HIST, rng.intn(1000), 1 + rng.intn(HIST - 1));
+            let (mut d0, l0, mut last) = (hist, rng.intn(1000), 1 + rng.intn(hist - 1));
             if i % 4 == 0 {
                 d0 = 1 + rng.intn(100);
             }
@@ -225,7 +232,7 @@ fn simd_exec_random() {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
             let (mut acc, mut nacc, mut bits) = (0u64, 0, 0);
             let mut d = d0;
-            for _ in 0..1 + rng.intn(300) {
+            for _ in 0..1 + rng.intn(max_ops) {
                 let mut t = rng.intn(4) as u8;
                 if wide && rng.intn(16) > 0 {
                     t &= !1;
@@ -329,7 +336,8 @@ fn simd_exec_random() {
 fn simd_stats() {
     simd_tiers(|tier| {
         let mut rng = Rng(7);
-        for i in 0..20000 {
+        // Miri runs only the safe Go stats; 200 streams take each kind 50 times.
+        for i in 0..if cfg!(miri) { 200 } else { 20000 } {
             let n = rng.intn(200);
             let b: Vec<u8> = (0..n)
                 .map(|_| {
@@ -388,7 +396,8 @@ fn simd_stats_tail() {
         // 0xff is bad in every stream, and adds to every count. 1 is a repeat with no match,
         // a literal length and an offset symbol without raw bits.
         let mut buf = [0xffu8; 300];
-        for n in 1..=200 {
+        // Miri: the checks are quadratic in n; 40 bytes cross several 8-byte words.
+        for n in 1..=if cfg!(miri) { 40 } else { 200 } {
             let b = &mut buf[..n];
             b.fill(1);
             let (out, n_lit, n_off, n_esc, tok_ok) = tok_stats(tier, b);

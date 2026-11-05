@@ -412,6 +412,10 @@ mod tests {
         ];
         let mut dst = vec![0u8; super::super::format::MAX_BLOCK_SIZE + 16];
         let nines = vec![0x99u8; super::super::format::MAX_BLOCK_SIZE];
+        // Miri checks the literal bytes slowly: of the long cases, only the first 4-byte header.
+        let cases = cases
+            .iter()
+            .filter(|c| !cfg!(miri) || c.0 < 300 || c.0 == 65566);
         for &(len, want_header) in cases {
             let lit = &nines[..len];
             let n = emit_literal(&mut dst, lit);
