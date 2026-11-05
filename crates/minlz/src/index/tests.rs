@@ -713,6 +713,29 @@ fn index_stream_handles_user_chunks() {
     assert_eq!(idx.total_uncompressed, Some(payload.len() as u64));
 }
 
+/// Like Go's `IndexStream`, accept the MinLZ, S2 and Snappy stream
+/// identifiers.
+#[test]
+fn index_stream_accepts_s2_and_snappy_identifiers() {
+    let payload: Vec<u8> = (0u8..255).cycle().take(8 * 1024).collect();
+    let mut compressed: Vec<u8> = Vec::new();
+    let mut w = crate::stream::WriterBuilder::new()
+        .block_size(crate::stream::MIN_BLOCK_SIZE)
+        .build(&mut compressed)
+        .unwrap();
+    w.write_all(&payload).unwrap();
+    let _ = w.finish().unwrap();
+    let want = index_stream(Cursor::new(&compressed)).unwrap();
+
+    for magic in [b"S2sTwO", b"sNaPpY"] {
+        compressed[4..10].copy_from_slice(magic);
+        let got = index_stream(Cursor::new(&compressed));
+        assert_eq!(got.ok(), Some(want.clone()), "{magic:?}");
+    }
+    compressed[4..10].copy_from_slice(b"MinLy\x00");
+    assert!(index_stream(Cursor::new(&compressed)).is_err());
+}
+
 // -------------------- miri-only lite variants --------------------
 //
 // These exercise the same code paths as the heavier originals above with
