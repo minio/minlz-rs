@@ -63,11 +63,10 @@ MINLZ_TESTDATA="$PWD/../minlz/testdata" \
 After the build it takes seconds.  With Go's zips it writes about 12k
 seeds (300 MB); CI runs it without them.
 
-### Upstream tarball (original five targets)
+### Upstream tarball (every target)
 
-Downloads the upstream seed tarball and extracts the corpora of
-`decode_arbitrary`, `roundtrip`, `stream_decode_arbitrary`,
-`stream_roundtrip` and `index_load`.
+Downloads the upstream seed tarball and extracts the minimized corpora
+of all nine targets.
 
 Requires `zstd` on `PATH` (tar shells out to it):
 
@@ -83,11 +82,10 @@ Then seed:
 
 ```bash
 cd minlz-rs/crates/minlz/fuzz
-curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
+curl -fsSL https://klauspost.com/download/rust-fuzz-corpus.tar.zst \
   | tar --zstd -xf - --no-same-owner --no-same-permissions
-# corpus/{decode_arbitrary,roundtrip,stream_decode_arbitrary,stream_roundtrip,index_load}/
-# are now populated.  Verify:
-for t in decode_arbitrary roundtrip stream_decode_arbitrary stream_roundtrip index_load; do
+# corpus/<target>/ are now populated.  Verify:
+for t in $(cargo fuzz list); do
     printf '%-25s %s seeds\n' "$t" "$(ls corpus/$t 2>/dev/null | wc -l)"
 done
 ```
@@ -96,7 +94,7 @@ To re-seed a single target without touching the others, name it on the
 tar command line:
 
 ```bash
-curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
+curl -fsSL https://klauspost.com/download/rust-fuzz-corpus.tar.zst \
   | tar --zstd -xf - --no-same-owner --no-same-permissions corpus/index_load
 ```
 

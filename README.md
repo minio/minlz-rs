@@ -759,10 +759,11 @@ Single-threaded streams use 4 MB blocks at levels 5 and 6;
 multi-threaded streams use 2 MB blocks, ~1 GiB inputs and levels 2, 5
 and 6.  "Go asm" is Go's default amd64 build, whose assembly parsers
 are not ported; "Go parsers" are its portable parsers, which write the
-same output and which Go uses in `noasm` / `purego` builds.  Part of
-the remaining multi-threaded encode gap is setup: each `MtWriter`
-starts fresh worker threads and buffers, which cost 35–67K page faults
-per 1 GiB stream on Windows.  Multi-threaded results vary by up to
+same output and which Go uses in `noasm` / `purego` builds.  An
+`MtWriter` keeps its worker threads and buffers for about 10 s after
+`finish`, for the next one with the same concurrency and block size;
+starting them fresh costs 35–67K page faults per 1 GiB stream on
+Windows.  Multi-threaded results vary by up to
 ±10% between runs.
 
 ## CLI: `mz`
@@ -821,7 +822,7 @@ cargo bench -p minlz --bench xxh3    # criterion: XXH3
 The `reference` feature builds a clean-room reference decoder that the
 tests and fuzzers use as an oracle.  The SIMD encoders are checked
 against blocks written by the Go encoder, in
-[`crates/minlz/tests/fixtures/simd/`](crates/minlz/tests/fixtures/simd/).
+[`crates/minlz/tests/fixtures/simd.zip`](crates/minlz/tests/fixtures/simd.zip).
 Further cross checks against the Go package run when these are set,
 and are skipped otherwise:
 

@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SIMD blocks of the Go encoder, `tests/fixtures/simd`, written by `_helpers/simdgo` (see its
-//! manifest). The inputs are regenerated here from their names, as `_helpers/simdgo/fixtures.go`
-//! generates them.
+//! SIMD blocks of the Go encoder, `tests/fixtures/simd.zip`, written by `_helpers/simdgo` (see
+//! its manifest). The inputs are regenerated here from their names, as
+//! `_helpers/simdgo/fixtures.go` generates them.
 
 use std::path::{Path, PathBuf};
+
+#[path = "../src/unzip.rs"]
+mod unzip;
 
 /// Go's int levels of the fixtures: the SIMD levels, then the delta ones (`LevelSIMDDelta` = 256).
 const LEVELS: [i32; 7] = [4, 5, 6, 7, 260, 261, 262];
@@ -34,10 +37,6 @@ fn manifest_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn fixture_dir() -> PathBuf {
-    manifest_dir().join("tests/fixtures/simd")
-}
-
 fn sawyer_text() -> Vec<u8> {
     std::fs::read(manifest_dir().join("../../testdata/Mark.Twain-Tom.Sawyer.txt"))
         .expect("read Tom Sawyer")
@@ -46,8 +45,9 @@ fn sawyer_text() -> Vec<u8> {
 /// Reads the manifest, and regenerates and checks the inputs.
 fn fixtures() -> Vec<Fixture> {
     let text = sawyer_text();
-    let manifest =
-        std::fs::read_to_string(fixture_dir().join("manifest.txt")).expect("read manifest");
+    let mut files: std::collections::HashMap<String, Vec<u8>> =
+        unzip::simd_fixtures().into_iter().collect();
+    let manifest = String::from_utf8(files.remove("manifest.txt").expect("read manifest")).unwrap();
     let mut out: Vec<Fixture> = Vec::new();
     for line in manifest.lines().filter(|l| !l.starts_with('#')) {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -65,7 +65,8 @@ fn fixtures() -> Vec<Fixture> {
         );
         let simd = kind == "simd";
         let block = match kind {
-            "simd" => std::fs::read(fixture_dir().join(format!("{name}.L{level}.mzb")))
+            "simd" => files
+                .remove(&format!("{name}.L{level}.mzb"))
                 .expect("read block"),
             _ if input.is_empty() => vec![0],
             "stored" => [&[0, 0], &input[..]].concat(),
@@ -128,7 +129,7 @@ impl Drop for GoEncoder {
     }
 }
 
-/// The manifest matches the regenerated inputs and the files of the fixture directory.
+/// The manifest matches the regenerated inputs and the files of the fixture zip.
 #[test]
 fn fixture_inputs() {
     let fx = fixtures();
@@ -137,8 +138,7 @@ fn fixture_inputs() {
         .filter(|f| f.simd)
         .map(|f| format!("{}.L{}.mzb", f.name, f.level))
         .collect();
-    for e in std::fs::read_dir(fixture_dir()).unwrap() {
-        let name = e.unwrap().file_name().into_string().unwrap();
+    for (name, _) in unzip::simd_fixtures() {
         assert!(
             name == "manifest.txt" || names.contains(&name),
             "{name} is not in the manifest"

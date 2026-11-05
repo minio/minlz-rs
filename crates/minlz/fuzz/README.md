@@ -35,8 +35,8 @@ WSL.
 
 ## Seed corpora
 
-The original five targets have seed corpora in a single tarball hosted at
-<https://download.klauspost.com/rust-fuzz-corpus.tar.zst>. Seeds for every
+Every target has a minimized seed corpus in a single tarball hosted at
+<https://klauspost.com/download/rust-fuzz-corpus.tar.zst>. Seeds for every
 target, derived as Go's fuzzers derive theirs (SIMD fixtures, pivco cases,
 and Go's seed zips when `MINLZ_TESTDATA` points at Go's `testdata`), come
 from the ignored `write_fuzz_seeds` tests. See [`RUNBOOK.md` §1](RUNBOOK.md)

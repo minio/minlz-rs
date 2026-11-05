@@ -373,19 +373,12 @@ fn simd_tail() {
 
 /// The SIMD fixtures of the Go encoder up to max bytes, with their reference output.
 pub(super) fn go_fixtures(max: usize) -> Vec<(String, Vec<u8>)> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/simd");
-    let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "mzb"))
-        .map(|p| {
-            let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            (name, std::fs::read(&p).unwrap())
-        })
-        .filter(|(_, b)| b.len() <= max)
+    let mut out: Vec<(String, Vec<u8>)> = crate::unzip::simd_fixtures()
+        .into_iter()
+        .filter(|(n, b)| n.ends_with(".mzb") && b.len() <= max)
         .collect();
     out.sort();
-    assert!(!out.is_empty(), "no fixtures in {dir}");
+    assert!(!out.is_empty(), "no fixtures");
     out
 }
 

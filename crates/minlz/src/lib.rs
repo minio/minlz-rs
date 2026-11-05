@@ -74,6 +74,8 @@ pub mod pivco;
 #[doc(hidden)]
 pub mod reference;
 pub mod stream;
+#[cfg(test)]
+mod unzip;
 #[doc(hidden)]
 pub mod xxh3;
 

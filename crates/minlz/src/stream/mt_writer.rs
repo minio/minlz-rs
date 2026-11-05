@@ -28,9 +28,11 @@
 
 use std::io::{self, Write};
 use std::marker::PhantomData;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crate::block;
 use crate::index::Index;
@@ -95,6 +97,141 @@ struct BlockJob {
     /// Pool to acquire the output buffer from + return it through the
     /// writer thread.
     obuf_pool: Arc<BufferPool>,
+}
+
+/// How long a parked [`Engine`] waits for the next [`MtWriter`] of its shape before it exits.
+const ENGINE_IDLE: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(10)
+};
+
+/// Parked engines, most recently parked last.
+static IDLE: Mutex<Vec<Engine>> = Mutex::new(Vec::new());
+
+static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// One stream's `writer_loop`, boxed so an engine serves any `W`.
+type Run = Box<dyn FnOnce() + Send>;
+
+/// The threads and buffers of one [`MtWriter`], parked after a successful
+/// [`finish`](MtWriter::finish) for the next writer of the same shape: the encoders keep their
+/// scratch in thread locals, which fresh threads must allocate (and fault in) again.
+struct Engine {
+    id: u64,
+    /// A `fork()`ed child inherits parked engines but not their threads.
+    pid: u32,
+    /// `(concurrency, block_size)`.
+    key: (usize, usize),
+    /// One submit channel per worker — the dispatcher picks via
+    /// round-robin so workers never contend on a shared receiver.
+    submit_txs: Vec<SyncSender<BlockJob>>,
+    workers: Vec<JoinHandle<()>>,
+    /// `Some` until dropped; closing it stops the runner.
+    run_tx: Option<Sender<Run>>,
+    /// Runs one stream's `writer_loop` at a time.
+    runner: Option<JoinHandle<()>>,
+    /// Pool of 1-block input buffers.  Round-trips through the worker
+    /// + writer thread back to the dispatcher on every block.
+    input_pool: Arc<BufferPool>,
+    /// Pool of compressed-output buffers (worker writes obuf, writer
+    /// thread returns).
+    obuf_pool: Arc<BufferPool>,
+}
+
+impl Engine {
+    /// The most recently parked engine of this shape, or a new one.
+    fn take(concurrency: usize, block_size: usize) -> Self {
+        let key = (concurrency, block_size);
+        let pid = std::process::id();
+        let parked = {
+            let mut idle = IDLE.lock().unwrap();
+            // Dropping would join threads that do not exist in this process.
+            idle.extract_if(.., |e| e.pid != pid)
+                .for_each(std::mem::forget);
+            idle.iter()
+                .rposition(|e| e.key == key)
+                .map(|i| idle.remove(i))
+        };
+        parked.unwrap_or_else(|| Self::new(key))
+    }
+
+    fn new(key: (usize, usize)) -> Self {
+        let (concurrency, block_size) = key;
+        // Capacity 1 per worker: backpressure kicks in as soon as a worker
+        // is busy, but the dispatcher can fan out to another worker without blocking.
+        let (submit_txs, workers) = (0..concurrency)
+            .map(|_| {
+                let (tx, rx) = mpsc::sync_channel::<BlockJob>(1);
+                (tx, std::thread::spawn(move || worker_loop(rx)))
+            })
+            .unzip();
+        let id = NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
+        let (run_tx, run_rx) = mpsc::channel::<Run>();
+        let runner = std::thread::spawn(move || runner_loop(run_rx, id));
+        // encode_block needs the chunk header, the checksum or hash, and MaxEncodedLen(block_size);
+        // a smaller buffer would double on its first full block.
+        let obuf_cap = CHUNK_HEADER_SIZE
+            + SIMD_HASH_SIZE
+            + block::max_encoded_len(block_size).unwrap_or(block_size + 16);
+        // Keep every buffer a stream has in flight, so the next stream allocates none: up to
+        // concurrency + 3 inputs (the order queue, the block being written, the one being
+        // submitted) plus `ibuf`, and concurrency + 2 outputs.
+        Self {
+            id,
+            pid: std::process::id(),
+            key,
+            submit_txs,
+            workers,
+            run_tx: Some(run_tx),
+            runner: Some(runner),
+            input_pool: Arc::new(BufferPool::new(concurrency + 4, block_size)),
+            obuf_pool: Arc::new(BufferPool::new(concurrency + 2, obuf_cap)),
+        }
+    }
+
+    fn park(self) {
+        // Under Miri no thread may outlive its test, so the engine drops here.
+        if !cfg!(miri) {
+            IDLE.lock().unwrap().push(self);
+        }
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.submit_txs.clear();
+        drop(self.run_tx.take());
+        for h in self.workers.drain(..) {
+            let _ = h.join();
+        }
+        // An expiring runner drops its own engine.
+        let me = std::thread::current().id();
+        if let Some(h) = self.runner.take().filter(|h| h.thread().id() != me) {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Runs streams until the engine drops, or until it has sat parked for [`ENGINE_IDLE`].
+fn runner_loop(run_rx: Receiver<Run>, id: u64) {
+    loop {
+        match run_rx.recv_timeout(ENGINE_IDLE) {
+            Ok(run) => run(),
+            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => {
+                let mut idle = IDLE.lock().unwrap();
+                // Not parked: a writer just took it and is sending its stream.
+                let Some(i) = idle.iter().position(|e| e.id == id) else {
+                    continue;
+                };
+                let engine = idle.remove(i);
+                drop(idle);
+                drop(engine);
+                return;
+            }
+        }
+    }
 }
 
 /// Builder for [`MtWriter`].  All knobs match [`super::WriterBuilder`]
@@ -218,6 +355,10 @@ impl MtWriterBuilder {
 /// `W` is moved into the writer thread on construction and returned via
 /// [`finish`].  See module-level docs for the rationale.
 ///
+/// After a successful [`finish`] the worker threads, the writer thread and the
+/// block buffers stay alive for about 10 seconds, for the next `MtWriter` with
+/// the same concurrency and block size to reuse; unused, they exit.
+///
 /// [`finish`]: MtWriter::finish
 pub struct MtWriter<W: Write + Send + 'static> {
     block_size: usize,
@@ -228,24 +369,16 @@ pub struct MtWriter<W: Write + Send + 'static> {
     #[allow(dead_code)]
     padding: u32,
     ibuf: Vec<u8>,
-    /// One submit channel per worker — the dispatcher picks via
-    /// round-robin so workers never contend on a shared receiver.
-    submit_txs: Vec<SyncSender<BlockJob>>,
-    /// Round-robin cursor for `submit_txs`.
+    /// Round-robin cursor for the engine's `submit_txs`.
     next_worker: usize,
     order_tx: Option<SyncSender<OrderItem>>,
     finish_rx: Receiver<io::Result<W>>,
-    workers: Vec<JoinHandle<()>>,
-    writer_thread: Option<JoinHandle<()>>,
+    /// `Some` until a successful [`finish`] parks it; otherwise dropped with
+    /// the writer.
+    engine: Option<Engine>,
     /// Shared error slot — set by the writer thread if a downstream
     /// write fails.  Read by [`MtWriter::write`] and [`finish`].
     err: Arc<Mutex<Option<io::Error>>>,
-    /// Pool of 1-block input buffers.  Round-trips through the worker
-    /// + writer thread back to here on every block.
-    input_pool: Arc<BufferPool>,
-    /// Pool of compressed-output buffers (worker writes obuf, writer
-    /// thread returns).
-    obuf_pool: Arc<BufferPool>,
     uncomp_written: u64,
     wrote_header: bool,
     _w: PhantomData<fn() -> W>,
@@ -260,37 +393,14 @@ impl<W: Write + Send + 'static> MtWriter<W> {
     }
 
     fn with_builder(w: W, b: MtWriterBuilder, concurrency: usize) -> Self {
-        // One bounded submit channel per worker — capacity 1 means
-        // backpressure kicks in immediately once a worker is busy, but
-        // the dispatcher can fan out to another worker without blocking.
-        let mut submit_txs = Vec::with_capacity(concurrency);
-        let mut submit_rxs = Vec::with_capacity(concurrency);
-        for _ in 0..concurrency {
-            let (tx, rx) = mpsc::sync_channel::<BlockJob>(1);
-            submit_txs.push(tx);
-            submit_rxs.push(rx);
-        }
+        let engine = Engine::take(concurrency, b.block_size);
         let (order_tx, order_rx) = mpsc::sync_channel::<OrderItem>(concurrency + 1);
         let (finish_tx, finish_rx) = mpsc::sync_channel::<io::Result<W>>(1);
         let err: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
-        let input_pool = Arc::new(BufferPool::new(concurrency + 1, b.block_size));
-        // encode_block needs the chunk header, the checksum or hash, and MaxEncodedLen(block_size);
-        // a smaller buffer would double on its first full block.
-        let obuf_cap = CHUNK_HEADER_SIZE
-            + SIMD_HASH_SIZE
-            + block::max_encoded_len(b.block_size).unwrap_or(b.block_size + 16);
-        let obuf_pool = Arc::new(BufferPool::new(concurrency + 1, obuf_cap));
 
-        // Spawn workers.
-        let mut workers = Vec::with_capacity(concurrency);
-        for rx in submit_rxs {
-            workers.push(std::thread::spawn(move || worker_loop(rx)));
-        }
-
-        // Spawn writer thread.
         let err_writer = err.clone();
-        let input_pool_w = input_pool.clone();
-        let obuf_pool_w = obuf_pool.clone();
+        let input_pool_w = engine.input_pool.clone();
+        let obuf_pool_w = engine.obuf_pool.clone();
         let writer_index = if b.generate_index || b.append_index {
             let mut idx = Index::default();
             idx.reset(b.block_size);
@@ -302,7 +412,8 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         let block_size_w = b.block_size;
         let append_index_w = b.append_index;
         let padding_w = b.padding;
-        let writer_thread = std::thread::spawn(move || {
+        // The runner is alive: a failed send would drop `finish_tx`, which `finish` reports.
+        let _ = engine.run_tx.as_ref().unwrap().send(Box::new(move || {
             writer_loop(
                 w,
                 order_rx,
@@ -315,23 +426,19 @@ impl<W: Write + Send + 'static> MtWriter<W> {
                 block_size_w,
                 padding_w,
             );
-        });
+        }));
 
         Self {
             block_size: b.block_size,
             level: b.level,
             uncompressed: b.uncompressed,
             padding: b.padding,
-            ibuf: Vec::with_capacity(b.block_size),
-            submit_txs,
+            ibuf: engine.input_pool.acquire(),
             next_worker: 0,
             order_tx: Some(order_tx),
             finish_rx,
-            workers,
-            writer_thread: Some(writer_thread),
+            engine: Some(engine),
             err,
-            input_pool,
-            obuf_pool,
             uncomp_written: 0,
             wrote_header: false,
             _w: PhantomData,
@@ -381,8 +488,8 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         self.submit_raw(raw)
     }
 
-    /// Flush pending input, emit the EOF chunk + any padding, join all
-    /// threads, and return the underlying writer.
+    /// Flush pending input, emit the EOF chunk + any padding, wait for the
+    /// writer thread, and return the underlying writer.
     pub fn finish(mut self) -> io::Result<W> {
         self.check_err()?;
         self.flush_ibuf()?;
@@ -397,18 +504,23 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         // configured) and the index chunk (if `append_index`) on
         // channel close — see `writer_loop`.
         drop(self.order_tx.take());
-        self.submit_txs.clear();
-        for h in self.workers.drain(..) {
-            let _ = h.join();
-        }
-        if let Some(h) = self.writer_thread.take() {
-            let _ = h.join();
-        }
-        match self.finish_rx.recv() {
-            Ok(Ok(w)) => Ok(w),
-            Ok(Err(e)) => Err(e),
+        let res = match self.finish_rx.recv() {
+            Ok(res) => res,
             Err(_) => Err(io::Error::other("writer thread did not return W")),
+        };
+        // After an error a worker or the runner may be gone, so only a clean
+        // stream parks the engine.
+        if res.is_ok() {
+            let engine = self.engine.take().unwrap();
+            engine.input_pool.release(std::mem::take(&mut self.ibuf));
+            engine.park();
         }
+        res
+    }
+
+    fn engine(&self) -> &Engine {
+        // `Some` until `finish` parks it.
+        self.engine.as_ref().unwrap()
     }
 
     fn check_err(&self) -> io::Result<()> {
@@ -445,7 +557,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
     /// writer thread.
     fn submit_block(&mut self, block: &[u8]) -> io::Result<()> {
         self.uncomp_written += block.len() as u64;
-        let mut input = self.input_pool.acquire();
+        let mut input = self.engine().input_pool.acquire();
         input.extend_from_slice(block);
         let (result_tx, result_rx) = mpsc::sync_channel::<WorkerOutput>(1);
         // Push order slot first so the writer thread can drain in order.
@@ -457,7 +569,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
             .send(OrderItem::Block(result_rx))
             .is_err()
         {
-            self.input_pool.release(input);
+            self.engine().input_pool.release(input);
             return Err(self.collect_pipeline_error());
         }
         let job = BlockJob {
@@ -465,14 +577,14 @@ impl<W: Write + Send + 'static> MtWriter<W> {
             level: self.level,
             uncompressed_mode: self.uncompressed,
             result_tx,
-            obuf_pool: self.obuf_pool.clone(),
+            obuf_pool: self.engine().obuf_pool.clone(),
         };
         // Round-robin pick across worker submit channels — no
         // Mutex<Receiver> contention, just one `send` per block.
-        let n = self.submit_txs.len();
+        let n = self.engine().submit_txs.len();
         let idx = self.next_worker % n;
         self.next_worker = (self.next_worker + 1) % n;
-        match self.submit_txs[idx].try_send(job) {
+        match self.engine().submit_txs[idx].try_send(job) {
             Ok(()) => Ok(()),
             Err(mpsc::TrySendError::Full(j)) => self.send_block_fallback(j, idx + 1, 1),
             Err(mpsc::TrySendError::Disconnected(_)) => Err(self.collect_pipeline_error()),
@@ -487,11 +599,11 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         mut idx: usize,
         mut tried: usize,
     ) -> io::Result<()> {
-        let n = self.submit_txs.len();
+        let n = self.engine().submit_txs.len();
         loop {
             let slot = idx % n;
             idx = (idx + 1) % n;
-            match self.submit_txs[slot].try_send(job) {
+            match self.engine().submit_txs[slot].try_send(job) {
                 Ok(()) => {
                     self.next_worker = idx;
                     return Ok(());
@@ -501,7 +613,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
                     job = j;
                     if tried >= n {
                         // Block on the next one.
-                        return self.submit_txs[slot]
+                        return self.engine().submit_txs[slot]
                             .send(job)
                             .map_err(|_| self.collect_pipeline_error());
                     }
@@ -585,16 +697,13 @@ impl<W: Write + Send + 'static> Write for MtWriter<W> {
 
 impl<W: Write + Send + 'static> Drop for MtWriter<W> {
     fn drop(&mut self) {
-        // Best-effort cleanup if the user forgot finish(): drop the
-        // submit + order channels so workers/writer exit, then join.
-        // Pending data is silently lost — matches Go.
-        self.submit_txs.clear();
-        drop(self.order_tx.take());
-        for h in self.workers.drain(..) {
-            let _ = h.join();
-        }
-        if let Some(h) = self.writer_thread.take() {
-            let _ = h.join();
+        // Best-effort cleanup if the user forgot finish(): close the order
+        // channel and wait for the writer thread, so `W` is dropped before we
+        // return.  Pending data is silently lost — matches Go.  The engine
+        // drops after this and joins its threads.
+        if let Some(tx) = self.order_tx.take() {
+            drop(tx);
+            let _ = self.finish_rx.recv();
         }
     }
 }

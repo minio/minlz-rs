@@ -4,7 +4,7 @@ name: Fuzz
 # Corpus is not committed to the repo (see `.gitignore`).  Each job
 # first restores the prior run's corpus from cache; if that's empty
 # (first-ever run, eviction, or new target), it downloads the seed
-# tarball at https://download.klauspost.com/rust-fuzz-corpus.tar.zst
+# tarball at https://klauspost.com/download/rust-fuzz-corpus.tar.zst
 # and extracts the matching target subfolder, if the tarball has one.
 # Every job also adds the seeds `write_fuzz_seeds` derives from the
 # repo (SIMD fixtures, pivco cases).  Subsequent runs accumulate beyond
@@ -66,7 +66,7 @@ jobs:
         id: dl
         run: |
           set -eu
-          if curl -fsSL https://download.klauspost.com/rust-fuzz-corpus.tar.zst \
+          if curl -fsSL https://klauspost.com/download/rust-fuzz-corpus.tar.zst \
                   -o rust-fuzz-corpus.tar.zst; then
               ls -la rust-fuzz-corpus.tar.zst
               echo "has_seed=true" >> "$GITHUB_OUTPUT"

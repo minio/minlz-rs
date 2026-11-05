@@ -1,12 +1,12 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -39,15 +39,22 @@ func fixtureNames() (names []string) {
 }
 
 const manifestHeader = `# SIMD block fixtures of the Go encoder (github.com/minio/minlz), written by _helpers/simdgo:
-#   cd _helpers/simdgo && go run . fixtures -text ../../testdata/Mark.Twain-Tom.Sawyer.txt ../../crates/minlz/tests/fixtures/simd
-# Remove the old .mzb files first. Inputs are regenerated from their names, see crates/minlz/tests/simd_fixtures.rs.
+#   cd _helpers/simdgo && go run . fixtures -text ../../testdata/Mark.Twain-Tom.Sawyer.txt ../../crates/minlz/tests/fixtures/simd.zip
+# Inputs are regenerated from their names, see crates/minlz/tests/simd_fixtures.rs.
 # Blocks of kind simd are in <input>.L<level>.mzb; stored blocks (0, 0, input; 0 if empty) have no file.
 # input level insize encsize kind fnv1a64(input)
 `
 
-// fixtures writes the manifest and the SIMD blocks of every input and level to dir, checking that each decodes.
-func fixtures(dir string, text []byte) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+// fixtures writes a zip of the SIMD blocks of every input and level and the manifest to path, checking that each
+// decodes.
+func fixtures(path string, text []byte) error {
+	var buf bytes.Buffer
+	z := zip.NewWriter(&buf)
+	add := func(name string, b []byte) error {
+		w, err := z.Create(name)
+		if err == nil {
+			_, err = w.Write(b)
+		}
 		return err
 	}
 	m := []byte(manifestHeader)
@@ -72,14 +79,20 @@ func fixtures(dir string, text []byte) error {
 				if v, n := binary.Uvarint(enc[1:]); enc[0] != 0 || n <= 0 || v>>24 != 1 {
 					return fmt.Errorf("%s level %d: not a SIMD block", name, level)
 				}
-				if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s.L%d.mzb", name, level)), enc, 0o644); err != nil {
+				if err := add(fmt.Sprintf("%s.L%d.mzb", name, level), enc); err != nil {
 					return err
 				}
 			}
 			m = fmt.Appendf(m, "%s %d %d %d %s %016x\n", name, level, len(src), len(enc), kind, h.Sum64())
 		}
 	}
-	return os.WriteFile(filepath.Join(dir, "manifest.txt"), m, 0o644)
+	if err := add("manifest.txt", m); err != nil {
+		return err
+	}
+	if err := z.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
 // stored is minlz's uncompressed block of src.

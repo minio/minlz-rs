@@ -2,7 +2,7 @@
 //
 //	simdgo enc -level N IN OUT    minlz.Encode at Go's int level N (4-7, 260-262 = SIMD|LevelSIMDDelta)
 //	simdgo dec IN OUT             minlz.Decode
-//	simdgo fixtures [-text FILE] DIR
+//	simdgo fixtures [-text FILE] ZIP
 //
 // See _SIMD_PORT.md and crates/minlz/tests/simd_fixtures.rs.
 package main
@@ -16,7 +16,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: simdgo enc -level N IN OUT | dec IN OUT | fixtures [-text FILE] DIR")
+	fmt.Fprintln(os.Stderr, "usage: simdgo enc -level N IN OUT | dec IN OUT | fixtures [-text FILE] ZIP")
 	os.Exit(2)
 }
 

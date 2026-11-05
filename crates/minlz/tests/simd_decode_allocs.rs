@@ -25,6 +25,9 @@ use std::io::{Cursor, Read, Write};
 use minlz::Level;
 use minlz::stream::{Reader, WriterBuilder};
 
+#[path = "../src/unzip.rs"]
+mod unzip;
+
 thread_local! {
     static ALLOCS: Cell<usize> = const { Cell::new(0) };
 }
@@ -66,8 +69,11 @@ unsafe impl GlobalAlloc for Counting {
 static GLOBAL: Counting = Counting;
 
 fn fixture(name: &str) -> Vec<u8> {
-    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/simd/");
-    std::fs::read(format!("{p}{name}")).unwrap_or_else(|e| panic!("{name}: {e}"))
+    unzip::simd_fixtures()
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("{name}: no such fixture"))
+        .1
 }
 
 #[test]

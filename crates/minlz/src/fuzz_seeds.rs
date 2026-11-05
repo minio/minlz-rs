@@ -25,12 +25,13 @@
 //!
 //! [`go_seeds`] also gives the tests that run Go's seed corpora their inputs.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 use crate::block::simd::{MIN_SAVING, simd_header};
 use crate::block::{Level, MAX_BLOCK_SIZE, encode};
 use crate::stream::WriterBuilder;
+use crate::unzip::{simd_fixtures, unzip};
 
 fn manifest() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -59,6 +60,9 @@ pub(crate) fn go_seeds(name: &str) -> Vec<Vec<u8>> {
     let p = Path::new(&dir).join(name);
     let files = if name.ends_with(".zip") {
         unzip(&std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())))
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect()
     } else if let Ok(rd) = std::fs::read_dir(&p) {
         rd.map(|e| std::fs::read(e.unwrap().path()).unwrap())
             .collect()
@@ -66,41 +70,6 @@ pub(crate) fn go_seeds(name: &str) -> Vec<Vec<u8>> {
         Vec::new()
     };
     files.iter().flat_map(|f| go_values(f)).collect()
-}
-
-/// The files of a zip archive, stored or deflated.
-fn unzip(z: &[u8]) -> Vec<Vec<u8>> {
-    let u16_at = |i: usize| u16::from_le_bytes([z[i], z[i + 1]]) as usize;
-    let u32_at = |i: usize| u32::from_le_bytes(z[i..i + 4].try_into().unwrap()) as usize;
-    // The end of central directory record, before the archive comment.
-    let end = (0..=z.len() - 22)
-        .rev()
-        .find(|&i| u32_at(i) == 0x0605_4b50)
-        .expect("zip end record");
-    let mut p = u32_at(end + 16);
-    let mut out = Vec::new();
-    for _ in 0..u16_at(end + 10) {
-        assert_eq!(u32_at(p), 0x0201_4b50, "zip central directory");
-        let (method, size, name) = (u16_at(p + 10), u32_at(p + 20), u16_at(p + 28));
-        let local = u32_at(p + 42);
-        let start = local + 30 + u16_at(local + 26) + u16_at(local + 28);
-        let data = &z[start..start + size];
-        if !z[p + 46..p + 46 + name].ends_with(b"/") {
-            out.push(match method {
-                0 => data.to_vec(),
-                8 => {
-                    let mut b = Vec::new();
-                    flate2::read::DeflateDecoder::new(data)
-                        .read_to_end(&mut b)
-                        .unwrap();
-                    b
-                }
-                m => panic!("zip method {m}"),
-            });
-        }
-        p += 46 + name + u16_at(p + 30) + u16_at(p + 32);
-    }
-    out
 }
 
 /// The `[]byte` values of a `go test fuzz v1` file, or the file itself, as Go's
@@ -164,10 +133,9 @@ fn inputs() -> Vec<Vec<u8>> {
     let mut v =
         vec![std::fs::read(manifest().join("../../testdata/Mark.Twain-Tom.Sawyer.txt")).unwrap()];
     // Stored fixtures have no block file; the others repeat their input at each level.
-    for e in std::fs::read_dir(manifest().join("tests/fixtures/simd")).unwrap() {
-        let p = e.unwrap().path();
-        if p.extension().is_some_and(|x| x == "mzb") {
-            v.push(crate::reference::decode_simd_block(&std::fs::read(p).unwrap()).unwrap());
+    for (name, block) in simd_fixtures() {
+        if name.ends_with(".mzb") {
+            v.push(crate::reference::decode_simd_block(&block).unwrap());
         }
     }
     for name in [
