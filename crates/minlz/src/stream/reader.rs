@@ -256,14 +256,15 @@ impl<R: Read> Reader<R> {
 
             // Step 2: read next chunk header.
             let mut hdr = [0u8; CHUNK_HEADER_SIZE];
-            match read_full_or_eof(&mut self.r, &mut hdr, !self.expect_eof)? {
-                ReadOutcome::Eof => {
+            match read_full_or_eof(&mut self.r, &mut hdr, !self.expect_eof) {
+                Ok(ReadOutcome::Eof) => {
                     let e = io::Error::from(io::ErrorKind::UnexpectedEof);
                     let cloned = clone_io_err(&e);
                     self.err = Some(e);
                     return Err(cloned);
                 }
-                ReadOutcome::Ok => {}
+                Ok(ReadOutcome::Ok) => {}
+                Err(e) => return self.set_io_err(e),
             }
             let chunk_type = hdr[0];
             let chunk_len = read_chunk_len(&hdr[1..]);
@@ -438,9 +439,10 @@ impl<R: Read> Reader<R> {
                 return Ok(true);
             }
             let mut hdr = [0u8; CHUNK_HEADER_SIZE];
-            match read_full_or_eof(&mut self.r, &mut hdr, !self.expect_eof)? {
-                ReadOutcome::Eof => return Ok(false),
-                ReadOutcome::Ok => {}
+            match read_full_or_eof(&mut self.r, &mut hdr, !self.expect_eof) {
+                Ok(ReadOutcome::Eof) => return Ok(false),
+                Ok(ReadOutcome::Ok) => {}
+                Err(e) => return self.set_io_err(e),
             }
             let chunk_type = hdr[0];
             let chunk_len = read_chunk_len(&hdr[1..]);
@@ -679,9 +681,15 @@ impl<R: Read> Reader<R> {
     }
 
     fn set_err<T>(&mut self, e: Error) -> io::Result<T> {
-        let io_err: io::Error = e.into();
-        let cloned = clone_io_err(&io_err);
-        self.err = Some(io_err);
+        self.set_io_err(e.into())
+    }
+
+    /// Store `e` as the sticky error.  Every read error must stick: a failed
+    /// read may have consumed part of a chunk, so a retry would resume
+    /// mid-chunk and parse garbage.
+    fn set_io_err<T>(&mut self, e: io::Error) -> io::Result<T> {
+        let cloned = clone_io_err(&e);
+        self.err = Some(e);
         Err(cloned)
     }
 }
