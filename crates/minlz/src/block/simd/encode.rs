@@ -395,8 +395,10 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// parse codes the operations of src.
+    /// parse codes the operations of src, which must have more than MIN_SAVING bytes: the
+    /// parsers' loads are unchecked.
     pub(crate) fn parse(&mut self, src: &'a [u8], level: i32) {
+        assert!(src.len() > MIN_SAVING);
         let delta = if level & LEVEL_DELTA != 0 { -1 } else { 0 };
         self.split_lits = level == LEVEL_SMALLEST;
         self.fast_code = 0;

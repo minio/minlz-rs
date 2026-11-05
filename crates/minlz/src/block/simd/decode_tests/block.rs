@@ -198,6 +198,7 @@ fn simd_layouts_spec() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "40 blocks of up to 5000 operations: over 30 minutes")]
 fn simd_decode_built() {
     simd_tiers(|_| {
         // Go's draws make blocks of more than MAX_CHUNKS chunks, or chunks of 1 operation with
@@ -400,7 +401,13 @@ fn simd_guard_page() {
             let (e, want) = test_pad(&mut b, &mut tb);
             blocks.push((format!("{n} operations"), e.bytes(), want));
         }
-        for (name, block) in go_fixtures(64 << 10) {
+        // Miri isolates the file system.
+        let fixtures = if cfg!(miri) {
+            Vec::new()
+        } else {
+            go_fixtures(64 << 10)
+        };
+        for (name, block) in fixtures {
             let want = decode_simd_block(&block).unwrap();
             blocks.push((name, block, want));
         }
@@ -1762,6 +1769,7 @@ fn test_lit_decode(tier: Tier, block: &[u8]) -> Result<Vec<u8>, Error> {
 /// them blocks whose literals run out or are more than the block holds, must be accepted and
 /// decoded as the reference does.
 #[test]
+#[cfg_attr(miri, ignore = "blocks of thousands of operations: over 25 minutes")]
 fn simd_lit_lazy() {
     simd_tiers(|tier| {
         let mut rng = Rng(11);

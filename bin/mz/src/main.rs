@@ -46,7 +46,8 @@ If no subcommand is given, the input filename's extension decides:
   anything else -> compress
 
 Options (compress):
-  -1, -2, -3          Level shortcut (fastest / balanced / smallest).
+  -1, -2, -3          Level shortcut (fastest / balanced / smallest), SIMD
+                      unless --classic.  Default: -2.
   --level N           Same, explicit (1, 2 or 3).
   -xfast              Compress fastest, with a major compression loss.
                       SIMD blocks only.

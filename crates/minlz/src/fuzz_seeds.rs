@@ -22,6 +22,8 @@
 //!
 //! The raw inputs are Tom Sawyer and the inputs of the SIMD fixtures, and with `MINLZ_TESTDATA`
 //! also Go's seed zips and its `testdata/fuzz/FuzzEncodingBlocks` corpus.
+//!
+//! [`go_seeds`] also gives the tests that run Go's seed corpora their inputs.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -50,7 +52,7 @@ pub(crate) fn save(target: &str, seeds: impl IntoIterator<Item = Vec<u8>>) {
 /// The seeds in Go's `testdata/<name>`, a zip or a Go fuzzer's corpus directory, with
 /// `go test fuzz v1` files expanded to their values. Empty without `MINLZ_TESTDATA` or the
 /// directory.
-fn go_seeds(name: &str) -> Vec<Vec<u8>> {
+pub(crate) fn go_seeds(name: &str) -> Vec<Vec<u8>> {
     let Some(dir) = std::env::var_os("MINLZ_TESTDATA") else {
         return Vec::new();
     };

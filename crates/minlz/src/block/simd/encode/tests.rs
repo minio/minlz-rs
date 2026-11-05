@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Ports of the SIMD encoder tests of Go's `encode_test.go`, and of the Go parser part of
-//! TestSIMDParseAsmBounds (`encode-simd_asm_test.go`). Blocks round trip through `decode` and the
-//! strict reference decoder. Go's asm parser tiers (simdEncTiers) have no Rust counterpart.
+//! Ports of the SIMD encoder tests of Go's `encode_test.go`, of the Go parser part of
+//! TestSIMDParseAsmBounds (`encode-simd_asm_test.go`), and of FuzzEncodingBlocks' seed run
+//! (`fuzz_test.go`). Blocks round trip through `decode` and the strict reference decoder. Go's
+//! asm parser tiers (simdEncTiers) have no Rust counterpart.
 
 use super::super::parse_better::better_max_off;
 use super::super::{rvarint, simd_header};
 use super::*;
 use crate::block::format::get_uvarint;
-use crate::block::{Level, append_encoded, decode, encode, max_encoded_len, try_encode};
+use crate::block::{
+    Level, append_encoded, decode, decoded_len, encode, max_encoded_len, try_encode,
+};
 use crate::reference::{SimdWalker, decode_simd_block_strict, walk_simd_block};
 
 /// Go's simdLevels.
@@ -249,6 +252,28 @@ fn test_stats(b: &[u8], modes: &mut [[usize; 8]; LITS + 1], flags: &mut [usize; 
             t = &t[entry(t, k)..];
         }
         t = &t[get_uvarint(t).unwrap().1..];
+    }
+}
+
+/// Every level round-trips short inputs, from just over MIN_SAVING bytes. The other encoder tests
+/// skip Miri, so this is what checks the parsers' unchecked loads there.
+#[test]
+fn simd_encode_short() {
+    let mut src = [
+        Rng(5).text(2 << 10),
+        Rng(6).runs(9, 600),
+        Rng(7).random(300),
+    ]
+    .concat();
+    src.extend_from_within(100..900);
+    for n in [MIN_SAVING + 1, MIN_SAVING + 9, 700, src.len()] {
+        for l in LEVELS {
+            let b = encode_level(&src[..n], l);
+            assert!(
+                decode_block(&b).unwrap() == src[..n],
+                "level {l}, {n} bytes"
+            );
+        }
     }
 }
 
@@ -1031,6 +1056,48 @@ fn simd_encode_huge() {
         assert!(is_simd(&enc), "level {l}");
         assert!(enc.len() <= max_encoded_len(data.len()).unwrap());
         assert!(decode_block(&enc) == Ok(data.clone()), "level {l}");
+    }
+}
+
+/// Go's `FuzzEncodingBlocks` over the seeds `go test -short` runs it on: the two
+/// `buildMaxOffsetBoundary` inputs and, with `MINLZ_TESTDATA`, `enc_regressions.zip` and
+/// `fuzz/FuzzEncodingBlocks`. Tom Sawyer is added; Go's bench files are left out, as
+/// `simd_encode` runs them. Every level encodes from a source against either guard page, as the
+/// parsers read ahead and extend matches back, within `max_encoded_len`; SIMD blocks decode on
+/// every exec tier into a `dst` with garbage in its spare capacity, and with the strict reference
+/// decoder. `decoded_len` agrees, as Go's `FuzzDecodeBlock` checks on its seeds, SIMD blocks of
+/// the same inputs.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn fuzz_encoding_blocks_seeded() {
+    use crate::fuzz_seeds::go_seeds;
+    let mut inputs = vec![twain()];
+    inputs.extend(go_seeds("enc_regressions.zip"));
+    inputs.extend(go_seeds("fuzz/FuzzEncodingBlocks"));
+    inputs.extend((1..=2).filter_map(|d| crate::block::tests::build_max_offset_boundary(0, d)));
+    let mut dec = Vec::with_capacity(crate::MAX_BLOCK_SIZE);
+    for data in inputs.iter().filter(|d| d.len() <= crate::MAX_BLOCK_SIZE) {
+        let mut g = crate::guard::Buffer::new(data.len()).unwrap();
+        let src = g.slice(data.len(), data.len() & 1 == 0);
+        src.copy_from_slice(data);
+        for l in [1, 2, 3].into_iter().chain(LEVELS) {
+            let what = format!("{} bytes, level {l}", data.len());
+            let enc = encode_level(src, l);
+            assert!(enc.len() <= max_encoded_len(data.len()).unwrap(), "{what}");
+            assert_eq!(decoded_len(&enc), Ok(data.len()), "{what}");
+            if !is_simd(&enc) {
+                assert!(decode_block(&enc).as_ref() == Ok(data), "{what}");
+                continue;
+            }
+            super::super::exec::simd_tiers(|t| {
+                dec.clear();
+                dec.spare_capacity_mut()[..data.len()].fill(core::mem::MaybeUninit::new(0xfe));
+                decode(&mut dec, &enc).unwrap_or_else(|e| panic!("{what}, {t:?}: {e}"));
+                assert!(dec == *data, "{what}, {t:?}: mismatch");
+            });
+            let r = decode_simd_block_strict(&enc);
+            assert!(r.as_ref() == Ok(data), "{what}: reference {:?}", r.err());
+        }
     }
 }
 

@@ -128,6 +128,22 @@ cargo +nightly fuzz run simd_decode             -- -max_total_time=1200 -jobs=8 
 `bash run.sh` runs every target in turn (`MAX_SECS`, `JOBS`, `WORKERS`;
 from `/mnt` on WSL it mirrors the tree to `WORK_ROOT` on ext4).
 
+Every `-jobs` process first replays the whole corpus. With the full seed
+set that is 20 minutes for `roundtrip` at 24 jobs (10 levels per input,
+up to 2.5 MB inputs), so the whole budget goes to replay and nothing gets
+mutated, and each job grows to 1.1 GB RSS. `stream_roundtrip`'s corpus is
+twice that size. Run those two in libFuzzer's fork mode, which
+replays the corpus once and gives each child a subset:
+`FORK=24 bash run.sh roundtrip stream_roundtrip` (`-fork=24
+-ignore_crashes=1`). It prints one status line per finished child job;
+crashes still land in `artifacts/<target>/`, but every crashing mutation
+does, so one bug can leave hundreds. The one replay still takes
+11 of 15 minutes for `roundtrip` and 7 for `stream_roundtrip`;
+`MAX_LEN=262144` truncates the seeds as they load (8 and 3 minutes) and
+gave 4.5x and 5x the executions, but loses what only longer inputs reach
+(offsets past 256 KiB, several 2 MiB blocks per stream): `ft` after the
+replay fell from 79.5k to 75.0k and from 76.8k to 72.0k.
+
 Live output looks like this:
 ```
 INFO: seed corpus: files: 1798 min: 1b max: 1048576b total: 12345678b ...

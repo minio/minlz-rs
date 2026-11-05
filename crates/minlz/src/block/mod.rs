@@ -14,7 +14,43 @@
 
 //! MinLZ block codec — public API.
 //!
-//! Block format reference: SPEC.md §1–§2 in the upstream Go repository.
+//! Block format reference: [`SPEC.md`] §1–§2 and [`SPEC_SIMD.md`] in the upstream Go
+//! repository. [`decode`](fn@decode) and [`append_decoded`] read classic and SIMD blocks.
+//!
+//! # SIMD blocks
+//!
+//! SIMD blocks are a block type added in v1.1 of the format. They store literals and operations
+//! in separate Huffman-coded streams, laid out so they can be decoded with SIMD. The `*Simd`
+//! [`Level`]s write them:
+//!
+//! ```
+//! use minlz::{Level, decode, encode};
+//!
+//! let src = b"SIMD blocks decode with AVX-512, AVX2 or NEON. ".repeat(1000);
+//! let mut block = Vec::new();
+//! encode(&mut block, &src, Level::FastestSimd)?;
+//! let mut out = Vec::new();
+//! decode(&mut out, &block)?;
+//! assert_eq!(out, src);
+//! # Ok::<(), minlz::Error>(())
+//! ```
+//!
+//! * Each block carries its own Huffman tables, so the SIMD levels pay off for blocks of 64 KiB
+//!   and more, such as stream blocks at the default 2 MiB. On small blocks the classic levels
+//!   compress faster, and usually decompress faster too.
+//! * The delta levels ([`Level::SuperFastSimdDelta`], [`Level::FastestSimdDelta`],
+//!   [`Level::BalancedSimdDelta`]) store literals as the difference to the bytes at the last match
+//!   offset. That mainly helps binary data, like tables of numbers, but makes text larger and
+//!   costs decompression speed. [`Level::SmallestSimd`] decides this itself.
+//! * Decoders for format v1.0 cannot read SIMD blocks. Use the classic levels for data that every
+//!   MinLZ decoder must read.
+//! * The decoder picks its tier once: AVX-512 on x86-64 CPUs with AVX-512 (F, BW, VL, VBMI,
+//!   VBMI2), POPCNT, AVX2 and BMI2; AVX2 on CPUs with AVX2 and BMI2; NEON on little-endian
+//!   aarch64. Other targets, and Miri, run portable code. The encoders' output does not depend on
+//!   the tier, and is the same as the Go encoders'.
+//!
+//! [`SPEC.md`]: https://github.com/minio/minlz/blob/main/SPEC.md
+//! [`SPEC_SIMD.md`]: https://github.com/minio/minlz/blob/main/SPEC_SIMD.md
 
 mod decode;
 mod emit;
@@ -37,8 +73,10 @@ use crate::Error;
 /// The levels map to the Go API's int levels (`LevelFastest = 1`, …) with [`i32::from`] and
 /// [`Level::try_from`].
 ///
-/// The SIMD levels write SIMD blocks (`SPEC_SIMD.md`), which need a decoder for MinLZ format
-/// specification v1.1 or later. Streams store them as SIMD chunks (`SPEC.md` 4.5B).
+/// The SIMD levels write SIMD blocks, which need a decoder for MinLZ format specification v1.1
+/// or later; streams store them as SIMD chunks (`SPEC.md` 4.5B). SIMD blocks typically compress
+/// better than classic ones, and decompress faster on platforms with SIMD when blocks are 64 KiB
+/// or more. See [SIMD blocks](crate::block#simd-blocks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     /// Single-pass with a 15-bit (or 13-bit for ≤64 KiB inputs) hash table.
@@ -50,25 +88,19 @@ pub enum Level {
     /// `LevelSmallest` / `encodeBlockBest`.
     Smallest,
     /// The fastest SIMD compression level.
-    /// This will take significant shortcuts and usually provide much worse compression.
-    /// Use only if [`Level::FastestSimd`] is confirmed to be too slow.
+    /// It takes shortcuts that cost compression; use it only if [`Level::FastestSimd`] is
+    /// confirmed to be too slow.
     /// Go's `LevelSuperFastSIMD` (4).
     SuperFastSimd,
-    /// The fastest compression level.
-    /// SIMD blocks typically compress better, and decompress faster
-    /// on platforms where SIMD is available when blocks are 64KB or more.
+    /// Fast SIMD compression with a good ratio, the SIMD counterpart of [`Level::Fastest`].
     /// Go's `LevelFastestSIMD` (5).
     FastestSimd,
-    /// The balanced compression level.
+    /// A balance between compression and speed, the SIMD counterpart of [`Level::Balanced`].
     /// This is targeted to be approximately half the speed of [`Level::FastestSimd`].
-    /// SIMD blocks typically compress better, and decompress faster
-    /// on platforms where SIMD is available when blocks are 64KB or more.
     /// Go's `LevelBalancedSIMD` (6).
     BalancedSimd,
-    /// Will attempt the best possible compression.
-    /// There is no speed target for this level. It always tries delta literals.
-    /// SIMD blocks typically compress better, and decompress faster
-    /// on platforms where SIMD is available when blocks are 64KB or more.
+    /// Will attempt the best possible compression, the SIMD counterpart of [`Level::Smallest`].
+    /// There is no speed target for this level. It always tries both plain and delta literals.
     /// Go's `LevelSmallestSIMD` (7).
     SmallestSimd,
     /// [`Level::SuperFastSimd`] with delta literals, which are mainly useful for binary encoded

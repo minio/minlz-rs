@@ -881,7 +881,7 @@ fn encode_long_match() {
 /// Port of Go's `buildMaxOffsetBoundary`: a hash1/hash2 match at offset
 /// `MAX_COPY3_OFFSET + delta` (minio/minlz#75). Random bytes come from
 /// [`Xor64`], not Go's `math/rand`.
-fn build_max_offset_boundary(seed: u64, delta: usize) -> Option<Vec<u8>> {
+pub(super) fn build_max_offset_boundary(seed: u64, delta: usize) -> Option<Vec<u8>> {
     use super::format::MAX_COPY3_OFFSET as M;
     use super::hash::hash6;
     let load64 = |b: &[u8], i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());

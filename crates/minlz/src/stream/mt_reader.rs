@@ -184,8 +184,9 @@ fn dispatch_loop<R: Read>(
                 }
                 // Acquire a pooled buffer, sized for the full chunk
                 // (incl. checksum prefix).  We strip the checksum below
-                // before the worker sees it.  The read overwrites it all.
-                let mut buf = compressed_pool.reuse();
+                // before the worker sees it.  Not `reuse`: skipping the
+                // zero-fill made 32-thread decode 6-14% slower (measured).
+                let mut buf = compressed_pool.acquire();
                 buf.resize(chunk_len, 0);
                 read_exact_or_corrupt(&mut reader.r, &mut buf)?;
                 let checksum = read_u32_le(&buf[..CHECKSUM_SIZE]);
@@ -214,7 +215,7 @@ fn dispatch_loop<R: Read>(
                 if !reader.simd || chunk_len > max_buf_size(reader.max_block) {
                     return Err(io::Error::from(Error::Corrupt));
                 }
-                let mut buf = compressed_pool.reuse();
+                let mut buf = compressed_pool.acquire();
                 buf.resize(chunk_len, 0);
                 read_exact_or_corrupt(&mut reader.r, &mut buf)?;
                 let (dlen, _) = simd_chunk_header(&buf, reader.max_block)?;

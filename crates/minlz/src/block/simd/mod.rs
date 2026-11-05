@@ -54,7 +54,9 @@ pub(crate) use encode::encode_block_simd;
 ///
 /// Those loads, and the slice over unwritten bytes, are still undefined behavior in Rust's
 /// abstract machine, which Miri can't check on the vector tiers: decoder code outside the vector
-/// loops must only read output it has written.
+/// loops must only read output it has written. The decode runs on the tier checked here: picked
+/// again, a [`cpu::disable`](crate::cpu::disable) on another thread could hand the unwritten
+/// bytes to the Go loops.
 // Inlined, it made the classic decoder in block::append_decoded 3-4% slower at 4 MB blocks.
 #[inline(never)]
 pub(crate) fn append_decoded(dst: &mut Vec<u8>, size: usize, block: &[u8]) -> Result<(), Error> {
@@ -66,12 +68,12 @@ pub(crate) fn append_decoded(dst: &mut Vec<u8>, size: usize, block: &[u8]) -> Re
     }
     dst.reserve(size);
     debug_assert!(dst.capacity() - start >= size);
-    // SAFETY: reserve made size bytes of capacity from start, decode_simd writes all of them
-    // before it returns Ok, and an error skips set_len. The slice over uninitialized bytes breaks
-    // from_raw_parts_mut's contract (see above).
+    // SAFETY: reserve made size bytes of capacity from start, the decode on a vector tier writes
+    // all of them before it returns Ok, and an error skips set_len. The slice over uninitialized
+    // bytes breaks from_raw_parts_mut's contract (see above).
     unsafe {
         let out = core::slice::from_raw_parts_mut(dst.as_mut_ptr().add(start), size);
-        decode_simd(out, block)?;
+        decode::decode_tier(out, block, false, tier)?;
         dst.set_len(start + size);
     }
     Ok(())

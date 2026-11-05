@@ -101,12 +101,22 @@ pub(crate) fn decode_simd(dst: &mut [u8], block: &[u8]) -> Result<(), Error> {
 /// hashing a large block after decoding it reads it back from memory.
 /// On error, dst is zeroed.
 pub(crate) fn decode_simd_hash(dst: &mut [u8], block: &[u8], hash: bool) -> Result<u64, Error> {
+    decode_tier(dst, block, hash, Tier::current())
+}
+
+/// Is [`decode_simd_hash`] on tier.
+pub(super) fn decode_tier(
+    dst: &mut [u8],
+    block: &[u8],
+    hash: bool,
+    tier: Tier,
+) -> Result<u64, Error> {
     let mut s = DECODERS
         .try_with(Cell::take)
         .ok()
         .flatten()
         .unwrap_or_else(|| Box::new(Decoder::new()));
-    s.tier = Tier::current();
+    s.tier = tier;
     if hash {
         s.h.reset();
     }

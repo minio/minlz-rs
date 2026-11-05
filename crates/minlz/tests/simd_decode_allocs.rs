@@ -13,12 +13,17 @@
 // limitations under the License.
 
 //! Port of Go's `TestSIMDDecodeAllocs` (`decode-simd_test.go`): after warmup, decoding SIMD
-//! blocks does not allocate. A counting global allocator needs its own test binary. Go builds
-//! its block with the test builder; Go encoder fixtures with coded and class tables, delta
-//! literals, several chunks and literal blocks stand in for it.
+//! blocks does not allocate, nor does decoding them with their hash, which streams do. A
+//! counting global allocator needs its own test binary. Go builds its block with the test
+//! builder; Go encoder fixtures with coded and class tables, delta literals, several chunks and
+//! literal blocks stand in for it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::io::{Cursor, Read, Write};
+
+use minlz::Level;
+use minlz::stream::{Reader, WriterBuilder};
 
 thread_local! {
     static ALLOCS: Cell<usize> = const { Cell::new(0) };
@@ -102,4 +107,40 @@ fn simd_decode_allocs() {
     let before = ALLOCS.with(Cell::get);
     drop(std::hint::black_box(vec![0u8; 100]));
     assert!(ALLOCS.with(Cell::get) > before);
+}
+
+/// Go checks `decodeSIMDHash`, which the stream reader decodes SIMD chunks with, directly; here a
+/// reader reset to a stream of SIMD chunks decodes it.
+#[test]
+fn simd_stream_decode_allocs() {
+    let mut data = Vec::new();
+    minlz::decode(&mut data, &fixture("mixed-1126400.L262.mzb")).unwrap();
+    let mut w = WriterBuilder::new()
+        .level(Level::FastestSimdDelta)
+        .block_size(64 << 10)
+        .build(Vec::new())
+        .unwrap();
+    w.write_all(&data).unwrap();
+    let stream = w.finish().unwrap();
+    let (mut c, mut simd_chunks) = (&stream[..], 0);
+    while !c.is_empty() {
+        simd_chunks += usize::from(c[0] == 0x10);
+        c = &c[4 + (c[1] as usize | (c[2] as usize) << 8 | (c[3] as usize) << 16)..];
+    }
+    assert!(simd_chunks > 10, "{simd_chunks} SIMD chunks");
+    let mut out = vec![0; data.len()];
+    let mut r = Reader::new(Cursor::new(&stream[..]));
+    let mut run = || {
+        r.reset(Cursor::new(&stream[..]));
+        r.read_exact(&mut out).unwrap();
+        assert_eq!(r.read(&mut [0; 1]).unwrap(), 0);
+    };
+    run(); // warm up
+    let before = ALLOCS.with(Cell::get);
+    for _ in 0..20 {
+        run();
+    }
+    let n = ALLOCS.with(Cell::get) - before;
+    assert_eq!(n, 0, "{n} allocs in 20 stream decodes");
+    assert!(out == data);
 }

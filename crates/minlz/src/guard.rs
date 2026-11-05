@@ -101,6 +101,7 @@ mod sys {
         fn VirtualAlloc(addr: *mut c_void, size: usize, typ: u32, prot: u32) -> *mut c_void;
         fn VirtualProtect(addr: *mut c_void, size: usize, prot: u32, old: *mut u32) -> i32;
         fn VirtualFree(addr: *mut c_void, size: usize, typ: u32) -> i32;
+        fn SetErrorMode(mode: u32) -> u32;
     }
 
     pub(super) fn page_size() -> usize {
@@ -133,6 +134,13 @@ mod sys {
     pub(super) unsafe fn unmap(p: *mut u8, _total: usize) {
         // SAFETY: caller guarantees p came from VirtualAlloc.
         unsafe { VirtualFree(p.cast(), 0, MEM_RELEASE) };
+    }
+
+    /// Ends the process at a fault without Windows Error Reporting's dialog.
+    pub(super) fn no_fault_dialog() {
+        const SEM_NOGPFAULTERRORBOX: u32 = 0x0002;
+        // SAFETY: only sets the process error mode.
+        unsafe { SetErrorMode(SEM_NOGPFAULTERRORBOX) };
     }
 }
 
@@ -228,5 +236,56 @@ mod tests {
         let s = g.slice(10, false);
         s.fill(1);
         assert!(s.iter().all(|&b| b == 1));
+    }
+
+    /// Go's TestFault: the byte just outside a slice, at either end, faults. A fault ends the
+    /// process, so this test runs itself as a child for each access.
+    #[test]
+    fn faults() {
+        if !supported() {
+            return;
+        }
+        if let Ok(c) = std::env::var("MINLZ_GUARD_FAULT") {
+            let (n, at_end) = c.split_once(',').unwrap();
+            let (n, at_end): (usize, bool) = (n.parse().unwrap(), at_end.parse().unwrap());
+            #[cfg(windows)]
+            sys::no_fault_dialog();
+            let mut g = Buffer::new(10000).unwrap();
+            let b = g.slice(n, at_end);
+            assert_eq!(b.len(), n);
+            b.iter_mut().enumerate().for_each(|(i, v)| *v = i as u8);
+            let p = b
+                .as_mut_ptr()
+                .wrapping_offset(if at_end { n as isize } else { -1 });
+            // SAFETY: deliberately not upheld: p is in a guard page, and the fault ends this child.
+            unsafe { p.write_volatile(1) };
+            return;
+        }
+        for n in [1, 100, 10000] {
+            for at_end in [false, true] {
+                let out = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["guard::tests::faults", "--exact", "--test-threads=1"])
+                    .env("MINLZ_GUARD_FAULT", format!("{n},{at_end}"))
+                    .output()
+                    .unwrap();
+                assert!(
+                    faulted(out.status),
+                    "n {n} at_end {at_end}: no fault: {out:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn faulted(s: std::process::ExitStatus) -> bool {
+        const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
+        s.code() == Some(STATUS_ACCESS_VIOLATION as i32)
+    }
+
+    #[cfg(unix)]
+    fn faulted(s: std::process::ExitStatus) -> bool {
+        use std::os::unix::process::ExitStatusExt;
+        // SIGSEGV, or SIGBUS (7 on Linux, 10 on macOS).
+        matches!(s.signal(), Some(11 | 7 | 10))
     }
 }

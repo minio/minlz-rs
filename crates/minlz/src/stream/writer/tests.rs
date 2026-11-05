@@ -755,8 +755,10 @@ fn writer_simd_hash() {
 }
 
 /// Ports the stream part of `TestDataRoundtrips` (`minlz_test.go`) for its generated input,
-/// at every level and Go's `testOptions` additions (`simd`, `simd-d`). The zip and zstd inputs
-/// need decoders this crate doesn't depend on.
+/// at every level and Go's `testOptions` additions (`simd`, `simd-d`). The zip inputs are in
+/// [`encoder_regression`], whose classic levels skip the two over 10000 bytes, and the SIMD
+/// encode tests' `fuzz_encoding_blocks_seeded`; the zstd one needs a decoder this crate doesn't
+/// depend on.
 #[test]
 #[cfg_attr(miri, ignore = "1 MiB streams too slow for miri")]
 fn data_roundtrips_longblock() {
@@ -777,6 +779,142 @@ fn data_roundtrips_longblock() {
         let mut got = Vec::new();
         crate::decode(&mut got, &block).unwrap();
         assert!(got == data, "block level {level:?}");
+    }
+}
+
+/// Ports `TestEncoderRegression` (`writer_test.go`): the inputs of Go's `enc_regressions.zip`
+/// (with `MINLZ_TESTDATA`) through the writers with Go's `testOptions`, written whole and with
+/// `io::copy` for Go's `ReadFrom`. The 4 MiB window (no different from the default for these
+/// inputs) and 4 MiB padding are left out. Inputs over 10000 bytes, which Go's `-short` mode
+/// skips, skip only the classic levels. One reader decodes every stream, reset between them.
+#[test]
+#[cfg_attr(miri, ignore = "hundreds of streams too slow for miri")]
+fn encoder_regression() {
+    #[derive(Clone, Copy)]
+    enum Opt {
+        Default,
+        Level(Level),
+        Uncompressed,
+    }
+    let opts = [
+        ("default", Opt::Default),
+        ("fast", Opt::Level(Level::Fastest)),
+        ("best", Opt::Level(Level::Smallest)),
+        ("none", Opt::Uncompressed),
+        ("simd", Opt::Level(Level::BalancedSimd)),
+        ("simd-d", Opt::Level(Level::FastestSimdDelta)),
+    ];
+    let new = |opt, c1: bool, bs: usize, pad: u32| {
+        macro_rules! with_opt {
+            ($b:expr) => {{
+                let b = $b.block_size(bs).padding(pad);
+                match opt {
+                    Opt::Default => b.append_index(),
+                    Opt::Level(l) => b.level(l),
+                    Opt::Uncompressed => b.uncompressed(),
+                }
+                .build(Vec::new())
+                .unwrap()
+            }};
+        }
+        if c1 {
+            AnyWriter::St(with_opt!(WriterBuilder::new()))
+        } else {
+            AnyWriter::Mt(with_opt!(MtWriterBuilder::new()))
+        }
+    };
+    let mut dec = Reader::new(Cursor::new(Vec::new()));
+    for (i, data) in crate::fuzz_seeds::go_seeds("enc_regressions.zip")
+        .iter()
+        .enumerate()
+    {
+        for (name, opt) in opts {
+            if data.len() > 10000 && !matches!(opt, Opt::Level(l) if i32::from(l) >= 4) {
+                continue;
+            }
+            for c1 in [false, true] {
+                for bs in [crate::stream::DEFAULT_BLOCK_SIZE, 4 << 10] {
+                    for pad in [0, 2, 8000] {
+                        for copy in [false, true] {
+                            let what = format!(
+                                "input {i}: {name}, c1 {c1}, bs {bs}, pad {pad}, copy {copy}"
+                            );
+                            let mut w = new(opt, c1, bs, pad);
+                            if copy {
+                                // Not a &[u8], which io::copy hands to write_all whole.
+                                io::copy(&mut Cursor::new(data), &mut w).map(drop)
+                            } else {
+                                w.write_all(data)
+                            }
+                            .unwrap_or_else(|e| panic!("{what}: {e}"));
+                            let (comp, _) = w.finish();
+                            assert!(pad == 0 || comp.len() % pad as usize == 0, "{what}");
+                            dec.reset(Cursor::new(comp));
+                            let got = read_all(&mut dec).unwrap_or_else(|e| panic!("{what}: {e}"));
+                            assert!(got == *data, "{what}: decoder mismatch");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Ports `TestWriterConcurrencyIndex` (`writer_test.go`) without the search tables, also at a
+/// SIMD level: the stream with its index doesn't depend on the concurrency, and the index
+/// entries point at blocks, not at the stream header or user chunks before them.
+#[test]
+#[cfg_attr(miri, ignore = "5 MiB streams too slow for miri")]
+fn writer_concurrency_index() {
+    const BS: usize = 256 << 10;
+    let data = make_test_data(5 << 20);
+    for level in [Level::Balanced, Level::BalancedSimd] {
+        for api in ["write", "buffer", "copy", "user"] {
+            let mut want: Option<Vec<u8>> = None;
+            for conc in [1, 4] {
+                let what = format!("{level:?}/{api}: concurrency {conc}");
+                let mut w = AnyWriter::new(Some(level), BS, conc, 0);
+                match api {
+                    "write" => w.write_all(&data),
+                    "buffer" => w.encode_buffer(&data),
+                    "copy" => io::copy(&mut Cursor::new(&data), &mut w).map(drop),
+                    _ => [&data[..4 * BS], &data[4 * BS..]]
+                        .into_iter()
+                        .zip(MIN_USER_SKIPPABLE_CHUNK..)
+                        .try_for_each(|(part, id)| {
+                            w.add_user_chunk(id, b"user")?;
+                            w.write_all(part)
+                        }),
+                }
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+                let (comp, _) = w.finish();
+                let mut idx = Index::default();
+                idx.load_stream(&mut Cursor::new(&comp))
+                    .unwrap_or_else(|e| panic!("{what}: {e}"));
+                let o = idx.offsets();
+                assert!(o.len() >= 3 && o[0].compressed != 0, "{what}: index {o:?}");
+                for e in o {
+                    assert!(
+                        matches!(
+                            comp[e.compressed as usize],
+                            CHUNK_TYPE_UNCOMPRESSED_DATA
+                                | CHUNK_TYPE_MINLZ_COMPRESSED_DATA
+                                | CHUNK_TYPE_MINLZ_SIMD
+                        ),
+                        "{what}: entry {e:?} is not at a block"
+                    );
+                }
+                match &want {
+                    None => want = Some(comp),
+                    Some(w) => assert!(
+                        comp == *w,
+                        "{what}: {} bytes differ from concurrency 1 ({} bytes)",
+                        comp.len(),
+                        w.len()
+                    ),
+                }
+            }
+        }
     }
 }
 

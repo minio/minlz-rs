@@ -677,7 +677,10 @@ mod tests {
     fn simd_layouts_spec() {
         check_layouts(include_str!("testdata/SPEC_SIMD_appendix_a.md"));
         let go = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../minlz/SPEC_SIMD.md");
-        if let Ok(spec) = std::fs::read_to_string(go) {
+        // Miri isolates the file system.
+        if !cfg!(miri)
+            && let Ok(spec) = std::fs::read_to_string(go)
+        {
             check_layouts(&spec);
         }
     }

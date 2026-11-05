@@ -35,6 +35,7 @@
 
 #![no_main]
 
+use std::cell::Cell;
 use std::io::{self, Read, Write};
 
 use libfuzzer_sys::fuzz_target;
@@ -53,6 +54,20 @@ const LEVELS: [Level; 10] = [
     Level::FastestSimdDelta,
     Level::BalancedSimdDelta,
 ];
+
+/// A sink whose length can be read while a `Writer` owns it.
+struct Sink<'a>(Vec<u8>, &'a Cell<u64>);
+
+impl Write for Sink<'_> {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(b);
+        self.1.set(self.0.len() as u64);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Writes `data` to `w` with write method `m`; `mid` writes the middle third of method 3.
 fn write<W: Write>(
@@ -112,7 +127,8 @@ fuzz_target!(|data: &[u8]| {
         if index {
             b = b.append_index();
         }
-        let mut w = b.build(Vec::new()).unwrap();
+        let sunk = Cell::new(0);
+        let mut w = b.build(Sink(Vec::new(), &sunk)).unwrap();
         write(&mut w, payload, method, |w, third| {
             w.flush()?;
             w.write_all(third)
@@ -121,7 +137,8 @@ fuzz_target!(|data: &[u8]| {
         // The writer counts blocks as it emits them.
         w.flush().expect("ST flush");
         assert_eq!(w.written().uncompressed, payload.len() as u64, "ST written");
-        let buf = w.finish().expect("ST finish");
+        assert_eq!(w.written().compressed, sunk.get(), "ST written compressed");
+        let buf = w.finish().expect("ST finish").0;
         check_padding(&buf);
         let mut dec = Vec::with_capacity(payload.len());
         Reader::new(&buf[..])
