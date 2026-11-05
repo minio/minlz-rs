@@ -624,6 +624,23 @@ fn skip_past_eof_errors() {
 }
 
 #[test]
+fn skip_across_concatenated_streams() {
+    let payload: Vec<u8> = (0..10_000u32).map(|i| (i * 7) as u8).collect();
+    let one = build_multi_block_stream(&payload, 4 << 10);
+    let both = [one.clone(), one].concat();
+    let want = [&payload[..], &payload[..]].concat();
+    for n in [9_999, 10_000, 10_001, 15_000, 20_000] {
+        let mut reader = Reader::new(Cursor::new(&both));
+        reader.skip(n as u64).unwrap();
+        let mut tail = Vec::new();
+        reader.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, want[n..], "skip({n})");
+    }
+    let err = Reader::new(Cursor::new(&both)).skip(20_001).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
 fn skip_then_read_matches_full_decode() {
     // Differential: full decode vs (skip k + read).
     let block_size = 4 << 10;
