@@ -242,7 +242,8 @@ impl<R: Read> Reader<R> {
     /// the tail of the skip range still has its CRC verified unless
     /// [`ReaderBuilder::ignore_crc`] is set.
     ///
-    /// Returns [`io::ErrorKind::UnexpectedEof`] if the stream ends
+    /// Skips across concatenated streams, like [`Read::read`].  Returns
+    /// [`io::ErrorKind::UnexpectedEof`] if the input ends
     /// before `n` bytes have been skipped.  Subsequent reads after a
     /// failed `skip` continue to surface the sticky error — matches
     /// Go's behavior.
@@ -288,7 +289,8 @@ impl<R: Read> Reader<R> {
                 }
                 CHUNK_TYPE_MINLZ_SIMD => self.skip_simd_or_decode(chunk_len, &mut n),
                 CHUNK_TYPE_UNCOMPRESSED_DATA => self.skip_uncompressed_or_decode(chunk_len, &mut n),
-                // Like Read, continue into a concatenated stream.
+                // A concatenated stream may follow; the next header read
+                // reports UnexpectedEof if none does.
                 CHUNK_TYPE_EOF => self.handle_eof_chunk(chunk_len),
                 CHUNK_TYPE_STREAM_IDENTIFIER => self.handle_stream_identifier(chunk_len),
                 t if t <= MAX_NON_SKIPPABLE_CHUNK => Err(Error::Unsupported),
