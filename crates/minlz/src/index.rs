@@ -625,6 +625,11 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                 if d_len > MAX_BLOCK_SIZE {
                     return Err(Error::Invalid("block exceeds max size"));
                 }
+                // An empty chunk would add an entry at the same offset, and
+                // while est_block_uncomp is 0 nothing thins those out.
+                if d_len == 0 {
+                    continue;
+                }
                 if idx.est_block_uncomp == 0 {
                     idx.est_block_uncomp = d_len as u64;
                 }
@@ -638,6 +643,9 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                 let n2 = chunk_len - CHECKSUM_SIZE;
                 if n2 > MAX_BLOCK_SIZE {
                     return Err(Error::Invalid("uncompressed block exceeds max size"));
+                }
+                if n2 == 0 {
+                    continue;
                 }
                 if idx.est_block_uncomp == 0 {
                     idx.est_block_uncomp = n2 as u64;

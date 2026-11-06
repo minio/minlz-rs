@@ -788,6 +788,26 @@ fn index_stream_accepts_s2_and_snappy_identifiers() {
     assert!(index_stream(Cursor::new(&compressed)).is_err());
 }
 
+/// Empty data chunks must not add entries at a repeated offset.
+#[test]
+fn index_stream_skips_empty_chunks() {
+    let payload: Vec<u8> = (0u8..255).cycle().take(8 * 1024).collect();
+    let mut compressed: Vec<u8> = Vec::new();
+    let mut w = crate::stream::WriterBuilder::new()
+        .block_size(crate::stream::MIN_BLOCK_SIZE)
+        .build(&mut compressed)
+        .unwrap();
+    w.write_all(&payload).unwrap();
+    let _ = w.finish().unwrap();
+
+    // An empty uncompressed chunk and an empty Snappy chunk.
+    let empty: &[u8] = &[1, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0];
+    let s = [&compressed[..10], &empty.repeat(3), &compressed[10..]].concat();
+    let mut idx = Index::default();
+    idx.load(&index_stream(Cursor::new(&s)).unwrap()).unwrap();
+    assert_eq!(idx.total_uncompressed, Some(payload.len() as u64));
+}
+
 // -------------------- miri-only lite variants --------------------
 //
 // These exercise the same code paths as the heavier originals above with
