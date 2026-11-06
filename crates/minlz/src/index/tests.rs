@@ -232,6 +232,20 @@ fn reduce_light_at_max() {
 }
 
 #[test]
+fn reset_clears_and_rounds_small_block_sizes_up() {
+    let mut idx = Index::default();
+    for (max_block, want) in [(0, MIN_INDEX_DIST), (3, 3 << 19), (1 << 21, 1 << 21)] {
+        idx.add(0, 0).unwrap();
+        idx.total_uncompressed = Some(1);
+        idx.total_compressed = Some(1);
+        idx.reset(max_block);
+        assert_eq!(idx.est_block_uncomp(), want, "max_block={max_block}");
+        assert!(idx.offsets.is_empty(), "max_block={max_block}");
+        assert_eq!((idx.total_uncompressed, idx.total_compressed), (None, None));
+    }
+}
+
+#[test]
 fn load_stream_finds_index_at_tail() {
     let mut buf = Vec::new();
     let mut tmp = make_index(5, 1 << 20);
@@ -816,6 +830,29 @@ fn index_stream_handles_user_chunks() {
     let mut idx = Index::default();
     idx.load(&idx_bytes).unwrap();
     assert_eq!(idx.total_uncompressed, Some(payload.len() as u64));
+}
+
+/// Like Go's `IndexStream`, accept the MinLZ, S2 and Snappy stream
+/// identifiers.
+#[test]
+fn index_stream_accepts_s2_and_snappy_identifiers() {
+    let payload: Vec<u8> = (0u8..255).cycle().take(8 * 1024).collect();
+    let mut compressed: Vec<u8> = Vec::new();
+    let mut w = crate::stream::WriterBuilder::new()
+        .block_size(crate::stream::MIN_BLOCK_SIZE)
+        .build(&mut compressed)
+        .unwrap();
+    w.write_all(&payload).unwrap();
+    let _ = w.finish().unwrap();
+    let want = index_stream(Cursor::new(&compressed)).unwrap();
+
+    for magic in [b"S2sTwO", b"sNaPpY"] {
+        compressed[4..10].copy_from_slice(magic);
+        let got = index_stream(Cursor::new(&compressed));
+        assert_eq!(got.ok(), Some(want.clone()), "{magic:?}");
+    }
+    compressed[4..10].copy_from_slice(b"MinLy\x00");
+    assert!(index_stream(Cursor::new(&compressed)).is_err());
 }
 
 // -------------------- miri-only lite variants --------------------
