@@ -316,11 +316,9 @@ fn header_read_errors_are_sticky() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     let mut r = Reader::new(Cursor::new(&t));
     let err = r.skip(payload.len() as u64 + 1).unwrap_err();
-    assert_eq!(
-        r.read(&mut [0u8; 1]).unwrap_err().kind(),
-        err.kind(),
-        "skip"
-    );
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "skip");
+    let err = r.read(&mut [0u8; 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "read after skip");
 }
 
 // -------------------- skippables --------------------
