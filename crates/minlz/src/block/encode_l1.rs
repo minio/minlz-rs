@@ -64,13 +64,6 @@ fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
             if next_s > s_limit {
                 break 'outer;
             }
-            // The c1 path shifts `s += 1` and the c2 path shifts `s += 2`
-            // *after* this check, so the effective repeat for those paths is
-            // `(s+1)-c1` and `(s+2)-c2` respectively.  Tightening `min_src_pos`
-            // by +2 prevents `repeat > MAX_COPY3_OFFSET`, which would cause
-            // `encode_copy3` to wrap the 21-bit offset field and emit a
-            // corrupt block (caught by `tests::regression_l1_offset_boundary`).
-            let min_src_pos = (s + 2).saturating_sub(MAX_COPY3_OFFSET);
             let hash0 = hash6(cv, TABLE_BITS) as usize;
             let hash1 = hash6(cv >> 8, TABLE_BITS) as usize;
             let c0 = table[hash0] as usize;
@@ -126,19 +119,23 @@ fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
             // or `s+1` after hash-collision with hash0/hash1 — that's a
             // legitimate self-referential RLE-style match, handled by the
             // decoder's forward-copy path.
-            if c0 >= min_src_pos && (cv as u32) == unsafe { load32(src, c0) } {
+            //
+            // c1 is matched at s+1 and c2 at s+2, so each offset is bounded
+            // at its own position.  An offset over MAX_COPY3_OFFSET would wrap
+            // `encode_copy3`'s offset field (see `l1_max_copy3_offset_boundary`).
+            if c0 + MAX_COPY3_OFFSET >= s && (cv as u32) == unsafe { load32(src, c0) } {
                 candidate = c0;
                 break;
             }
             let c2 = table[hash2] as usize;
-            if c1 >= min_src_pos && ((cv >> 8) as u32) == unsafe { load32(src, c1) } {
+            if c1 + MAX_COPY3_OFFSET > s && ((cv >> 8) as u32) == unsafe { load32(src, c1) } {
                 table[hash2] = (s + 2) as u32;
                 candidate = c1;
                 s += 1;
                 break;
             }
             table[hash2] = (s + 2) as u32;
-            if c2 >= min_src_pos && ((cv >> 16) as u32) == unsafe { load32(src, c2) } {
+            if c2 + MAX_COPY3_OFFSET >= s + 2 && ((cv >> 16) as u32) == unsafe { load32(src, c2) } {
                 candidate = c2;
                 s += 2;
                 break;

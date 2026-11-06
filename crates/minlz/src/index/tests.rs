@@ -531,6 +531,58 @@ fn find_uses_binary_search_above_threshold() {
     assert_eq!(p.compressed, (n as u64 / 2) * 700);
 }
 
+/// The spec allows an index without the (0, 0) entry; offsets before the
+/// first entry must still map to the start, on both lookup paths.
+#[test]
+fn find_without_zero_entry() {
+    for n in [200u64, 201, 300] {
+        let mut idx = Index::default();
+        for i in 1..=n {
+            idx.add(i * 1000, i << 20).unwrap();
+        }
+        assert_eq!(idx.find(100), OffsetPair::default(), "n={n}");
+        let p = idx.find(1 << 20);
+        assert_eq!((p.compressed, p.uncompressed), (1000, 1 << 20), "n={n}");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "1.2 MiB stream is impractical under miri")]
+fn read_seeker_index_without_zero_entry() {
+    let payload: Vec<u8> = (0..300 * 4096u32).map(|i| (i ^ (i >> 11)) as u8).collect();
+    let mut compressed = Vec::new();
+    let mut w = crate::stream::WriterBuilder::new()
+        .block_size(4096)
+        .build(&mut compressed)
+        .unwrap();
+    w.write_all(&payload).unwrap();
+    w.finish().unwrap();
+
+    let mut full = Index::default();
+    full.load(&index_stream(Cursor::new(&compressed)).unwrap())
+        .unwrap();
+    let mut idx = Index::default();
+    for p in &full.offsets()[1..] {
+        idx.add(p.compressed, p.uncompressed).unwrap();
+    }
+    let mut idx_bytes = Vec::new();
+    idx.append_to(
+        &mut idx_bytes,
+        full.total_uncompressed(),
+        full.total_compressed(),
+    )
+    .unwrap();
+
+    let reader = StreamReader::new(Cursor::new(&compressed));
+    let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).unwrap();
+    assert!(rs.index().offsets().len() > 200);
+    let mut buf = [0u8; 16];
+    // A far read first, so the next one can't use the buffered block.
+    rs.read_exact_at(&mut buf, 250 * 4096).unwrap();
+    rs.read_exact_at(&mut buf, 100).unwrap();
+    assert_eq!(buf[..], payload[100..116]);
+}
+
 #[test]
 fn find_at_total_uncompressed_succeeds() {
     let idx = make_index(8, 1 << 20);
