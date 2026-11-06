@@ -244,8 +244,12 @@ impl Index {
             let n = self
                 .offsets
                 .partition_point(|p| p.uncompressed <= uncompressed_offset);
-            let i = if n == 0 { 0 } else { n - 1 };
-            return self.offsets[i];
+            // An index may omit the (0, 0) entry; it is still implied.
+            return if n == 0 {
+                OffsetPair::default()
+            } else {
+                self.offsets[n - 1]
+            };
         }
         let mut best = OffsetPair::default();
         for &p in &self.offsets {
