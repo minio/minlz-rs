@@ -70,9 +70,6 @@ fn encode_block_big_with(dst: &mut [u8], src: &[u8], table: &mut [u32; 1 << 15])
             if next_s > s_limit {
                 break 'outer;
             }
-            // c1 and c2 match at s+1 and s+2; their bounds below keep the
-            // offset within MAX_COPY3_OFFSET (minio/minlz#75).
-            let min_src_pos = s as isize - MAX_COPY3_OFFSET as isize;
             let hash0 = hash6(cv, TABLE_BITS) as usize;
             let hash1 = hash6(cv >> 8, TABLE_BITS) as usize;
             let c0 = table[hash0] as usize;
@@ -128,19 +125,23 @@ fn encode_block_big_with(dst: &mut [u8], src: &[u8], table: &mut [u32; 1 << 15])
             // or `s+1` after hash-collision with hash0/hash1 — that's a
             // legitimate self-referential RLE-style match, handled by the
             // decoder's forward-copy path.
-            if c0 as isize >= min_src_pos && (cv as u32) == unsafe { load32(src, c0) } {
+            //
+            // c1 is matched at s+1 and c2 at s+2, so each offset is bounded
+            // at its own position.  An offset over MAX_COPY3_OFFSET would wrap
+            // `encode_copy3`'s offset field (see `l1_max_copy3_offset_boundary`).
+            if c0 + MAX_COPY3_OFFSET >= s && (cv as u32) == unsafe { load32(src, c0) } {
                 candidate = c0;
                 break;
             }
             let c2 = table[hash2] as usize;
-            if c1 as isize > min_src_pos && ((cv >> 8) as u32) == unsafe { load32(src, c1) } {
+            if c1 + MAX_COPY3_OFFSET > s && ((cv >> 8) as u32) == unsafe { load32(src, c1) } {
                 table[hash2] = (s + 2) as u32;
                 candidate = c1;
                 s += 1;
                 break;
             }
             table[hash2] = (s + 2) as u32;
-            if c2 as isize >= min_src_pos + 2 && ((cv >> 16) as u32) == unsafe { load32(src, c2) } {
+            if c2 + MAX_COPY3_OFFSET >= s + 2 && ((cv >> 16) as u32) == unsafe { load32(src, c2) } {
                 candidate = c2;
                 s += 2;
                 break;

@@ -845,37 +845,84 @@ impl Xor64 {
     }
 }
 
-/// Regression: the L1 encoder's c1/c2 paths used to check the candidate
-/// position against `min_src_pos = s - MAX_COPY3_OFFSET` and *then* shift
-/// `s` by 1 or 2, producing a `repeat` value up to `MAX_COPY3_OFFSET + 2`.
-/// `encode_copy3`'s 21-bit offset field then wrapped, yielding a corrupt
-/// block.  See `B_decoder_mapping.md` and the cockroach.node1.log fixture
-/// for the original trigger.
-///
-/// This test places a unique 8-byte marker at byte 0 and at byte
-/// `MAX_COPY3_OFFSET`, fills the rest with PRNG bytes so the encoder
-/// reaches the boundary without finding earlier matches, and asserts
-/// round-trip equality.
-#[test]
-#[cfg_attr(
-    miri,
-    ignore = "2 MiB of random input: minutes; big_encoders_mixed_miri runs the >64 KiB L1 encoder"
-)]
-fn l1_offset_at_max_copy3_boundary_roundtrips() {
+/// An 8-byte marker at `p = 9` and at `q = p + MAX_COPY3_OFFSET + delta`.
+/// The filler has a match every 128 bytes, so the L1 skip step stays small,
+/// and a match that ends `gap` bytes before `q`, so the L1 search finds the
+/// marker through candidate c0, c1 or c2 (gap 0, 1, 2).  Filler windows
+/// whose hash collides with the marker's are scrubbed, so the table still
+/// holds `p` when the search reaches `q`.  Extends Go's
+/// `buildMaxOffsetBoundary` (minio/minlz#75), which places the match at gap 2.
+fn max_offset_boundary_gap(seed: u64, delta: usize, gap: usize) -> Option<Vec<u8>> {
+    use super::hash::hash6;
     use crate::block::format::MAX_COPY3_OFFSET as MAX;
-    let total = MAX + 32;
-    let mut data = vec![0u8; total];
+    let p = 9;
+    let q = p + MAX + delta;
+    let n = q + 4096;
+    let mut rng = Xor64::new(seed);
+    let mut src: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
+    for i in (2000..n - 128).step_by(128) {
+        src.copy_within(i + 64 - 1000..i + 128 - 1000, i + 64);
+    }
+    src.copy_within(q - 1200 - gap..q - 1000 - gap, q - 200 - gap);
+    if gap > 0 {
+        src[q - gap] = src[q - gap - 1000] ^ 0xff;
+    }
+    // Keep the match at q from extending backwards.
+    if src[q - 1] == src[p - 1] {
+        src[q - 1] ^= 0x33;
+        if gap == 0 {
+            src[q - 1001] = src[q - 1];
+        }
+    }
     let marker = b"\xfeSeNtInL";
-    data[..marker.len()].copy_from_slice(marker);
-    data[MAX..MAX + marker.len()].copy_from_slice(marker);
-    let mut rng = Xor64::new(0xabad_cafe);
-    for slot in data[marker.len()..MAX].iter_mut() {
-        *slot = rng.next() as u8;
+    src[p..p + 8].copy_from_slice(marker);
+    src[q..q + 8].copy_from_slice(marker);
+
+    let load = |s: &[u8], i: usize| u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
+    let h = hash6(load(&src, p), 15);
+    let keep = |j: usize| (p..p + 8).contains(&j) || (q - 1210 - gap..q + 8).contains(&j);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..=n - 8 {
+            if i == p || i == q || hash6(load(&src, i), 15) != h {
+                continue;
+            }
+            let j = if keep(i + 5) { i } else { i + 5 };
+            if keep(j) {
+                return None;
+            }
+            src[j] ^= 0x5a;
+            changed = true;
+        }
     }
-    for slot in data[MAX + marker.len()..].iter_mut() {
-        *slot = rng.next() as u8;
+    Some(src)
+}
+
+/// L1 must not use a match more than `MAX_COPY3_OFFSET` back: the 21-bit
+/// Copy3 offset field would wrap and produce a corrupt block.  Covers
+/// offsets `MAX_COPY3_OFFSET + 0..=3` through each of the three search
+/// candidates, which are matched at `s`, `s + 1` and `s + 2`.
+#[test]
+#[cfg_attr(miri, ignore = "2 MiB inputs are impractical under miri")]
+fn l1_max_copy3_offset_boundary() {
+    for gap in 0..3 {
+        for delta in 0..4 {
+            for seed in 0..4 {
+                let src = max_offset_boundary_gap(seed, delta, gap).expect("filler collides");
+                let levels: &[Level] = if seed == 0 {
+                    &[Level::Fastest, Level::Balanced, Level::Smallest]
+                } else {
+                    &[Level::Fastest]
+                };
+                for &level in levels {
+                    roundtrip_at(&src, level).unwrap_or_else(|e| {
+                        panic!("gap={gap} delta={delta} seed={seed} {level:?}: {e}")
+                    });
+                }
+            }
+        }
     }
-    roundtrip_at(&data, Level::Fastest).expect("L1 boundary roundtrip");
 }
 
 /// Ports `TestEncodeLongMatch` (`encode_test.go`): a block that is one long
@@ -927,7 +974,7 @@ fn encode_long_match() {
 /// segments from 16 seeds that repeat a few KiB back, right after each other, or with a changed
 /// byte (a repeat offset), and a last segment that repeats the first, over 64 KiB back.
 /// encode_long_match's single match skips most of their loops, and Miri ignores
-/// l1_offset_at_max_copy3_boundary_roundtrips. The SIMD parsers share their code with the 64 KiB
+/// l1_max_copy3_offset_boundary. The SIMD parsers share their code with the 64 KiB
 /// versions, which simd_encode_short runs. 27 s under Miri without L0, which adds 30%; each
 /// SIMD level would add 17 s.
 #[cfg(miri)]
