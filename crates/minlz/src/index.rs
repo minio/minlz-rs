@@ -173,7 +173,8 @@ impl Index {
     /// Reset to an empty index ready to receive entries for a stream whose
     /// maximum block size is `max_block`.  Matches Go `Index.reset`.
     pub fn reset(&mut self, max_block: usize) {
-        let mut mb = max_block as u64;
+        // Doubling 0 would never reach MIN_INDEX_DIST.
+        let mut mb = (max_block as u64).max(1);
         while mb < MIN_INDEX_DIST {
             mb *= 2;
         }
