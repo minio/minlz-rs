@@ -257,6 +257,15 @@ fn load_stream_rejects_when_trailer_missing() {
     ));
 }
 
+/// Ports `TestIndexStreamSmall` (`writer_test.go`).
+#[test]
+fn index_stream_small() {
+    let mut w = crate::stream::Writer::new(Vec::new());
+    w.write_all(&b"abcdefgh".repeat(100)).unwrap();
+    let stream = w.finish().unwrap();
+    index_stream(Cursor::new(&stream)).unwrap();
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "5 MiB stream is impractical under miri")]
 fn index_stream_matches_writer_index() {
@@ -479,6 +488,23 @@ fn add_equal_offsets_after_skip_window_succeed() {
     // Same offsets are skipped by the gap check (gap=0 < 1MB).
     idx.add(0, 0).unwrap();
     assert_eq!(idx.offsets.len(), 1);
+}
+
+#[test]
+fn add_same_uncompressed_moves_to_later_chunk() {
+    // Go: the stream header or a skippable chunk at an offset is followed by its block.
+    let mut idx = Index::default();
+    idx.reset(1 << 20);
+    idx.add(0, 0).unwrap();
+    idx.add(10, 0).unwrap();
+    idx.add(5000, 1 << 20).unwrap();
+    idx.add(5100, 1 << 20).unwrap();
+    let got: Vec<(u64, u64)> = idx
+        .offsets
+        .iter()
+        .map(|p| (p.compressed, p.uncompressed))
+        .collect();
+    assert_eq!(got, [(10, 0), (5100, 1 << 20)]);
 }
 
 #[test]
@@ -989,4 +1015,32 @@ fn append_to_rejects_total_beyond_i64_range() {
     // Known-good totals still encode.
     buf.clear();
     assert!(idx.append_to(&mut buf, Some(0), Some(0)).is_ok());
+}
+
+/// Ports `TestIndexMaxEntries`, without Go's reference loader: an index with 65536 entries,
+/// the maximum, loads, and one with more doesn't.
+#[test]
+#[cfg_attr(miri, ignore = "65536 index entries are slow under miri")]
+fn index_max_entries() {
+    const EST: i64 = 1 << 20;
+    let index = |n: usize| {
+        let mut b = Vec::new();
+        super::put_varint(&mut b, n as i64 * EST);
+        super::put_varint(&mut b, -1);
+        super::put_varint(&mut b, EST);
+        super::put_varint(&mut b, n as i64);
+        // No uncompressed offsets, and compressed offsets as zero deltas from the estimate.
+        b.resize(b.len() + 1 + n, 0);
+        restore_index_headers(&b)
+    };
+    for n in [1 << 16, (1 << 16) + 1] {
+        let ok = n <= 1 << 16;
+        let mut i = Index::default();
+        let res = i.load(&index(n)).map(drop);
+        assert!(
+            res.is_ok() == ok && (!ok || i.offsets().len() == n),
+            "{n} entries: got {} offsets, {res:?}",
+            i.offsets().len()
+        );
+    }
 }

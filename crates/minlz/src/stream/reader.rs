@@ -22,17 +22,18 @@
 
 use std::io::{self, BufRead, Read};
 
-use crate::block;
+use crate::Error as BlockError;
+use crate::block::{self, simd};
 
-use super::crc::masked_crc32c;
+use super::crc::{crc32c_update, mask_crc32c, masked_crc32c};
 use super::error::{Error, Result};
 use super::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
-    CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_STREAM_IDENTIFIER,
+    CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_MINLZ_SIMD, CHUNK_TYPE_STREAM_IDENTIFIER,
     CHUNK_TYPE_UNCOMPRESSED_DATA, MAGIC_BODY, MAGIC_BODY_LEN, MAX_BLOCK_SIZE,
     MAX_NON_SKIPPABLE_CHUNK, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64,
-    MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK, block_size_from_indicator, get_uvarint,
-    read_chunk_len, read_u32_le,
+    MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, STREAM_FLAG_SIMD,
+    block_size_from_indicator, get_uvarint, read_chunk_len, read_u32_le,
 };
 
 /// Callback invoked when a user-defined chunk (`0x80..=0xfd`) is encountered.
@@ -98,13 +99,14 @@ impl ReaderBuilder {
     ///
     /// Mirrors Go's `ReaderIgnoreStreamIdentifier`.  Also disables EOF
     /// total-size validation.
+    /// SIMD chunks are accepted until a stream identifier is read.
     pub fn ignore_stream_id(mut self) -> Self {
         self.ignore_stream_id = true;
         self
     }
 
-    /// Skip CRC32C validation on every chunk.  Faster, but invalid streams
-    /// may decode to garbage.
+    /// Skip CRC32C and XXH3 hash calculation and validation on every chunk.
+    /// Faster, but invalid streams may decode to garbage.
     pub fn ignore_crc(mut self) -> Self {
         self.ignore_crc = true;
         self
@@ -164,6 +166,8 @@ pub struct Reader<R> {
     /// Negotiated ceiling — `min(max_block_user, indicator-derived value)`.
     pub(super) max_block: usize,
     pub(super) header_read: bool,
+    /// The stream identifier allows SIMD chunks.
+    pub(super) simd: bool,
     pub(super) expect_eof: bool,
     pub(super) ignore_stream_id: bool,
     pub(super) ignore_crc: bool,
@@ -191,6 +195,7 @@ impl<R: Read> Reader<R> {
             max_block_user: b.max_block_size,
             max_block: b.max_block_size,
             header_read: b.ignore_stream_id,
+            simd: b.ignore_stream_id,
             expect_eof: false,
             ignore_stream_id: b.ignore_stream_id,
             ignore_crc: b.ignore_crc,
@@ -209,6 +214,7 @@ impl<R: Read> Reader<R> {
         self.block_start = 0;
         self.max_block = self.max_block_user;
         self.header_read = self.ignore_stream_id;
+        self.simd = self.ignore_stream_id;
         self.expect_eof = false;
         self.err = None;
     }
@@ -281,6 +287,7 @@ impl<R: Read> Reader<R> {
                 CHUNK_TYPE_MINLZ_COMPRESSED_DATA | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC => {
                     self.skip_compressed_or_decode(chunk_type, chunk_len, &mut n)
                 }
+                CHUNK_TYPE_MINLZ_SIMD => self.skip_simd_or_decode(chunk_len, &mut n),
                 CHUNK_TYPE_UNCOMPRESSED_DATA => self.skip_uncompressed_or_decode(chunk_len, &mut n),
                 // A concatenated stream may follow; the next header read
                 // reports UnexpectedEof if none does.
@@ -314,10 +321,11 @@ impl<R: Read> Reader<R> {
         read_exact_or_corrupt(&mut self.r, &mut self.buf[..chunk_len])?;
         let checksum = read_u32_le(&self.buf[..CHECKSUM_SIZE]);
         let body = &self.buf[CHECKSUM_SIZE..chunk_len];
-        let dlen = block::decoded_len_chunk_body(body)?;
+        let (dlen, _) = min_lz_chunk_len(body)?;
         if dlen > self.max_block {
             return Err(Error::TooLarge);
         }
+        block::checked_chunk_body(body)?;
         if (dlen as u64) > *n {
             // Need decode for the partial block.
             self.block_start += self.decoded.len() as u64;
@@ -345,6 +353,24 @@ impl<R: Read> Reader<R> {
         Ok(())
     }
 
+    /// SIMD chunk dispatch for [`Reader::skip`], as
+    /// [`skip_compressed_or_decode`](Self::skip_compressed_or_decode).
+    fn skip_simd_or_decode(&mut self, chunk_len: usize, n: &mut u64) -> Result<()> {
+        let (dlen, block) = self.read_simd_chunk(chunk_len)?;
+        self.block_start += self.decoded.len() as u64;
+        if (dlen as u64) > *n {
+            self.decode_simd_chunk(chunk_len, dlen, block)?;
+            self.decoded_pos = *n as usize;
+            *n = 0;
+        } else {
+            self.block_start += dlen as u64;
+            self.decoded.clear();
+            self.decoded_pos = 0;
+            *n -= dlen as u64;
+        }
+        Ok(())
+    }
+
     /// Uncompressed data chunk dispatch for [`Reader::skip`].  Same
     /// shape as the compressed variant but with a 1:1 wire length.
     fn skip_uncompressed_or_decode(&mut self, chunk_len: usize, n: &mut u64) -> Result<()> {
@@ -361,12 +387,8 @@ impl<R: Read> Reader<R> {
             self.ensure_buf(CHECKSUM_SIZE)?;
             read_exact_or_corrupt(&mut self.r, &mut self.buf[..CHECKSUM_SIZE])?;
             let checksum = read_u32_le(&self.buf[..CHECKSUM_SIZE]);
-            self.decoded.clear();
             self.decoded.resize(n2, 0);
-            read_exact_or_corrupt(&mut self.r, &mut self.decoded[..])?;
-            if !self.ignore_crc && masked_crc32c(&self.decoded) != checksum {
-                return Err(Error::Crc);
-            }
+            read_uncompressed(&mut self.r, &mut self.decoded, checksum, self.ignore_crc)?;
             self.decoded_pos = *n as usize;
             *n = 0;
         } else {
@@ -449,6 +471,7 @@ impl<R: Read> Reader<R> {
                 CHUNK_TYPE_MINLZ_COMPRESSED_DATA | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC => {
                     self.handle_compressed_chunk(chunk_type, chunk_len)
                 }
+                CHUNK_TYPE_MINLZ_SIMD => self.handle_simd_chunk(chunk_len),
                 CHUNK_TYPE_UNCOMPRESSED_DATA => self.handle_uncompressed_chunk(chunk_len),
                 CHUNK_TYPE_EOF => self.handle_eof_chunk(chunk_len),
                 CHUNK_TYPE_STREAM_IDENTIFIER => self.handle_stream_identifier(chunk_len),
@@ -519,7 +542,7 @@ impl<R: Read> Reader<R> {
 
         // Body wire format is `[varint(dlen), compressed]` — the leading
         // `0` marker is only present in the standalone block format.
-        let dlen = block::decoded_len_chunk_body(body)?;
+        let (dlen, _) = min_lz_chunk_len(body)?;
         if dlen > self.max_block {
             return Err(Error::TooLarge);
         }
@@ -543,6 +566,40 @@ impl<R: Read> Reader<R> {
         Ok(())
     }
 
+    fn handle_simd_chunk(&mut self, chunk_len: usize) -> Result<()> {
+        self.block_start += self.decoded.len() as u64;
+        let (dlen, block) = self.read_simd_chunk(chunk_len)?;
+        self.decode_simd_chunk(chunk_len, dlen, block)
+    }
+
+    /// Reads a SIMD chunk of `chunk_len` bytes to `self.buf`, and returns its decoded size and
+    /// the offset of its SIMD block.
+    fn read_simd_chunk(&mut self, chunk_len: usize) -> Result<(usize, usize)> {
+        if !self.simd {
+            return Err(Error::Corrupt);
+        }
+        self.ensure_buf(chunk_len)?;
+        read_exact_or_corrupt(&mut self.r, &mut self.buf[..chunk_len])?;
+        let (dlen, block) = simd_chunk_header(&self.buf[..chunk_len], self.max_block)?;
+        Ok((dlen, chunk_len - block.len()))
+    }
+
+    /// Decodes the SIMD chunk that [`read_simd_chunk`](Self::read_simd_chunk) read, to
+    /// `self.decoded`.
+    fn decode_simd_chunk(&mut self, chunk_len: usize, dlen: usize, block: usize) -> Result<()> {
+        // The decoder writes every byte, so a reused buffer needs no clearing.
+        self.decoded.resize(dlen, 0);
+        self.decoded_pos = 0;
+        let payload = &self.buf[..chunk_len];
+        decode_simd_chunk(
+            &mut self.decoded,
+            payload,
+            &payload[block..],
+            self.ignore_crc,
+        )
+        .inspect_err(|_| self.decoded.clear())
+    }
+
     fn handle_uncompressed_chunk(&mut self, chunk_len: usize) -> Result<()> {
         if chunk_len < CHECKSUM_SIZE {
             return Err(Error::Corrupt);
@@ -558,13 +615,9 @@ impl<R: Read> Reader<R> {
         read_exact_or_corrupt(&mut self.r, &mut self.buf[..CHECKSUM_SIZE])?;
         let checksum = read_u32_le(&self.buf[..CHECKSUM_SIZE]);
 
-        self.decoded.clear();
+        // The read overwrites the n bytes; errors are sticky, so a failed read exposes nothing.
         self.decoded.resize(n, 0);
-        read_exact_or_corrupt(&mut self.r, &mut self.decoded[..])?;
-
-        if !self.ignore_crc && masked_crc32c(&self.decoded) != checksum {
-            return Err(Error::Crc);
-        }
+        read_uncompressed(&mut self.r, &mut self.decoded, checksum, self.ignore_crc)?;
         self.decoded_pos = 0;
         Ok(())
     }
@@ -581,8 +634,7 @@ impl<R: Read> Reader<R> {
                 if n != chunk_len {
                     return Err(Error::Corrupt);
                 }
-                let actual = self.block_start + self.decoded.len() as u64;
-                if want_size != actual {
+                if want_size != self.stream_size() {
                     return Err(Error::Corrupt);
                 }
             }
@@ -590,6 +642,16 @@ impl<R: Read> Reader<R> {
         self.expect_eof = false;
         self.header_read = false;
         Ok(())
+    }
+
+    /// The decoded size of the current stream, which an EOF chunk must match.
+    /// An EOF chunk with no stream identifier since the last one is an empty
+    /// stream.
+    fn stream_size(&self) -> u64 {
+        if !self.header_read {
+            return 0;
+        }
+        self.block_start + self.decoded.len() as u64
     }
 
     fn handle_stream_identifier(&mut self, chunk_len: usize) -> Result<()> {
@@ -603,9 +665,11 @@ impl<R: Read> Reader<R> {
             return Err(Error::Unsupported);
         }
         let indicator = tmp[MAGIC_BODY_LEN - 1];
-        if indicator & 0xc0 != 0 {
+        // Bit 7 must be 0.
+        if indicator & 0x80 != 0 {
             return Err(Error::Corrupt);
         }
+        self.simd = indicator & STREAM_FLAG_SIMD != 0;
         let new_max = block_size_from_indicator(indicator).ok_or(Error::Corrupt)?;
         if new_max > self.max_block_user {
             return Err(Error::TooLarge);
@@ -680,6 +744,52 @@ impl<R: Read> Reader<R> {
 
 // -------------------- helpers --------------------
 
+/// Returns the decoded size and the header length of the block of a MinLZ chunk (0x02, 0x03)
+/// (Go `minLZChunkLen`). The chunk type fixes the block type, so other types are corrupt, not
+/// unsupported as for the block API.
+pub(super) fn min_lz_chunk_len(block: &[u8]) -> Result<(usize, usize)> {
+    match get_uvarint(block) {
+        Some((v, n)) if v >> 24 == 0 => Ok((v as usize, n)),
+        _ => Err(Error::Corrupt),
+    }
+}
+
+/// Returns the decoded size and the SIMD block of the payload of a SIMD chunk
+/// (Go `simdChunkHeader`).
+pub(crate) fn simd_chunk_header(payload: &[u8], max_block: usize) -> Result<(usize, &[u8])> {
+    let Some(block) = payload.get(SIMD_HASH_SIZE..) else {
+        return Err(Error::Corrupt);
+    };
+    // As for min_lz_chunk_len, other block types are corrupt.
+    if get_uvarint(block).map_or(0, |(v, _)| v >> 24) != simd::BLOCK_TYPE {
+        return Err(Error::Corrupt);
+    }
+    let (n, block) = simd::simd_header(block).map_err(|e| match e {
+        BlockError::TooLarge => Error::TooLarge,
+        _ => Error::Corrupt,
+    })?;
+    if n > max_block {
+        return Err(Error::TooLarge);
+    }
+    Ok((n, block))
+}
+
+/// Decodes `block`, the SIMD block of `payload`, to `dst`, which must have the decoded size
+/// (Go `decodeSIMDChunk`). Unless `ignore_hash` is set, the decoded data must match the hash
+/// of `payload`.
+pub(super) fn decode_simd_chunk(
+    dst: &mut [u8],
+    payload: &[u8],
+    block: &[u8],
+    ignore_hash: bool,
+) -> Result<()> {
+    let h = simd::decode_simd_hash(dst, block, !ignore_hash)?;
+    if !ignore_hash && payload[..SIMD_HASH_SIZE] != h.to_le_bytes() {
+        return Err(Error::Crc);
+    }
+    Ok(())
+}
+
 enum ReadOutcome {
     Ok,
     Eof,
@@ -724,6 +834,32 @@ fn strip_dlen_varint(body: &[u8]) -> Result<&[u8]> {
 /// keep one copy as the sticky error and return another to the caller.
 fn clone_io_err(e: &io::Error) -> io::Error {
     io::Error::new(e.kind(), e.to_string())
+}
+
+/// Reads the data of an uncompressed chunk to `buf` and checks it against `checksum` unless
+/// `ignore_crc` (Go `readFullCRC`). It reads and checksums a piece at a time, while the piece is in
+/// cache: one copy of a 4 MiB block took 1.6x as long as the pieces. Pieces are 255 KiB, not Go's
+/// 32 KiB: each piece costs a read call, a syscall on an unbuffered `File` (30 KiB pieces made
+/// decoding incompressible data from one 1.35x slower), and a multiple of the CRC-32C loop's 3 KiB
+/// step avoids a remainder, which it runs 3x slower. A `BufReader` with more capacity than a piece
+/// copies each piece through its buffer.
+pub(super) fn read_uncompressed<R: Read>(
+    r: &mut R,
+    buf: &mut [u8],
+    checksum: u32,
+    ignore_crc: bool,
+) -> Result<()> {
+    let mut c = 0;
+    for p in buf.chunks_mut(255 << 10) {
+        read_exact_or_corrupt(r, p)?;
+        if !ignore_crc {
+            c = crc32c_update(c, p);
+        }
+    }
+    if !ignore_crc && mask_crc32c(c) != checksum {
+        return Err(Error::Crc);
+    }
+    Ok(())
 }
 
 /// `Read::read_exact` mapped to stream errors: `UnexpectedEof` becomes

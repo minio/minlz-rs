@@ -89,9 +89,15 @@ fn decode_concurrent_matches_st_for_st_encoded() {
 
 #[test]
 fn cross_concurrency_round_trips() {
-    let payload: Vec<u8> = (0..64 * 1024).map(|i| (i & 0xff) as u8).collect();
-    for &enc_n in &[1, 2, 4, 8] {
-        for &dec_n in &[1, 2, 4, 8] {
+    // Miri: four blocks, and one worker or fewer workers than blocks.
+    let (size, ns): (usize, &[usize]) = if cfg!(miri) {
+        (16 << 10, &[1, 3])
+    } else {
+        (64 << 10, &[1, 2, 4, 8])
+    };
+    let payload: Vec<u8> = (0..size).map(|i| (i & 0xff) as u8).collect();
+    for &enc_n in ns {
+        for &dec_n in ns {
             let stream = encode_mt(&payload, enc_n, Some(4 << 10));
             let mut reader = Reader::new(Cursor::new(&stream));
             let ConcurrentDecode {

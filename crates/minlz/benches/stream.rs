@@ -75,9 +75,11 @@ fn expand(src: &[u8], n: usize) -> Vec<u8> {
 
 fn level_label(l: Level) -> &'static str {
     match l {
+        Level::SuperFast => "L-1",
         Level::Fastest => "L1",
         Level::Balanced => "L2",
         Level::Smallest => "L3",
+        _ => "SIMD",
     }
 }
 
@@ -90,7 +92,12 @@ fn encode_stream(src: &[u8], level: Level) -> Vec<u8> {
 fn bench_encode(c: &mut Criterion) {
     let twain = load_twain();
     let sizes: &[(usize, &str)] = &[(100_000, "1e5"), (1_000_000, "1e6")];
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let levels = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ];
 
     let mut g = c.benchmark_group("stream_encode");
     g.measurement_time(Duration::from_secs(8));
@@ -115,7 +122,12 @@ fn bench_encode(c: &mut Criterion) {
 fn bench_decode(c: &mut Criterion) {
     let twain = load_twain();
     let sizes: &[(usize, &str)] = &[(100_000, "1e5"), (1_000_000, "1e6")];
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let levels = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ];
 
     let mut g = c.benchmark_group("stream_decode");
     g.measurement_time(Duration::from_secs(8));
@@ -143,7 +155,7 @@ fn bench_encode_mt(c: &mut Criterion) {
     // MT shines on larger inputs.  5e6 ≈ a few blocks per thread on
     // 8-core, 5e7 ≈ many blocks per thread.
     let sizes: &[(usize, &str)] = &[(5_000_000, "5e6"), (50_000_000, "5e7")];
-    let levels = [Level::Fastest, Level::Balanced];
+    let levels = [Level::SuperFast, Level::Fastest, Level::Balanced];
     let mut g = c.benchmark_group("stream_encode_mt");
     g.measurement_time(Duration::from_secs(8));
     g.warm_up_time(Duration::from_secs(2));
@@ -174,7 +186,7 @@ fn bench_encode_mt(c: &mut Criterion) {
 fn bench_decode_mt(c: &mut Criterion) {
     let twain = load_twain();
     let sizes: &[(usize, &str)] = &[(5_000_000, "5e6"), (50_000_000, "5e7")];
-    let levels = [Level::Fastest, Level::Balanced];
+    let levels = [Level::SuperFast, Level::Fastest, Level::Balanced];
     let mut g = c.benchmark_group("stream_decode_mt");
     g.measurement_time(Duration::from_secs(8));
     g.warm_up_time(Duration::from_secs(2));

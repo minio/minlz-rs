@@ -101,13 +101,22 @@ const TWAIN_SIZES: &[(usize, &str)] = &[
     (1_000_000, "1e6"),
 ];
 
-fn level_label(l: Level) -> &'static str {
-    match l {
-        Level::Fastest => "L1",
-        Level::Balanced => "L2",
-        Level::Smallest => "L3",
-    }
+fn level_label(l: Level) -> String {
+    format!("L{}", i32::from(l))
 }
+
+/// The levels of Go's `benchEncode` plus SuperFast: the classic levels, then the SIMD levels 4
+/// to 7.
+const ENCODE_LEVELS: [Level; 8] = [
+    Level::SuperFast,
+    Level::Fastest,
+    Level::Balanced,
+    Level::Smallest,
+    Level::SuperFastSimd,
+    Level::FastestSimd,
+    Level::BalancedSimd,
+    Level::SmallestSimd,
+];
 
 /// Canonical write location for downloaded bench data.  Honours
 /// `MINLZ_TESTDATA` for the same override convention used elsewhere.
@@ -124,10 +133,10 @@ fn bench_dir() -> PathBuf {
 fn ensure_bench_file(filename: &str) -> std::io::Result<PathBuf> {
     let dir = bench_dir();
     let path = dir.join(filename);
-    if let Ok(m) = std::fs::metadata(&path) {
-        if m.len() > 0 {
-            return Ok(path);
-        }
+    if let Ok(m) = std::fs::metadata(&path)
+        && m.len() > 0
+    {
+        return Ok(path);
     }
     std::fs::create_dir_all(&dir)?;
     let url = format!("{BENCH_URL}{filename}");
@@ -248,7 +257,7 @@ const SNAPPY_FILES: &[SnappyFile] = &[
 
 fn bench_encode(c: &mut Criterion) {
     let twain = load_twain();
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let levels = ENCODE_LEVELS;
 
     let mut g = c.benchmark_group("twain_encode");
     g.measurement_time(Duration::from_secs(8));
@@ -271,7 +280,12 @@ fn bench_encode(c: &mut Criterion) {
 
 fn bench_decode(c: &mut Criterion) {
     let twain = load_twain();
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let levels = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ];
 
     let mut g = c.benchmark_group("twain_decode");
     g.measurement_time(Duration::from_secs(8));
@@ -299,7 +313,6 @@ fn bench_decode(c: &mut Criterion) {
 /// size-limited entries (`*_128b`, `*_200b`, …) cover small blocks, where
 /// per-call setup costs dominate.
 fn bench_snappy_encode(c: &mut Criterion) {
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
     let mut g = c.benchmark_group("snappy_encode");
     g.measurement_time(Duration::from_secs(2));
     g.warm_up_time(Duration::from_secs(1));
@@ -309,7 +322,7 @@ fn bench_snappy_encode(c: &mut Criterion) {
             data.truncate(tf.size_limit);
         }
         g.throughput(Throughput::Bytes(data.len() as u64));
-        for &level in &levels {
+        for level in ENCODE_LEVELS {
             let id = BenchmarkId::new(tf.label, level_label(level));
             g.bench_with_input(id, &data, |b, data| {
                 let mut buf = Vec::with_capacity(data.len() + 16);
@@ -325,7 +338,12 @@ fn bench_snappy_encode(c: &mut Criterion) {
 /// Per-(file, level) decode bench mirroring Go's
 /// `BenchmarkDecodeBlockSingle` over the Snappy testdata corpus.
 fn bench_snappy_decode(c: &mut Criterion) {
-    let levels = [Level::Fastest, Level::Balanced, Level::Smallest];
+    let levels = [
+        Level::SuperFast,
+        Level::Fastest,
+        Level::Balanced,
+        Level::Smallest,
+    ];
     let mut g = c.benchmark_group("snappy_decode");
     g.measurement_time(Duration::from_secs(2));
     g.warm_up_time(Duration::from_secs(1));
@@ -350,11 +368,69 @@ fn bench_snappy_decode(c: &mut Criterion) {
     g.finish();
 }
 
+/// The SIMD levels: Go's 4-7 and the delta-literal variants 260-262.
+const SIMD_LEVELS: [Level; 7] = [
+    Level::SuperFastSimd,
+    Level::FastestSimd,
+    Level::BalancedSimd,
+    Level::SmallestSimd,
+    Level::SuperFastSimdDelta,
+    Level::FastestSimdDelta,
+    Level::BalancedSimdDelta,
+];
+
+/// SIMD block decode of 1-4 MB blocks at every SIMD level, from the Rust encoder (byte-identical
+/// to Go's): Twain as [`expand`]ed for Go's `BenchmarkTwainDecode1eN`, and the files of the Snappy
+/// corpus concatenated, without its truncated cases (text, HTML, URLs, protobuf, PDF, JPEG).
+fn bench_simd_decode(c: &mut Criterion) {
+    let twain = load_twain();
+    let mut corpus = Vec::new();
+    for f in [
+        "html",
+        "urls.10K",
+        "fireworks.jpeg",
+        "paper-100k.pdf",
+        "html_x_4",
+        "alice29.txt",
+        "asyoulik.txt",
+        "lcet10.txt",
+        "plrabn12.txt",
+        "geo.protodata",
+        "kppkn.gtb",
+    ] {
+        corpus.extend_from_slice(&load_bench_file(f));
+    }
+    let inputs = [
+        ("twain-1e6", expand(&twain, 1_000_000)),
+        ("twain-4e6", expand(&twain, 4_000_000)),
+        ("corpus", corpus),
+    ];
+    let mut g = c.benchmark_group("simd_decode");
+    g.measurement_time(Duration::from_secs(4));
+    g.warm_up_time(Duration::from_secs(1));
+    for (name, src) in &inputs {
+        g.throughput(Throughput::Bytes(src.len() as u64));
+        for level in SIMD_LEVELS {
+            let mut enc = Vec::new();
+            encode(&mut enc, src, level).expect("encode for bench prep");
+            let id = BenchmarkId::new(*name, level_label(level));
+            g.bench_with_input(id, &enc, |b, enc| {
+                let mut buf = Vec::with_capacity(src.len());
+                b.iter(|| {
+                    decode(&mut buf, enc).expect("decode");
+                });
+            });
+        }
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_encode,
     bench_decode,
     bench_snappy_encode,
-    bench_snappy_decode
+    bench_snappy_decode,
+    bench_simd_decode
 );
 criterion_main!(benches);

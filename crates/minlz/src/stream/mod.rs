@@ -24,6 +24,16 @@
 //!
 //! Block search tables (`SPEC.md` §4.13) are not implemented in this
 //! crate.
+//!
+//! # SIMD chunks
+//!
+//! At the SIMD [`Level`](crate::Level)s ([SIMD blocks](crate::block#simd-blocks)) the writers
+//! store SIMD blocks as chunk type 0x10 (`SPEC.md` §4.5B). Instead of a CRC32C, the chunk is
+//! checked with an XXH3-64 hash of the uncompressed data; [`ReaderBuilder::ignore_crc`] skips
+//! both checks. A stream written at a SIMD level sets a flag in its stream identifier, so
+//! decoders without SIMD support reject the stream at once, instead of failing at the first SIMD
+//! chunk. [`Reader`] rejects SIMD chunks in streams without the flag. Blocks that don't compress
+//! are stored uncompressed, as at the other levels.
 
 mod crc;
 mod error;
@@ -71,6 +81,7 @@ pub use format::{
 };
 pub use mt_reader::ConcurrentDecode;
 pub use mt_writer::{MtWriter, MtWriterBuilder};
+pub(crate) use reader::simd_chunk_header;
 pub use reader::{Reader, ReaderBuilder, UserChunkCb};
 pub use seek::ReadSeeker;
 pub use writer::{Writer, WriterBuilder, Written};

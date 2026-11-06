@@ -20,8 +20,6 @@
 //! `u64`.  Dictionary support is intentionally omitted per the project
 //! rules — there is no `dict` parameter and no dictionary lookup paths.
 
-use std::cell::RefCell;
-
 use super::emit::{
     emit_copy, emit_copy_lits2, emit_copy_lits3, emit_copy_size, emit_literal, emit_literal_size_n,
     emit_repeat, emit_repeat_size, encode_copy2,
@@ -32,6 +30,7 @@ use super::format::{
 };
 use super::hash::{hash4, hash8};
 use super::load_store::{load32, load64};
+use super::table_pool::{self, U64_18, U64_20};
 
 const INPUT_MARGIN_L3: usize = 8 + 2;
 const L_TABLE_BITS: u32 = 20;
@@ -39,31 +38,6 @@ const L_TABLE_SIZE: usize = 1 << L_TABLE_BITS;
 const S_TABLE_BITS: u32 = 18;
 const S_TABLE_SIZE: usize = 1 << S_TABLE_BITS;
 const MAX_SKIP: usize = 64;
-
-thread_local! {
-    static L_TABLE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    static S_TABLE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-}
-
-fn with_tables<R>(f: impl FnOnce(&mut [u64], &mut [u64]) -> R) -> R {
-    L_TABLE.with(|lcell| {
-        S_TABLE.with(|scell| {
-            let mut lt = lcell.borrow_mut();
-            let mut st = scell.borrow_mut();
-            if lt.len() < L_TABLE_SIZE {
-                lt.resize(L_TABLE_SIZE, 0);
-            } else {
-                lt.iter_mut().for_each(|x| *x = 0);
-            }
-            if st.len() < S_TABLE_SIZE {
-                st.resize(S_TABLE_SIZE, 0);
-            } else {
-                st.iter_mut().for_each(|x| *x = 0);
-            }
-            f(&mut lt[..L_TABLE_SIZE], &mut st[..S_TABLE_SIZE])
-        })
-    })
-}
 
 #[inline(always)]
 fn get_cur(x: u64) -> usize {
@@ -97,10 +71,21 @@ pub(super) fn encode_block(dst: &mut [u8], src: &[u8]) -> usize {
     if src.len() < MIN_NON_LITERAL_BLOCK_SIZE {
         return 0;
     }
-    with_tables(|l_table, s_table| inner(dst, src, l_table, s_table))
+    // The SIMD Smallest parser shares the tables (Go's encBestLPool and encBestSPool).
+    let mut l_table = table_pool::get(&U64_20);
+    let mut s_table = table_pool::get(&U64_18);
+    let n = inner(dst, src, &mut l_table, &mut s_table);
+    table_pool::put(&U64_20, l_table);
+    table_pool::put(&U64_18, s_table);
+    n
 }
 
-fn inner(dst: &mut [u8], src: &[u8], l_table: &mut [u64], s_table: &mut [u64]) -> usize {
+fn inner(
+    dst: &mut [u8],
+    src: &[u8],
+    l_table: &mut [u64; L_TABLE_SIZE],
+    s_table: &mut [u64; S_TABLE_SIZE],
+) -> usize {
     let s_limit = src.len() - INPUT_MARGIN_L3;
     let dst_limit = src.len() - 5;
 
@@ -342,7 +327,7 @@ fn inner(dst: &mut [u8], src: &[u8], l_table: &mut [u64], s_table: &mut [u64]) -
                 const SKIP_BEGIN: usize = 2;
                 const SKIP_END: usize = 1;
                 let s_at = best.s + best.length - SKIP_END;
-                if s_at < s_limit && best.length > SKIP_BEGIN + SKIP_END {
+                if s_at < s_limit {
                     let s_back = best.s + SKIP_BEGIN - SKIP_END;
                     let back_l = best.length - SKIP_BEGIN;
                     if s_back + 8 <= src.len() && s_at + 8 <= src.len() {
@@ -351,71 +336,71 @@ fn inner(dst: &mut [u8], src: &[u8], l_table: &mut [u64], s_table: &mut [u64]) -
                         let cv_at = unsafe { load64(src, s_at) };
                         let h_l = hash8(cv_at, L_TABLE_BITS) as usize;
                         let next = l_table[h_l];
-                        if let Some(check_at) = get_cur(next).checked_sub(back_l) {
-                            if check_at > 0 {
-                                best = best_of(
-                                    best,
-                                    match_at(
-                                        src,
-                                        check_at,
-                                        s_back,
-                                        cv_back as u32,
-                                        &best,
-                                        next_emit,
-                                        s_limit,
-                                    ),
-                                );
-                            }
+                        if let Some(check_at) = get_cur(next).checked_sub(back_l)
+                            && check_at > 0
+                        {
+                            best = best_of(
+                                best,
+                                match_at(
+                                    src,
+                                    check_at,
+                                    s_back,
+                                    cv_back as u32,
+                                    &best,
+                                    next_emit,
+                                    s_limit,
+                                ),
+                            );
                         }
-                        if let Some(check_at) = get_prev(next).checked_sub(back_l) {
-                            if check_at > 0 {
-                                best = best_of(
-                                    best,
-                                    match_at(
-                                        src,
-                                        check_at,
-                                        s_back,
-                                        cv_back as u32,
-                                        &best,
-                                        next_emit,
-                                        s_limit,
-                                    ),
-                                );
-                            }
+                        if let Some(check_at) = get_prev(next).checked_sub(back_l)
+                            && check_at > 0
+                        {
+                            best = best_of(
+                                best,
+                                match_at(
+                                    src,
+                                    check_at,
+                                    s_back,
+                                    cv_back as u32,
+                                    &best,
+                                    next_emit,
+                                    s_limit,
+                                ),
+                            );
                         }
                         let h_s = hash4(cv_at, S_TABLE_BITS) as usize;
                         let next_s_tbl = s_table[h_s];
-                        if let Some(check_at) = get_cur(next_s_tbl).checked_sub(back_l) {
-                            if check_at > 0 {
-                                best = best_of(
-                                    best,
-                                    match_at(
-                                        src,
-                                        check_at,
-                                        s_back,
-                                        cv_back as u32,
-                                        &best,
-                                        next_emit,
-                                        s_limit,
-                                    ),
-                                );
-                            }
+                        if let Some(check_at) = get_cur(next_s_tbl).checked_sub(back_l)
+                            && check_at > 0
+                        {
+                            best = best_of(
+                                best,
+                                match_at(
+                                    src,
+                                    check_at,
+                                    s_back,
+                                    cv_back as u32,
+                                    &best,
+                                    next_emit,
+                                    s_limit,
+                                ),
+                            );
                         }
-                        if let Some(check_at) = get_prev(next_s_tbl).checked_sub(back_l) {
-                            if check_at > 0 {
-                                best = best_of(
-                                    best,
-                                    match_at(
-                                        src,
-                                        check_at,
-                                        s_back,
-                                        cv_back as u32,
-                                        &best,
-                                        next_emit,
-                                        s_limit,
-                                    ),
-                                );
-                            }
+                        if let Some(check_at) = get_prev(next_s_tbl).checked_sub(back_l)
+                            && check_at > 0
+                        {
+                            best = best_of(
+                                best,
+                                match_at(
+                                    src,
+                                    check_at,
+                                    s_back,
+                                    cv_back as u32,
+                                    &best,
+                                    next_emit,
+                                    s_limit,
+                                ),
+                            );
                         }
                     }
                 }
@@ -461,8 +446,14 @@ fn inner(dst: &mut [u8], src: &[u8], l_table: &mut [u64], s_table: &mut [u64]) -
             continue;
         }
 
+        // A length one past an encoding border costs a byte, so those matches
+        // are shortened by one and the last byte is searched again.
         if best.rep {
             d += emit_literal(&mut dst[d..], &src[next_emit..base]);
+            if best.length == 30 {
+                best.length -= 1;
+                s_after -= 1;
+            }
             d += emit_repeat(&mut dst[d..], best.length);
         } else {
             let lits = &src[next_emit..base];
@@ -474,8 +465,13 @@ fn inner(dst: &mut [u8], src: &[u8], l_table: &mut [u64], s_table: &mut [u64]) -
                     if must_split_emit {
                         d += emit_literal(&mut dst[d..], lits);
                         if best.length > 18 && best.length <= 64 && offset >= 64 {
+                            // Size is equal. Prefer Copy2, since it decodes faster.
                             d += encode_copy2(&mut dst[d..], offset, best.length);
                         } else {
+                            if best.length == 19 {
+                                best.length -= 1;
+                                s_after -= 1;
+                            }
                             d += emit_copy(&mut dst[d..], offset, best.length);
                         }
                     } else if best.length > 11 {
@@ -486,17 +482,42 @@ fn inner(dst: &mut [u8], src: &[u8], l_table: &mut [u64], s_table: &mut [u64]) -
                     } else {
                         d += emit_copy_lits2(&mut dst[d..], lits, offset, best.length);
                     }
-                } else if lits.len() > MAX_COPY3_LITS {
-                    d += emit_literal(&mut dst[d..], lits);
-                    d += emit_copy(&mut dst[d..], offset, best.length);
                 } else {
-                    d += emit_copy_lits3(&mut dst[d..], lits, offset, best.length);
+                    if best.length == 65 {
+                        best.length -= 1;
+                        s_after -= 1;
+                    }
+                    if lits.len() > MAX_COPY3_LITS {
+                        d += emit_literal(&mut dst[d..], lits);
+                        d += emit_copy(&mut dst[d..], offset, best.length);
+                    } else {
+                        d += emit_copy_lits3(&mut dst[d..], lits, offset, best.length);
+                    }
                 }
-            } else if best.length > 18
-                && best.length <= 64
-                && (64..=MAX_COPY2_OFFSET).contains(&offset)
-            {
-                d += encode_copy2(&mut dst[d..], offset, best.length);
+            } else if best.length > 18 {
+                if offset <= MAX_COPY2_OFFSET {
+                    if best.length <= 64 && offset >= 64 {
+                        // Size is equal. Prefer Copy2, since it decodes faster.
+                        d += encode_copy2(&mut dst[d..], offset, best.length);
+                    } else {
+                        if offset <= MAX_COPY1_OFFSET {
+                            if best.length == 19 {
+                                best.length -= 1;
+                                s_after -= 1;
+                            }
+                        } else if best.length == 65 {
+                            best.length -= 1;
+                            s_after -= 1;
+                        }
+                        d += emit_copy(&mut dst[d..], offset, best.length);
+                    }
+                } else {
+                    if best.length == 65 {
+                        best.length -= 1;
+                        s_after -= 1;
+                    }
+                    d += emit_copy(&mut dst[d..], offset, best.length);
+                }
             } else {
                 d += emit_copy(&mut dst[d..], offset, best.length);
             }
@@ -576,7 +597,6 @@ fn match_at(
     if (best.length != 0 && best.s.wrapping_sub(best.offset) == s.wrapping_sub(offset))
         || s.saturating_sub(offset) >= MAX_COPY3_OFFSET
         || s <= offset
-        || offset == 0
         || offset + 4 > src.len()
     {
         return Match {
@@ -658,7 +678,7 @@ fn match_at_repeat(
     next_emit: usize,
     s_limit: usize,
 ) -> Match {
-    if best.rep || offset == 0 || s <= offset || offset + 3 > src.len() {
+    if best.rep || s <= offset || offset + 3 > src.len() {
         return Match {
             offset,
             s,

@@ -18,7 +18,7 @@ use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use minlz::Level;
+use minlz::{Level, cpu};
 
 #[derive(Debug)]
 pub struct Cli {
@@ -37,8 +37,16 @@ pub enum Subcommand {
 
 #[derive(Debug)]
 pub struct Options {
+    /// The level to write. After [`parse`] it is a SIMD level unless `--classic` is given,
+    /// and `None` only with `-0`.
     pub level: Option<Level>,
     pub uncompressed: bool,
+    /// `--classic`: write classic MinLZ blocks (Go `-classic`).
+    pub classic: bool,
+    /// `--simd.delta`: SIMD delta literals (Go `-simd.delta`).
+    pub simd_delta: bool,
+    /// `minlz::cpu` features turned off by the hidden `--avx2/--avx512/--neon=false`.
+    pub cpu_off: u32,
     pub block_size: Option<usize>,
     pub padding: Option<u32>,
     pub block: bool,
@@ -77,6 +85,9 @@ impl Default for Options {
         Self {
             level: None,
             uncompressed: false,
+            classic: false,
+            simd_delta: false,
+            cpu_off: 0,
             block_size: None,
             padding: None,
             block: false,
@@ -143,12 +154,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
             opts.help = true;
             continue;
         }
-        if sub.is_none() && !s.starts_with('-') {
-            if let Some(parsed) = parse_subcommand(&s) {
-                sub = Some(parsed);
-                alias = subcommand_alias(&s);
-                continue;
-            }
+        if sub.is_none()
+            && !s.starts_with('-')
+            && let Some(parsed) = parse_subcommand(&s)
+        {
+            sub = Some(parsed);
+            alias = subcommand_alias(&s);
+            continue;
         }
         if s == "-" {
             // stdin/stdout sentinel; we still record it so we know it's
@@ -200,6 +212,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     if opts.uncompressed && opts.level.is_some() {
         return Err(ParseError::ConflictingLevels);
     }
+    let level = write_level(&opts)?;
+    if !opts.uncompressed {
+        opts.level = Some(level);
+    }
     if subcommand == Subcommand::Bench && opts.bench_n.is_none() {
         opts.bench_n = Some(5);
     }
@@ -250,6 +266,52 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     })
 }
 
+/// The level Go's `mainCompress` writes: SIMD blocks unless `--classic`.
+fn write_level(opts: &Options) -> Result<Level, ParseError> {
+    let level = opts.level.unwrap_or(Level::Balanced);
+    if opts.simd_delta && (opts.classic || opts.uncompressed || level == Level::Smallest) {
+        return Err(ParseError::InvalidValue(
+            "--simd.delta".into(),
+            "cannot be used with --classic, -0 or -3".into(),
+        ));
+    }
+    if opts.classic {
+        return Ok(level);
+    }
+    Ok(match (level, opts.simd_delta) {
+        (Level::SuperFast, false) => Level::SuperFastSimd,
+        (Level::SuperFast, true) => Level::SuperFastSimdDelta,
+        (Level::Fastest, false) => Level::FastestSimd,
+        (Level::Fastest, true) => Level::FastestSimdDelta,
+        (Level::Balanced, false) => Level::BalancedSimd,
+        (Level::Balanced, true) => Level::BalancedSimdDelta,
+        (Level::Smallest, _) => Level::SmallestSimd,
+        (l, _) => l,
+    })
+}
+
+/// The `minlz::cpu` features `--{name}=false` turns off. As in Go, AVX-512 needs AVX2, and
+/// the pivco kernels follow the exec tiers.
+fn cpu_mask(name: &str) -> u32 {
+    const AVX512: u32 = cpu::AVX512 | cpu::PIVCO_AVX512 | cpu::PIVCO_HIST_AVX512;
+    match name {
+        "avx2" => cpu::AVX2 | cpu::PIVCO_AVX2 | AVX512,
+        "avx512" => AVX512,
+        _ => cpu::NEON,
+    }
+}
+
+fn parse_bool(name: &str, val: &str) -> Result<bool, ParseError> {
+    match val {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(ParseError::InvalidValue(
+            format!("--{name}"),
+            val.to_string(),
+        )),
+    }
+}
+
 fn parse_subcommand(s: &str) -> Option<Subcommand> {
     match s {
         "c" | "compress" => Some(Subcommand::Compress),
@@ -295,6 +357,11 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
         "help" => opts.help = true,
         "no-index" => opts.index = false,
         "follow" => opts.follow = true,
+        "xfast" => opts.level = Some(Level::SuperFast),
+        "classic" => opts.classic = true,
+        "simd.delta" => opts.simd_delta = true,
+        // The CPU toggles may only turn features off.
+        "avx2" | "avx512" | "neon" => {}
         _ => {
             // Long flags that take a separate argument.
             let val = it
@@ -340,11 +407,14 @@ fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), Parse
                 ParseError::InvalidValue(format!("--{name}"), "must be ≥ 1".into())
             })?);
         }
-        "index" => match val {
-            "true" | "1" | "yes" => opts.index = true,
-            "false" | "0" | "no" => opts.index = false,
-            _ => return Err(ParseError::InvalidValue("--index".into(), val.to_string())),
-        },
+        "index" => opts.index = parse_bool(name, val)?,
+        "classic" => opts.classic = parse_bool(name, val)?,
+        "simd.delta" => opts.simd_delta = parse_bool(name, val)?,
+        "avx2" | "avx512" | "neon" => {
+            if !parse_bool(name, val)? {
+                opts.cpu_off |= cpu_mask(name);
+            }
+        }
         "offset" => {
             let (n, nl) = parse_size_with_nl(val)
                 .map_err(|_| ParseError::InvalidValue("--offset".into(), val.to_string()))?;
@@ -489,18 +559,76 @@ mod tests {
 
     #[test]
     fn level_flags() {
-        let cli = parse_argv(&["-1", "x"]).unwrap();
+        let cli = parse_argv(&["-xfast", "--classic", "x"]).unwrap();
+        assert_eq!(cli.options.level, Some(Level::SuperFast));
+        let cli = parse_argv(&["-1", "--classic", "x"]).unwrap();
         assert_eq!(cli.options.level, Some(Level::Fastest));
-        let cli = parse_argv(&["-3", "x"]).unwrap();
+        let cli = parse_argv(&["-3", "-classic", "x"]).unwrap();
         assert_eq!(cli.options.level, Some(Level::Smallest));
-        let cli = parse_argv(&["--level", "2", "x"]).unwrap();
+        let cli = parse_argv(&["--level", "2", "--classic=true", "x"]).unwrap();
         assert_eq!(cli.options.level, Some(Level::Balanced));
+        let cli = parse_argv(&["--classic", "x"]).unwrap();
+        assert_eq!(cli.options.level, Some(Level::Balanced));
+    }
+
+    #[test]
+    fn simd_levels_by_default() {
+        for (args, want) in [
+            (&[][..], Level::BalancedSimd),
+            (&["-xfast"], Level::SuperFastSimd),
+            (&["--xfast"], Level::SuperFastSimd),
+            (&["-1"], Level::FastestSimd),
+            (&["-2"], Level::BalancedSimd),
+            (&["-3"], Level::SmallestSimd),
+            (&["--level", "1"], Level::FastestSimd),
+            (&["--classic=false", "-1"], Level::FastestSimd),
+            (&["--simd.delta"], Level::BalancedSimdDelta),
+            (&["-xfast", "-simd.delta"], Level::SuperFastSimdDelta),
+            (&["-1", "--simd.delta=true"], Level::FastestSimdDelta),
+            (&["-2", "--simd.delta"], Level::BalancedSimdDelta),
+            (&["-2", "--simd.delta=false"], Level::BalancedSimd),
+        ] {
+            let cli = parse_argv(&[&["c"], args, &["x"]].concat()).unwrap();
+            assert_eq!(cli.options.level, Some(want), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn simd_flag_conflicts() {
+        for args in [
+            &["--simd.delta", "--classic"][..],
+            &["--simd.delta", "-0"],
+            &["--simd.delta", "-3"],
+            &["-xfast", "-0"],
+        ] {
+            assert!(
+                parse_argv(&[&["c"], args, &["x"]].concat()).is_err(),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_toggles() {
+        const AVX512: u32 = cpu::AVX512 | cpu::PIVCO_AVX512 | cpu::PIVCO_HIST_AVX512;
+        for (args, want) in [
+            (&["-avx2", "--avx512=true", "-neon=1"][..], 0),
+            (&["-avx2=false"], cpu::AVX2 | cpu::PIVCO_AVX2 | AVX512),
+            (&["--avx512=false"], AVX512),
+            (&["-neon=false"], cpu::NEON),
+            (&["-avx512=false", "-avx2=true"], AVX512),
+        ] {
+            let cli = parse_argv(&[args, &["c", "x"]].concat()).unwrap();
+            assert_eq!(cli.options.cpu_off, want, "{args:?}");
+        }
+        assert!(parse_argv(&["-avx2=maybe", "c", "x"]).is_err());
     }
 
     #[test]
     fn level_zero_uncompressed() {
         let cli = parse_argv(&["-0", "x"]).unwrap();
         assert!(cli.options.uncompressed);
+        assert_eq!(cli.options.level, None);
     }
 
     #[test]

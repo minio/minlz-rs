@@ -46,9 +46,17 @@ If no subcommand is given, the input filename's extension decides:
   anything else -> compress
 
 Options (compress):
-  -1, -2, -3          Level shortcut (fastest / balanced / smallest).
+  -1, -2, -3          Level shortcut (fastest / balanced / smallest), SIMD
+                      unless --classic.  Default: -2.
   --level N           Same, explicit (1, 2 or 3).
+  -xfast              Compress fastest, with a major compression loss.
+                      SIMD unless --classic.
   -0                  Uncompressed; emit 0x01 chunks only.
+  --classic           Write classic MinLZ blocks, which all MinLZ decoders
+                      can read.  Without it, SIMD blocks are written, which
+                      need a decoder for MinLZ format specification v1.1.
+  --simd.delta        Store SIMD literals as deltas, mainly for binary data.
+                      Not with --classic, -0 or -3, which decides itself.
   --block-size N      Max block size (default 8M).  Units: K, M, G accepted.
   --pad N             Pad total output to a multiple of N bytes.
   --block             Single-block mode (.mzb).  Loads entire input into memory.
@@ -92,6 +100,7 @@ fn main() -> ExitCode {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    minlz::cpu::disable(cli.options.cpu_off);
     let result = run(cli);
     match result {
         Ok(()) => ExitCode::SUCCESS,

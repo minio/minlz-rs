@@ -35,6 +35,8 @@ const INDEX_HEADER: &[u8; 6] = b"s2idx\x00";
 /// Construct via [`ReadSeeker::new`].  The underlying input must implement
 /// both [`Read`] and [`Seek`].  An index is required — either passed in as
 /// bytes or loaded from the end of the stream on construction.
+/// After a seek through the index, SIMD chunks are accepted until a stream
+/// identifier is read.
 ///
 /// `ReadSeeker` implements [`Read`] (forwarded to the inner reader) and
 /// [`Seek`] (interpreted as uncompressed offsets, never compressed).  See
@@ -154,10 +156,10 @@ impl<R: Read + Seek> ReadSeeker<R> {
         let abs_off = abs_off as u64;
         // Past-end is an error (the infallible `Index::find` would otherwise
         // clamp to the last block). Only enforceable when the total is known.
-        if let Some(total) = self.index.total_uncompressed() {
-            if abs_off > total {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-            }
+        if let Some(total) = self.index.total_uncompressed()
+            && abs_off > total
+        {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
 
         // Ensure the reader has consumed the stream identifier so that
@@ -184,6 +186,8 @@ impl<R: Read + Seek> ReadSeeker<R> {
         let u_off = entry.uncompressed;
 
         self.reader.r.seek(SeekFrom::Start(c_off))?;
+        // The jump skips the identifier of the target stream; the hash still verifies SIMD chunks.
+        self.reader.simd = true;
         // Hard-reset block state: clearing the decoded buffer makes the
         // next data chunk's `block_start += decoded.len()` a no-op, so
         // block_start at the new chunk equals u_off as desired.

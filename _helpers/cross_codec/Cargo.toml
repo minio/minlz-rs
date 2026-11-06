@@ -1,0 +1,24 @@
+[package]
+name = "cross_codec"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cross_codec"
+path = "src/main.rs"
+
+[dependencies]
+minlz = { path = "../../crates/minlz" }
+snap = "1"
+lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
+flate2 = "1"
+zstd = "0.13"
+
+[workspace]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
