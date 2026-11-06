@@ -754,6 +754,49 @@ fn index_stream_accepts_snappy_block_larger_than_decoded() {
     assert_eq!(idx.total_uncompressed, Some(1));
 }
 
+/// Empty data chunks at the start of a stream add no index entries (Go
+/// `TestIndexStreamEmptyChunks`, minio/minlz#92).
+#[test]
+#[cfg_attr(miri, ignore = "70000 empty chunks are impractical under miri")]
+fn index_stream_skips_empty_chunks() {
+    let mut s = Vec::new();
+    let mut w = crate::stream::WriterBuilder::new()
+        .block_size(64 << 10)
+        .build(&mut s)
+        .unwrap();
+    w.write_all(&b"abcdefgh".repeat(1 << 14)).unwrap();
+    let _ = w.finish().unwrap();
+    let mut want = Index::default();
+    want.load(&index_stream(Cursor::new(&s)).unwrap()).unwrap();
+    // An uncompressed chunk with only the CRC, and a legacy compressed chunk with a size 0 block.
+    for empty in [
+        &[1u8, 4, 0, 0, 0, 0, 0, 0][..],
+        &[0, 5, 0, 0, 0, 0, 0, 0, 0],
+    ] {
+        for n in [3, 70000] {
+            let name = format!("type {}, {n} empty", empty[0]);
+            let input = [&s[..10], &empty.repeat(n), &s[10..]].concat();
+            let b = index_stream(Cursor::new(&input)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut got = Index::default();
+            got.load(&b).unwrap_or_else(|e| panic!("{name}: load: {e}"));
+            let shift = (n * empty.len()) as u64;
+            assert_eq!(got.total_uncompressed, want.total_uncompressed, "{name}");
+            assert_eq!(
+                got.total_compressed,
+                want.total_compressed.map(|c| c + shift),
+                "{name}"
+            );
+            let shifted: Vec<_> = (want.offsets.iter())
+                .map(|o| OffsetPair {
+                    compressed: o.compressed + shift,
+                    ..*o
+                })
+                .collect();
+            assert_eq!(got.offsets, shifted, "{name}");
+        }
+    }
+}
+
 #[test]
 fn index_stream_handles_user_chunks() {
     use std::io::Write as _;
