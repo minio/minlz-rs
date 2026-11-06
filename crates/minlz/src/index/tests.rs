@@ -232,11 +232,16 @@ fn reduce_light_at_max() {
 }
 
 #[test]
-fn reset_rounds_small_block_sizes_up() {
+fn reset_clears_and_rounds_small_block_sizes_up() {
     let mut idx = Index::default();
     for (max_block, want) in [(0, MIN_INDEX_DIST), (3, 3 << 19), (1 << 21, 1 << 21)] {
+        idx.add(0, 0).unwrap();
+        idx.total_uncompressed = Some(1);
+        idx.total_compressed = Some(1);
         idx.reset(max_block);
         assert_eq!(idx.est_block_uncomp(), want, "max_block={max_block}");
+        assert!(idx.offsets.is_empty(), "max_block={max_block}");
+        assert_eq!((idx.total_uncompressed, idx.total_compressed), (None, None));
     }
 }
 
