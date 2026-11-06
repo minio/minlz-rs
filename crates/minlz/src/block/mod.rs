@@ -305,14 +305,6 @@ pub(crate) fn append_encoded_chunk_body(
 /// appended with the decoded bytes.
 pub(crate) fn append_decoded_chunk_body(dst: &mut Vec<u8>, body: &[u8]) -> Result<(), Error> {
     let (dlen, compressed) = split_chunk_body(body)?;
-    if dlen == 0 {
-        // Empty or all-literal block: body holds the raw bytes verbatim.
-        dst.extend_from_slice(compressed);
-        return Ok(());
-    }
-    if dlen < compressed.len() {
-        return Err(Error::Corrupt("compressed larger than decoded size"));
-    }
     let start = dst.len();
     dst.reserve(dlen + decode::OVERSHOOT_PAD);
     // SAFETY: same invariants as `append_decoded` — we just reserved
@@ -325,15 +317,15 @@ pub(crate) fn append_decoded_chunk_body(dst: &mut Vec<u8>, body: &[u8]) -> Resul
     Ok(())
 }
 
-/// Return the uncompressed length of a MinLZ stream-chunk body.  For the
-/// `dlen == 0` sentinel (literal/inline-uncompressed block), this returns
-/// the *body* length after the varint — which is what the chunk will
-/// actually decode to.
+/// Return the uncompressed length of a MinLZ stream-chunk body.
 pub(crate) fn decoded_len_chunk_body(body: &[u8]) -> Result<usize, Error> {
-    let (dlen, rest) = split_chunk_body(body)?;
-    Ok(if dlen == 0 { rest.len() } else { dlen })
+    split_chunk_body(body).map(|(dlen, _)| dlen)
 }
 
+/// Split a chunk body into `dlen` and the compressed bytes.  Unlike a
+/// standalone block, a chunk has no `dlen == 0` literal form (incompressible
+/// data goes in a 0x01 chunk), and its compressed bytes never exceed `dlen`
+/// (SPEC §4.4/§4.5; Go's reader rejects both).
 fn split_chunk_body(body: &[u8]) -> Result<(usize, &[u8]), Error> {
     let (v, n) = format::get_uvarint(body).ok_or(Error::Corrupt("bad chunk length varint"))?;
     if v > 0xffff_ffff {
@@ -342,7 +334,14 @@ fn split_chunk_body(body: &[u8]) -> Result<(usize, &[u8]), Error> {
     if v > MAX_BLOCK_SIZE as u64 {
         return Err(Error::TooLarge);
     }
-    Ok((v as usize, &body[n..]))
+    let (dlen, compressed) = (v as usize, &body[n..]);
+    if dlen == 0 {
+        return Err(Error::Corrupt("zero decoded length in chunk"));
+    }
+    if dlen < compressed.len() {
+        return Err(Error::Corrupt("compressed larger than decoded size"));
+    }
+    Ok((dlen, compressed))
 }
 
 #[cfg(test)]

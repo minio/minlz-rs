@@ -739,3 +739,39 @@ fn comp_crc_chunk_round_trip() {
     let got = decode_to_end(Reader::new(Cursor::new(&s))).unwrap();
     assert_eq!(got, payload);
 }
+
+// -------------------- chunk body validation --------------------
+
+/// A compressed chunk has no `dlen == 0` literal form (only standalone
+/// blocks do), and its compressed bytes never exceed `dlen`.  Every decode
+/// path must reject both, including a skip that drops the whole chunk.
+#[test]
+fn rejects_chunk_with_zero_or_short_dlen() {
+    for (dlen, rest) in [(0u64, &b"hello world"[..]), (1, &[0xaa; 10][..])] {
+        let mut varint = [0u8; 10];
+        let n = put_uvarint(&mut varint, dlen);
+        let mut body = masked_crc32c(rest).to_le_bytes().to_vec();
+        body.extend_from_slice(&varint[..n]);
+        body.extend_from_slice(rest);
+        let mut s = make_stream_header(DEFAULT_BLOCK_SIZE).to_vec();
+        push_chunk(&mut s, CHUNK_TYPE_MINLZ_COMPRESSED_DATA, &body);
+        push_eof(&mut s, rest.len() as u64);
+
+        let err = decode_to_end(Reader::new(Cursor::new(&s))).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "dlen={dlen}: read");
+        let err = Reader::new(Cursor::new(&s)).skip(1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "dlen={dlen}: skip");
+        let err = Reader::new(Cursor::new(s.clone()))
+            .decode_concurrent(Vec::new(), 2)
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "dlen={dlen}: concurrent"
+        );
+        assert!(
+            crate::index_stream(Cursor::new(&s)).is_err(),
+            "dlen={dlen}: index"
+        );
+    }
+}

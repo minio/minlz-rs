@@ -759,6 +759,59 @@ fn read_seeker_seek_past_end_errors_then_recovers() {
 }
 
 #[test]
+fn index_stream_accepts_snappy_block_larger_than_decoded() {
+    // A one-byte Snappy literal: dlen 1, then tag and byte.
+    let mut s = b"\xff\x06\x00\x00sNaPpY".to_vec();
+    s.extend_from_slice(&[0x00, 7, 0, 0, 0, 0, 0, 0, 1, 0x00, b'a']);
+    let mut idx = Index::default();
+    idx.load(&index_stream(Cursor::new(&s)).unwrap()).unwrap();
+    assert_eq!(idx.total_uncompressed, Some(1));
+}
+
+/// Empty data chunks at the start of a stream add no index entries (Go
+/// `TestIndexStreamEmptyChunks`, minio/minlz#92).
+#[test]
+#[cfg_attr(miri, ignore = "70000 empty chunks are impractical under miri")]
+fn index_stream_skips_empty_chunks() {
+    let mut s = Vec::new();
+    let mut w = crate::stream::WriterBuilder::new()
+        .block_size(64 << 10)
+        .build(&mut s)
+        .unwrap();
+    w.write_all(&b"abcdefgh".repeat(1 << 14)).unwrap();
+    let _ = w.finish().unwrap();
+    let mut want = Index::default();
+    want.load(&index_stream(Cursor::new(&s)).unwrap()).unwrap();
+    // An uncompressed chunk with only the CRC, and a legacy compressed chunk with a size 0 block.
+    for empty in [
+        &[1u8, 4, 0, 0, 0, 0, 0, 0][..],
+        &[0, 5, 0, 0, 0, 0, 0, 0, 0],
+    ] {
+        for n in [3, 70000] {
+            let name = format!("type {}, {n} empty", empty[0]);
+            let input = [&s[..10], &empty.repeat(n), &s[10..]].concat();
+            let b = index_stream(Cursor::new(&input)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut got = Index::default();
+            got.load(&b).unwrap_or_else(|e| panic!("{name}: load: {e}"));
+            let shift = (n * empty.len()) as u64;
+            assert_eq!(got.total_uncompressed, want.total_uncompressed, "{name}");
+            assert_eq!(
+                got.total_compressed,
+                want.total_compressed.map(|c| c + shift),
+                "{name}"
+            );
+            let shifted: Vec<_> = (want.offsets.iter())
+                .map(|o| OffsetPair {
+                    compressed: o.compressed + shift,
+                    ..*o
+                })
+                .collect();
+            assert_eq!(got.offsets, shifted, "{name}");
+        }
+    }
+}
+
+#[test]
 fn index_stream_handles_user_chunks() {
     use std::io::Write as _;
     // Stream with interleaved user chunks must still index correctly.
@@ -800,26 +853,6 @@ fn index_stream_accepts_s2_and_snappy_identifiers() {
     }
     compressed[4..10].copy_from_slice(b"MinLy\x00");
     assert!(index_stream(Cursor::new(&compressed)).is_err());
-}
-
-/// Empty data chunks must not add entries at a repeated offset.
-#[test]
-fn index_stream_skips_empty_chunks() {
-    let payload: Vec<u8> = (0u8..255).cycle().take(8 * 1024).collect();
-    let mut compressed: Vec<u8> = Vec::new();
-    let mut w = crate::stream::WriterBuilder::new()
-        .block_size(crate::stream::MIN_BLOCK_SIZE)
-        .build(&mut compressed)
-        .unwrap();
-    w.write_all(&payload).unwrap();
-    let _ = w.finish().unwrap();
-
-    // An empty uncompressed chunk and an empty Snappy chunk.
-    let empty: &[u8] = &[1, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0];
-    let s = [&compressed[..10], &empty.repeat(3), &compressed[10..]].concat();
-    let mut idx = Index::default();
-    idx.load(&index_stream(Cursor::new(&s)).unwrap()).unwrap();
-    assert_eq!(idx.total_uncompressed, Some(payload.len() as u64));
 }
 
 // -------------------- miri-only lite variants --------------------
