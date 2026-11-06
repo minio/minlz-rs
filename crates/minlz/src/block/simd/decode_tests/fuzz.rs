@@ -83,13 +83,28 @@ fn mutate(rng: &mut Rng, b: &[u8]) -> Vec<u8> {
     d
 }
 
+/// A block of one chunk of the most operations, which the encoders don't write.
+fn max_chunk_block() -> Vec<u8> {
+    let mut ops = vec![op(1, 4, 0); MAX_CHUNK];
+    ops[0].off = 4;
+    let (e, _) = TestBuilder::default().build(&TestBlock {
+        lits: b"abc".repeat(ops.len() / 3 + 1),
+        ops,
+        limit: 6,
+        ..Default::default()
+    });
+    e.bytes()
+}
+
 /// Go's seeds are blocks of its encoder; the SIMD fixtures of the Go encoder stand in for them.
+/// Go also adds [`max_chunk_block`].
 #[test]
 #[cfg_attr(miri, ignore)] // slow under Miri
 fn fuzz_decode_simd_seeded() {
     let mut rng = Rng(0x5eed);
     let mutants = 30;
-    for (_, block) in go_fixtures(MAX_N) {
+    let blocks = go_fixtures(MAX_N).into_iter().map(|(_, b)| b);
+    for block in blocks.chain([max_chunk_block()]) {
         let (size, body) = simd_header(&block[1..]).unwrap();
         let extra = (size - body.len() - 4 - MIN_SAVING) as u32;
         fuzz_decode_simd(extra, body);
@@ -101,4 +116,12 @@ fn fuzz_decode_simd_seeded() {
             fuzz_decode_simd(extra, &mutate(&mut rng, body));
         }
     }
+}
+
+/// Adds the seed Go's `FuzzDecodeSIMD` builds in code, see [`crate::fuzz_seeds`].
+#[test]
+#[ignore = "writes fuzz/corpus, see fuzz/RUNBOOK.md §1"]
+fn write_fuzz_seeds() {
+    let seed = crate::fuzz_seeds::simd_seed(&max_chunk_block()).unwrap();
+    crate::fuzz_seeds::save("simd_decode", [seed]);
 }

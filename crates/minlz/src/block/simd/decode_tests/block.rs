@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use super::*;
 use crate::Error;
 use crate::block::format::get_uvarint;
-use crate::block::simd::decode::{Decoder, Tables};
+use crate::block::simd::decode::{Decoder, Tables, ll_stats, off_stats, tok_stats};
 use crate::block::simd::exec::{Tier, simd_tiers};
 use crate::block::simd::{MAX_CHUNK, MAX_CHUNKS, OFF_TAB, PAD, rvarint};
 use crate::guard::Buffer;
@@ -213,7 +213,7 @@ fn simd_decode_built() {
             let n = 1 + rng.intn(5000);
             let max_off = 1 << rng.intn(25);
             let (ops, lits) = test_ops(&mut rng, n, b"aaabbcdef\x00\xff", 288, max_off);
-            let limit = rng.intn(6);
+            let limit = rng.intn(7);
             let mut tb = TestBlock {
                 ops,
                 lits,
@@ -533,7 +533,7 @@ fn validation_cases() -> Vec<VCase> {
     // A block of one chunk with 32768 operations and 65536 escapes, stored or coded.
     let escapes = move |coded: bool| -> Option<Change> {
         Some(Box::new(move |b, e, _| {
-            let mut ops = vec![op(MAX_LEN + 1, MAX_LEN + 1, 0); MAX_CHUNK];
+            let mut ops = vec![op(MAX_LEN + 1, MAX_LEN + 1, 0); 1 << 15];
             ops[0].off = MAX_LEN;
             let (ne, want) = b.build(&TestBlock {
                 lits: b"abc".repeat(11 * ops.len()),
@@ -546,7 +546,7 @@ fn validation_cases() -> Vec<VCase> {
                 *chunk0(e, ESC) = TestStream {
                     mode: CODE_LENS,
                     table: escape_table(),
-                    data: vec![0; 2 * MAX_CHUNK / 8],
+                    data: vec![0; (1 << 16) / 8],
                 };
             }
             want
@@ -620,6 +620,7 @@ fn validation_cases() -> Vec<VCase> {
         },
         VCase {
             name: "chunk limit 6",
+            ok: true,
             change: same(|e| e.flags |= 6),
             ..Default::default()
         },
@@ -1304,6 +1305,140 @@ fn simd_validation_chunks() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "blocks of 65535 operations, up to 8 MiB")]
+fn simd_validation_65535_operations() {
+    // Value 6 is 65535 operations, not 1024<<6: a stored token stream could hold 65536.
+    // Escapes are stored: two per operation don't fit a pivco block.
+    let coded = vec![CODE_LENS, CODE_LENS, CODE_LENS, STORED];
+    let check = |name: &str, e: &TestEnc, want: &[u8], coded: bool| {
+        assert_eq!(e.chunks[0].ops.len(), MAX_CHUNK, "{name}: first chunk");
+        for k in 0..ESC {
+            assert!(
+                !coded || e.chunks[0].s[k].mode != STORED,
+                "{name}: stream {k} is stored"
+            );
+        }
+        let block = e.bytes();
+        simd_tiers(|_| test_decode(&block, want));
+        // The reference doesn't depend on the tier.
+        let rf = decode_simd_block(&block);
+        assert!(
+            rf.as_ref().is_ok_and(|r| r == want),
+            "{name}: reference: {:?}",
+            rf.err()
+        );
+    };
+    let rejected = |name: &str, block: &[u8]| {
+        assert!(
+            decode_simd_block(block).is_err(),
+            "{name}: reference: no error"
+        );
+        let (n, body) = simd_header(&block[1..]).unwrap();
+        simd_tiers(|tier| {
+            let mut dst = vec![0xfe; n + 64];
+            let r = decode_simd(&mut dst[..n], body);
+            assert!(
+                matches!(r, Err(Error::Corrupt(_))),
+                "{name} {tier:?}: {r:?}"
+            );
+            assert!(
+                dst[n..].iter().all(|&v| v == 0xfe),
+                "{name} {tier:?}: wrote past dst"
+            );
+        });
+    };
+    let cases = [
+        ("at limit", MAX_CHUNK, 1, 4, vec![], true),
+        ("above limit", MAX_CHUNK + 1, 1, 4, vec![], false),
+        ("at limit coded", MAX_CHUNK, 1, 4, coded.clone(), true),
+        // Two escapes of 30 per operation: 8257410 bytes of matches and literals.
+        (
+            "most escapes",
+            MAX_CHUNK,
+            MAX_LEN + 31,
+            MAX_LEN + 31,
+            coded,
+            true,
+        ),
+    ];
+    let mut b = TestBuilder::default();
+    for (name, n, ll, ml, modes, ok) in cases {
+        let mut ops = vec![op(ll, ml, 0); n];
+        ops[0].off = ml.max(3);
+        let (mut e, want) = b.build(&TestBlock {
+            ops,
+            lits: b"abc".repeat(n * ll / 3 + 1),
+            limit: 6,
+            chunk: n,
+            modes: modes.clone(),
+            lit_modes: modes.clone(),
+            ..Default::default()
+        });
+        if !ok {
+            rejected(name, &e.bytes());
+            continue;
+        }
+        check(name, &e, &want, !modes.is_empty());
+        if ml <= MAX_LEN {
+            continue;
+        }
+        // Escapes of 255 add up to far more than the decoded size.
+        let esc = &mut e.chunks[0].s[ESC].data;
+        assert_eq!(esc.len(), 2 * MAX_CHUNK, "{name}: escapes");
+        esc.fill(255);
+        rejected(&format!("{name}: escapes of 255"), &e.bytes());
+    }
+    // Coded streams with offset bits and escapes, in every loop.
+    let modes = [
+        vec![CODE_LENS],
+        vec![CLASS_LENS],
+        vec![CODE_LENS, CURRENT],
+        vec![CLASS_LENS, CURRENT],
+    ];
+    for (i, modes) in modes.into_iter().enumerate() {
+        let (ops, lits) = test_ops(
+            &mut Rng(i as u64),
+            MAX_CHUNK,
+            b"aaabbcdef\x00\xff",
+            40,
+            1 << 22,
+        );
+        let mut tb = TestBlock {
+            ops,
+            lits,
+            limit: 6,
+            chunk: MAX_CHUNK,
+            delta: i as u64 & 1,
+            flat: i as u64 >> 1,
+            lit_modes: modes.clone(),
+            modes,
+            ..Default::default()
+        };
+        let (e, want) = test_pad(&mut b, &mut tb);
+        check(&format!("random {i}"), &e, &want, true);
+    }
+    simd_tiers(|tier| {
+        let (out, n_lit, n_off, n_esc, ok) = tok_stats(tier, &vec![135; MAX_CHUNK]);
+        assert!(
+            ok && (out, n_lit, n_off, n_esc) == (33 * MAX_CHUNK, MAX_CHUNK, 0, MAX_CHUNK),
+            "{tier:?}: tokens: {out} {n_lit} {n_off} {n_esc} {ok}"
+        );
+        let (sum, n, ok) = ll_stats(tier, &vec![33; MAX_CHUNK]);
+        assert!(
+            ok && (sum, n) == (33 * MAX_CHUNK, MAX_CHUNK),
+            "{tier:?}: literal lengths: {sum} {n} {ok}"
+        );
+        let (sum, _, _) = ll_stats(tier, &vec![255; 2 * MAX_CHUNK]);
+        assert_eq!(sum, 255 * 2 * MAX_CHUNK, "{tier:?}: escapes");
+        let (n, ok) = off_stats(tier, &vec![175; MAX_CHUNK]);
+        assert!(
+            ok && n == 20 * MAX_CHUNK,
+            "{tier:?}: offset symbols: {n} {ok}"
+        );
+    });
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "builds and decodes 8 MiB blocks; simd_block_api checks the size limit"
@@ -1577,7 +1712,7 @@ fn simd_reference() {
                 ops = vec![op(1, 4, 3); 1 + rng.intn(500)];
                 lits = b"a".repeat(ops.len());
             }
-            let limit = rng.intn(6);
+            let limit = rng.intn(7);
             let mut tb = TestBlock {
                 ops,
                 lits,
@@ -1590,7 +1725,7 @@ fn simd_reference() {
                 ..Default::default()
             };
             if i % 4 == 1 {
-                tb.chunk = 1024 << limit;
+                tb.chunk = (1024 << limit).min(MAX_CHUNK);
             }
             let orig = test_pad(&mut b, &mut tb).0.bytes();
             for j in 0..changes {

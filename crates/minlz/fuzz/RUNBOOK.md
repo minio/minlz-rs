@@ -41,12 +41,14 @@ seed.
 ### Generated seeds (every target)
 
 The ignored `write_fuzz_seeds` tests (`src/fuzz_seeds.rs`,
-`src/block/tests.rs`, `src/pivco/tests/fuzz.rs`) add the seeds Go's
+`src/block/tests.rs`, `src/block/simd/decode_tests/fuzz.rs`,
+`src/pivco/tests/fuzz.rs`) add the seeds Go's
 fuzzers add with `f.Add`, in each target's input format, named by
 content hash: Go's seed zips encoded at the levels Go's fuzzers use
 (SIMD blocks for `decode_arbitrary` and `simd_decode`, SIMD streams for
 `stream_decode_arbitrary`), raw inputs for `roundtrip` and
-`stream_roundtrip`, and the pivco cases.  The raw inputs are Tom Sawyer
+`stream_roundtrip`, the pivco cases, and for `simd_decode` a chunk of
+65535 operations, which the encoders don't write.  The raw inputs are Tom Sawyer
 and the SIMD fixtures' inputs, plus, with `MINLZ_TESTDATA` set to Go's
 `testdata`, `enc_regressions.zip`, `fuzz/block-corpus-{raw,enc}.zip`
 and `fuzz/FuzzEncodingBlocks/`; `decode_arbitrary` also gets

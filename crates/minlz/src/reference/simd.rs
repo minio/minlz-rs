@@ -354,7 +354,7 @@ fn decode(src: &[u8], strict: bool, w: &mut dyn SimdWalker) -> Result<Vec<u8>, S
         return Err("no flags byte".into());
     }
     let flags = src[n];
-    if flags & 0xe0 != 0 || flags & 7 > 5 {
+    if flags & 0xe0 != 0 || flags & 7 > 6 {
         return Err(format!("invalid block flags {flags:#x}"));
     }
     let (lz_size, body) = rvarint(&src[n + 1..]).map_err(|e| format!("LZ section size: {e}"))?;
@@ -375,7 +375,7 @@ fn decode(src: &[u8], strict: bool, w: &mut dyn SimdWalker) -> Result<Vec<u8>, S
     };
     d.literals(&body[lz..])?;
     if lz > 0 {
-        d.chunks(&body[..lz], 1024 << (flags & 7))?;
+        d.chunks(&body[..lz], (1024 << (flags & 7)).min(65535))?;
     }
     d.out.extend_from_slice(&d.lits[d.l..]);
     if d.out.len() != size {

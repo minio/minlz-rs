@@ -22,7 +22,7 @@ mod fuzz;
 use super::decode::{decode_simd, decode_simd_hash};
 use super::{
     BLOCK_TYPE, CLASS_LENS, CODE_BYTES, CODE_LENS, CURRENT, DELTA, DELTA_LENS, ESC, LAYOUTS, LITS,
-    LL, MAX_LEN, MIN_SAVING, OFFC, STORED, TOK, simd_header,
+    LL, MAX_CHUNK, MAX_LEN, MIN_SAVING, OFFC, STORED, TOK, simd_header,
 };
 use crate::block::format::put_uvarint;
 use crate::pivco;
@@ -281,7 +281,7 @@ impl TestBuilder {
     pub(super) fn build(&mut self, tb: &TestBlock) -> (TestEnc, Vec<u8>) {
         self.cur = Default::default();
         let chunk = if tb.chunk == 0 {
-            1024 << tb.limit
+            (1024 << tb.limit).min(MAX_CHUNK)
         } else {
             tb.chunk
         };

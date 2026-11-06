@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn simd_stats_neon_long() {
         let mut rng = Rng(10);
-        for n in [2032, 2048, 2064, 4112, 1 << 16, 70000] {
+        for n in [2032, 2048, 2064, 4112, 1 << 16, 70000, 1 << 17] {
             for fill in [0xff, 135, 33, 175, 1, 0] {
                 let mut b = vec![fill; n];
                 if fill == 0 {

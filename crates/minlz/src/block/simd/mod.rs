@@ -66,7 +66,8 @@ pub(crate) fn decode_at(
 
 pub(crate) const BLOCK_TYPE: u64 = 1;
 pub(crate) const MIN_SAVING: usize = 64;
-pub(crate) const MAX_CHUNK: usize = 1024 << 5;
+/// The most operations of a chunk: a chunk limit value of 6, capped to what a pivco block holds.
+pub(crate) const MAX_CHUNK: usize = crate::pivco::MAX_BLOCK_SIZE;
 /// The most chunks of a block.
 pub(crate) const MAX_CHUNKS: usize = 128;
 pub(crate) const MAX_LEN: usize = 32;
@@ -260,7 +261,7 @@ pub(crate) fn simd_header(src: &[u8]) -> Result<(usize, &[u8]), Error> {
         return Err(Error::TooLarge);
     }
     let f = src[n];
-    if src.len() + MIN_SAVING > size || f & 0xe0 != 0 || f & 7 > 5 {
+    if src.len() + MIN_SAVING > size || f & 0xe0 != 0 || f & 7 > 6 {
         return Err(Error::Corrupt("bad SIMD block flags or size"));
     }
     Ok((size, &src[n..]))

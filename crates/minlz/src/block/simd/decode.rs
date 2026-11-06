@@ -90,8 +90,8 @@ thread_local! {
 }
 
 /// Decodes a SIMD block, from its flags byte, into dst, which must have the decoded size
-/// (Go `decodeSIMD`). [`simd_header`](super::simd_header) returns both; it checks the flags
-/// byte, whose chunk limit sizes the stream buffers, so blocks must come from it.
+/// (Go `decodeSIMD`). [`simd_header`](super::simd_header) returns both, and blocks must come
+/// from it: only it checks the flags byte for reserved bits and chunk limit value 7.
 pub(crate) fn decode_simd(dst: &mut [u8], block: &[u8]) -> Result<(), Error> {
     decode_simd_hash(dst, block, false).map(|_| ())
 }
@@ -138,7 +138,7 @@ impl Decoder {
 
     /// Decodes block into dst, and adds dst to the hasher if hash.
     pub(super) fn decode(&mut self, dst: &mut [u8], block: &[u8], hash: bool) -> Option<()> {
-        let limit = 1024 << (block[0] & 7);
+        let limit = (1024 << (block[0] & 7)).min(MAX_CHUNK);
         let body = &block[1..];
         let (lz, n) = rvarint(body);
         if n == 0 || lz > (body.len() - n) as u64 {

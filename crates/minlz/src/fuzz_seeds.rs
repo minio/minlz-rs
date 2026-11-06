@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! Seeds of the cargo-fuzz targets in `fuzz/`, derived as Go's fuzzers derive theirs with
-//! `f.Add`. The ignored `write_fuzz_seeds` tests (here, in `block::tests` and
-//! `pivco::tests::fuzz`) add them to `fuzz/corpus/<target>/`, named by content hash:
+//! `f.Add`. The ignored `write_fuzz_seeds` tests (here, in `block::tests`,
+//! `block::simd::decode_tests::fuzz` and `pivco::tests::fuzz`) add them to
+//! `fuzz/corpus/<target>/`, named by content hash:
 //!
 //! ```text
 //! MINLZ_TESTDATA=<Go repo>/testdata cargo test -p minlz --release --lib write_fuzz_seeds -- --ignored
@@ -153,7 +154,7 @@ fn inputs() -> Vec<Vec<u8>> {
 }
 
 /// A seed of the `simd_decode` target, `extra` and the body, for a SIMD block.
-fn simd_seed(block: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn simd_seed(block: &[u8]) -> Option<Vec<u8>> {
     let (size, body) = simd_header(block.get(1..)?).ok()?;
     let extra = (size - body.len() - 4 - MIN_SAVING) as u32;
     Some([&extra.to_le_bytes()[..], body].concat())
