@@ -745,6 +745,16 @@ fn read_seeker_seek_past_end_errors_then_recovers() {
 }
 
 #[test]
+fn index_stream_accepts_snappy_block_larger_than_decoded() {
+    // A one-byte Snappy literal: dlen 1, then tag and byte.
+    let mut s = b"\xff\x06\x00\x00sNaPpY".to_vec();
+    s.extend_from_slice(&[0x00, 7, 0, 0, 0, 0, 0, 0, 1, 0x00, b'a']);
+    let mut idx = Index::default();
+    idx.load(&index_stream(Cursor::new(&s)).unwrap()).unwrap();
+    assert_eq!(idx.total_uncompressed, Some(1));
+}
+
+#[test]
 fn index_stream_handles_user_chunks() {
     use std::io::Write as _;
     // Stream with interleaved user chunks must still index correctly.

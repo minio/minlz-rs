@@ -619,8 +619,17 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                 if chunk_len < CHECKSUM_SIZE {
                     return Err(Error::Invalid("data chunk shorter than CRC"));
                 }
-                let d_len = crate::block::decoded_len_chunk_body(&body[CHECKSUM_SIZE..])
-                    .map_err(|_| Error::Invalid("bad block size header"))?;
+                let block = &body[CHECKSUM_SIZE..];
+                // A Snappy/S2 block may be larger than its decoded size, so
+                // only MinLZ chunks get the chunk-body checks.
+                let d_len = if chunk_type == CHUNK_TYPE_LEGACY_COMPRESSED_DATA {
+                    read_uvarint(block)
+                        .ok()
+                        .and_then(|(v, _)| usize::try_from(v).ok())
+                } else {
+                    crate::block::decoded_len_chunk_body(block).ok()
+                }
+                .ok_or(Error::Invalid("bad block size header"))?;
                 if d_len > MAX_BLOCK_SIZE {
                     return Err(Error::Invalid("block exceeds max size"));
                 }
