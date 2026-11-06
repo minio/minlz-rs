@@ -247,6 +247,80 @@ fn user_non_skippable_without_callback_errors() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 }
 
+/// Fails once with `TimedOut` when it reaches `fail_at`, then serves the rest.
+struct FailOnce<'a> {
+    data: &'a [u8],
+    pos: usize,
+    fail_at: usize,
+    failed: bool,
+}
+
+impl Read for FailOnce<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.failed && self.pos == self.fail_at {
+            self.failed = true;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, std::fmt::Error));
+        }
+        let end = if self.failed {
+            self.data.len()
+        } else {
+            self.fail_at
+        };
+        let n = buf.len().min(end - self.pos);
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// A chunk header read that fails part-way must keep failing: a retry would
+/// parse the next header from the wrong offset.
+#[test]
+fn header_read_errors_are_sticky() {
+    let payload: Vec<u8> = (0..10_000u32).map(|i| (i * 7) as u8).collect();
+    let s = build_multi_block_stream(&payload, 4 << 10);
+    // Stream identifier (10 bytes), then the first chunk's header and body.
+    let first_len = s[11] as usize | (s[12] as usize) << 8 | (s[13] as usize) << 16;
+    let fail_at = 10 + 4 + first_len + 2;
+    for skip in [false, true] {
+        let inner = FailOnce {
+            data: &s,
+            pos: 0,
+            fail_at,
+            failed: false,
+        };
+        let mut r = Reader::new(inner);
+        let mut buf = vec![0u8; 4096];
+        let err = if skip {
+            r.skip(4096 + 10).unwrap_err()
+        } else {
+            r.read_exact(&mut buf).unwrap();
+            r.read(&mut buf).unwrap_err()
+        };
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "skip={skip}");
+        assert!(
+            err.get_ref().is_some_and(|e| e.is::<std::fmt::Error>()),
+            "skip={skip}: first error keeps its payload"
+        );
+        let err = r.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "skip={skip}: retry");
+    }
+
+    // A truncated header after a complete stream must not turn into a
+    // clean EOF on retry.
+    let t = [&s[..], &[0xff, 0x06]].concat();
+    let mut r = Reader::new(Cursor::new(&t));
+    let err = r.read_to_end(&mut Vec::new()).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let err = r.read(&mut [0u8; 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let mut r = Reader::new(Cursor::new(&t));
+    let err = r.skip(payload.len() as u64 + 1).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "skip");
+    let err = r.read(&mut [0u8; 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "read after skip");
+}
+
 // -------------------- skippables --------------------
 
 #[test]
