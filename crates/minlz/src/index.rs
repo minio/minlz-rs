@@ -116,7 +116,8 @@ const CHUNK_TYPE_STREAM_IDENTIFIER: u8 = 0xff;
 const MAX_NON_SKIPPABLE_CHUNK: u8 = 0x3f;
 const CHECKSUM_SIZE: usize = 4;
 const MAGIC_BODY_MINLZ: &[u8] = b"MinLz";
-const MAGIC_BODY_S2: &[u8] = b"sNaPpY";
+const MAGIC_BODY_S2: &[u8] = b"S2sTwO";
+const MAGIC_BODY_SNAPPY: &[u8] = b"sNaPpY";
 const MAGIC_BODY_LEN: usize = 6;
 
 /// Pair of `(compressed, uncompressed)` stream offsets, in bytes from the
@@ -625,6 +626,11 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                 if d_len > MAX_BLOCK_SIZE {
                     return Err(Error::Invalid("block exceeds max size"));
                 }
+                // An empty chunk would add an entry at the same offset, and
+                // while est_block_uncomp is 0 nothing thins those out.
+                if d_len == 0 {
+                    continue;
+                }
                 if idx.est_block_uncomp == 0 {
                     idx.est_block_uncomp = d_len as u64;
                 }
@@ -639,6 +645,9 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                 if n2 > MAX_BLOCK_SIZE {
                     return Err(Error::Invalid("uncompressed block exceeds max size"));
                 }
+                if n2 == 0 {
+                    continue;
+                }
                 if idx.est_block_uncomp == 0 {
                     idx.est_block_uncomp = n2 as u64;
                 }
@@ -649,8 +658,11 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                 if chunk_len != MAGIC_BODY_LEN {
                     return Err(Error::BadFormat("bad stream identifier length"));
                 }
-                let head5 = &body[..MAGIC_BODY_MINLZ.len()];
-                if head5 != MAGIC_BODY_MINLZ && &body[..MAGIC_BODY_LEN] != MAGIC_BODY_S2 {
+                let magic = &body[..MAGIC_BODY_LEN];
+                if !magic.starts_with(MAGIC_BODY_MINLZ)
+                    && magic != MAGIC_BODY_S2
+                    && magic != MAGIC_BODY_SNAPPY
+                {
                     return Err(Error::BadFormat("unknown stream magic"));
                 }
             }
