@@ -259,7 +259,7 @@ impl Read for FailOnce<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if !self.failed && self.pos == self.fail_at {
             self.failed = true;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "transient"));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, std::fmt::Error));
         }
         let end = if self.failed {
             self.data.len()
@@ -298,6 +298,10 @@ fn header_read_errors_are_sticky() {
             r.read(&mut buf).unwrap_err()
         };
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "skip={skip}");
+        assert!(
+            err.get_ref().is_some_and(|e| e.is::<std::fmt::Error>()),
+            "skip={skip}: first error keeps its payload"
+        );
         let err = r.read(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "skip={skip}: retry");
     }
@@ -310,6 +314,13 @@ fn header_read_errors_are_sticky() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     let err = r.read(&mut [0u8; 1]).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let mut r = Reader::new(Cursor::new(&t));
+    let err = r.skip(payload.len() as u64 + 1).unwrap_err();
+    assert_eq!(
+        r.read(&mut [0u8; 1]).unwrap_err().kind(),
+        err.kind(),
+        "skip"
+    );
 }
 
 // -------------------- skippables --------------------

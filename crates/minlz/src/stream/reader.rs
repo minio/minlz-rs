@@ -686,11 +686,11 @@ impl<R: Read> Reader<R> {
 
     /// Store `e` as the sticky error.  Every read error must stick: a failed
     /// read may have consumed part of a chunk, so a retry would resume
-    /// mid-chunk and parse garbage.
+    /// mid-chunk and parse garbage.  `e` itself goes to this caller so its
+    /// OS code and payload survive; later calls get only kind and message.
     fn set_io_err<T>(&mut self, e: io::Error) -> io::Result<T> {
-        let cloned = clone_io_err(&e);
-        self.err = Some(e);
-        Err(cloned)
+        self.err = Some(clone_io_err(&e));
+        Err(e)
     }
 }
 
