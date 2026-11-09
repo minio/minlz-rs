@@ -390,15 +390,19 @@ fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), Parse
         "block-size" => {
             opts.block_size = Some(
                 parse_size(val)
-                    .map_err(|_| ParseError::InvalidValue("--block-size".into(), val.to_string()))?
-                    as usize,
+                    .ok()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| {
+                        ParseError::InvalidValue("--block-size".into(), val.to_string())
+                    })?,
             )
         }
         "pad" => {
             opts.padding = Some(
                 parse_size(val)
-                    .map_err(|_| ParseError::InvalidValue("--pad".into(), val.to_string()))?
-                    as u32,
+                    .ok()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| ParseError::InvalidValue("--pad".into(), val.to_string()))?,
             )
         }
         "o" | "output" => opts.output = Some(PathBuf::from(val)),
@@ -702,6 +706,17 @@ mod tests {
         let cli = parse_argv(&["--block-size", "64K", "--pad", "4096", "in.txt"]).unwrap();
         assert_eq!(cli.options.block_size, Some(64 << 10));
         assert_eq!(cli.options.padding, Some(4096));
+    }
+
+    #[test]
+    fn pad_out_of_u32_range_rejected() {
+        for args in [&["--pad", "4G"][..], &["--pad", "4294971392"]] {
+            let err = parse_argv(&[args, &["in.txt"]].concat()).unwrap_err();
+            assert!(
+                matches!(err, ParseError::InvalidValue(ref s, _) if s == "--pad"),
+                "{args:?}: {err:?}"
+            );
+        }
     }
 
     #[test]
