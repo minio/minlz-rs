@@ -65,7 +65,9 @@ fn select_impl() -> CrcFn {
             return crc32c_hw_x86_64_safe;
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    // Little-endian only: the 3-way loop feeds native-endian words to
+    // `__crc32cd`, which takes the low byte first.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     {
         if std::arch::is_aarch64_feature_detected!("crc") {
             return crc32c_hw_aarch64_safe;
@@ -241,13 +243,13 @@ unsafe fn crc32c_hw_x86_64(crc: u32, data: &[u8]) -> u32 {
 
 // -------------------- aarch64 hardware path --------------------
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 fn crc32c_hw_aarch64_safe(crc: u32, data: &[u8]) -> u32 {
     // SAFETY: only stored after `is_aarch64_feature_detected!("crc")` matched.
     unsafe { crc32c_hw_aarch64(crc, data) }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 #[target_feature(enable = "crc")]
 unsafe fn crc32c_hw_aarch64(crc: u32, data: &[u8]) -> u32 {
     use core::arch::aarch64::*;
