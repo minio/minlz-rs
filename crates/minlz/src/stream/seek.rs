@@ -35,8 +35,11 @@ const INDEX_HEADER: &[u8; 6] = b"s2idx\x00";
 /// Construct via [`ReadSeeker::new`].  The underlying input must implement
 /// both [`Read`] and [`Seek`].  An index is required — either passed in as
 /// bytes or loaded from the end of the stream on construction.
-/// After a seek through the index, SIMD chunks are accepted until a stream
-/// identifier is read.
+/// A seek through the index skips the target stream's identifier, so until
+/// the next identifier SIMD chunks and blocks up to
+/// [`ReaderBuilder::max_block_size`](super::ReaderBuilder::max_block_size)
+/// are accepted, and the stream size in the next EOF chunk is only checked
+/// not to exceed the uncompressed offset there.
 ///
 /// `ReadSeeker` implements [`Read`] (forwarded to the inner reader) and
 /// [`Seek`] (interpreted as uncompressed offsets, never compressed).  See
