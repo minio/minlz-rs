@@ -65,7 +65,9 @@ jobs:
         run: cargo test --workspace --tests --features minio-minlz/reference --verbose
       - name: cargo test (debug, doctests)
         # `--doc` cannot be combined with other target flags, so run
-        # in its own step.
+        # in its own step. `minlz_readme` adds the README examples.
+        env:
+          RUSTDOCFLAGS: --cfg minlz_readme
         run: cargo test --workspace --doc --verbose
       - name: cargo test (release, lib)
         run: cargo test --workspace --lib --release --verbose

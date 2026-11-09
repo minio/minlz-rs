@@ -91,7 +91,9 @@ pub use index::{
 /// A specialized [`Result`] type for MinLZ operations.
 pub type Result<T> = core::result::Result<T, Error>;
 
-// Compiles the README's Rust examples as doctests, so they cannot rot.
-#[cfg(doctest)]
+// Compiles the README's Rust examples as doctests, so they cannot rot. The path only
+// resolves in a repo checkout, not in the published crate, so the include is opt-in via
+// RUSTDOCFLAGS="--cfg minlz_readme", which CI's doctest step sets.
+#[cfg(all(doctest, minlz_readme))]
 #[doc = include_str!("../../../README.md")]
 pub struct ReadmeDoctests;
