@@ -1161,6 +1161,39 @@ fn chunk_zero_decoded_len_is_corrupt() {
     }
 }
 
+/// An uncompressed chunk longer than any chunk of the block size is corrupt, as Go's Read and
+/// DecodeConcurrent return; one that only holds more than the block size is too large.
+#[test]
+fn uncompressed_chunk_over_max_size() {
+    let bs = crate::stream::MIN_BLOCK_SIZE;
+    let max_n = block::max_encoded_len(bs).unwrap();
+    for (n, corrupt) in [(bs + 1, false), (max_n, false), (max_n + 1, true)] {
+        let mut s = make_stream_header(bs, false).to_vec();
+        push_uncompressed_block(&mut s, &vec![0; n]);
+        push_eof(&mut s, n as u64);
+        let read = decode_to_end(Reader::new(Cursor::new(&s))).map(drop);
+        let skip = Reader::new(Cursor::new(&s)).skip(1);
+        let past = Reader::new(Cursor::new(&s)).skip(u64::MAX);
+        let conc = Reader::new(Cursor::new(&s))
+            .decode_concurrent(io::sink(), 2)
+            .map(drop);
+        for (api, res) in [
+            ("Read", read),
+            ("Skip", skip),
+            ("Skip past", past),
+            ("DecodeConcurrent", conc),
+        ] {
+            let e = res.expect_err(api);
+            let want = if corrupt {
+                Error::Corrupt
+            } else {
+                Error::TooLarge
+            };
+            assert!(is_err(&e, want), "{n}/{api}: {e}");
+        }
+    }
+}
+
 /// `decode_concurrent` after a `skip` over whole blocks counts them toward the
 /// EOF size, as Go's `streamSize` does.
 #[test]

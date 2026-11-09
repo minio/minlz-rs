@@ -86,7 +86,8 @@ impl ReaderBuilder {
     ///
     /// Defaults to [`MAX_BLOCK_SIZE`].  Blocks larger than this (as declared
     /// by either the stream identifier or an individual chunk) cause the
-    /// reader to return [`Error::TooLarge`].
+    /// reader to return [`Error::TooLarge`]; a chunk longer than any valid
+    /// chunk of that block size is [`Error::Corrupt`].
     ///
     /// `n` must be in `(0, MAX_BLOCK_SIZE]`; an out-of-range value is
     /// reported as [`Error::Config`] by [`ReaderBuilder::build`].
@@ -384,7 +385,7 @@ impl<R: Read> Reader<R> {
     /// Uncompressed data chunk dispatch for [`Reader::skip`].  Same
     /// shape as the compressed variant but with a 1:1 wire length.
     fn skip_uncompressed_or_decode(&mut self, chunk_len: usize, n: &mut u64) -> Result<()> {
-        if chunk_len < CHECKSUM_SIZE {
+        if chunk_len < CHECKSUM_SIZE || chunk_len > self.max_buf_size() {
             return Err(Error::Corrupt);
         }
         let n2 = chunk_len - CHECKSUM_SIZE;
@@ -613,7 +614,7 @@ impl<R: Read> Reader<R> {
     }
 
     fn handle_uncompressed_chunk(&mut self, chunk_len: usize) -> Result<()> {
-        if chunk_len < CHECKSUM_SIZE {
+        if chunk_len < CHECKSUM_SIZE || chunk_len > self.max_buf_size() {
             return Err(Error::Corrupt);
         }
         self.block_start += self.decoded.len() as u64;
