@@ -24,7 +24,7 @@ use minlz::stream::{ConcurrentDecode, ReadSeeker, Reader};
 use crate::args::Options;
 use crate::io_util::{
     CountingReader, CountingWriter, check_not_input, mb_per_sec, open_input, open_output,
-    open_output_send, resolve_threads,
+    open_output_send, resolve_threads, sync_output,
 };
 
 pub fn run(opts: Options, input: Option<PathBuf>) -> io::Result<()> {
@@ -194,6 +194,7 @@ fn decompress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let elapsed = start.elapsed();
     print_decompress_summary(opts, counted_src.bytes, counted_dst.bytes, elapsed);
     if opts.remove && input != Path::new("-") {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -224,6 +225,7 @@ fn decompress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Res
     let elapsed = start.elapsed();
     print_decompress_summary(opts, counted_src.bytes, decoded_bytes, elapsed);
     if opts.remove && input != Path::new("-") {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -280,6 +282,7 @@ fn decompress_block(input: &Path, opts: &Options) -> io::Result<()> {
     // A range leaves no full copy of the data, so keep the input, as the stream seek path does.
     let partial = opts.offset.is_some() || opts.tail.is_some();
     if opts.remove && input != Path::new("-") && !opts.verify && !partial {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());

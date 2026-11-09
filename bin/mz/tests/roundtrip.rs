@@ -570,6 +570,37 @@ fn default_output_hard_link_to_input_is_rejected() {
     }
 }
 
+/// `--rm` removes the input once the output is written and synced.
+#[test]
+fn rm_removes_input_after_output() {
+    let dir = tmp_dir();
+    let src = dir.join("x");
+    let payload = sample_payload(37, 64 * 1024);
+    for (c, d, ext) in [
+        (&["c", "--cpu=1"][..], &["d", "--cpu=1"][..], "mz"),
+        (&["c", "--cpu=2"], &["d", "--cpu=2"], "mz"),
+        (&["c", "--block"], &["d"], "mzb"),
+    ] {
+        let mid = dir.join(format!("x.{ext}"));
+        fs::write(&src, &payload).unwrap();
+        run_ok(
+            Command::new(mz_bin())
+                .args(c)
+                .args(["-q", "--rm"])
+                .arg(&src),
+        );
+        assert!(!src.exists(), "{c:?}");
+        run_ok(
+            Command::new(mz_bin())
+                .args(d)
+                .args(["-q", "--rm"])
+                .arg(&mid),
+        );
+        assert!(!mid.exists(), "{d:?}");
+        assert!(fs::read(&src).unwrap() == payload, "{c:?} {d:?}");
+    }
+}
+
 /// `-0 --block` writes Go's uncompressed block (SPEC 1.1: size 0 means the rest is literals):
 /// `0x00` when empty, else `0x00 0x00` and the input.
 #[test]

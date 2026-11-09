@@ -65,8 +65,23 @@ pub fn check_not_input(input: &Path, output: &Path) -> io::Result<()> {
 // Only regular files are compared: `same_file` opens both paths, and opening a FIFO blocks
 // until the other end appears. An output it can't open for reading can't be the input.
 fn is_same_file(a: &Path, b: &Path) -> bool {
-    let is_file = |p| std::fs::metadata(p).is_ok_and(|m| m.is_file());
     is_file(a) && is_file(b) && matches!(same_file::is_same_file(a, b), Ok(true))
+}
+
+/// Syncs the output to disk before `--rm` deletes the input, so a crash can't lose both.
+/// Stdout and other outputs that aren't regular files are skipped: pipes and terminals
+/// can't be synced, and opening a FIFO would block.
+pub fn sync_output(path: &Path) -> io::Result<()> {
+    if path != Path::new("-") && is_file(path) {
+        // Reopened because the writers are boxed. Windows syncs only through a handle with
+        // write access.
+        File::options().write(true).open(path)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn is_file(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
 /// Like [`open_output`], but `Send + 'static` so the value can be moved

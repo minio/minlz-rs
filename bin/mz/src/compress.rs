@@ -25,7 +25,7 @@ use minlz::stream::{MAX_BLOCK_SIZE, MtWriterBuilder, Reader, WriterBuilder};
 use crate::args::Options;
 use crate::io_util::{
     CountingReader, CountingWriter, check_not_input, mb_per_sec, open_input, open_output,
-    open_output_send, resolve_threads,
+    open_output_send, resolve_threads, sync_output,
 };
 
 const EXT_STREAM: &str = "mz";
@@ -97,6 +97,7 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     check_verify(verifier, opts)?;
     if opts.remove && input != Path::new("-") {
         drop(src);
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -142,6 +143,7 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
     check_verify(verifier, opts)?;
     if opts.remove && input != Path::new("-") {
         drop(src);
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -195,6 +197,7 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
         }
     }
     if opts.remove && input != Path::new("-") {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
