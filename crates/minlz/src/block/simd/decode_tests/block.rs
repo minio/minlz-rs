@@ -23,7 +23,7 @@ use crate::block::simd::decode::{Decoder, Tables, ll_stats, off_stats, tok_stats
 use crate::block::simd::exec::{Tier, simd_tiers};
 use crate::block::simd::{MAX_CHUNK, MAX_CHUNKS, MAX_LIT_BLOCKS, OFF_TAB, PAD, rvarint};
 use crate::guard::Buffer;
-use crate::reference::decode_simd_block;
+use crate::reference::{SimdWalker, decode_simd_block, walk_simd_block};
 
 /// Returns the MinLZ block of a SIMD block body: the header of size bytes, then body.
 fn with_header(size: u64, body: &[u8]) -> Vec<u8> {
@@ -106,6 +106,45 @@ fn simd_offsets() {
         assert_eq!([base, base + (1 << n) - 1], want, "symbol {s}");
     }
     assert_eq!(OFF_TAB[0], 1, "symbol 0 must decode as offset 1");
+}
+
+/// The example of SPEC_SIMD.md 4.4: offsets 78 and 33 in a chunk store the offset bits 0E.
+#[test]
+fn simd_offset_bits_example() {
+    assert_eq!(test_offset(78), (33, 6, 3), "offset 78");
+    assert_eq!(test_offset(33), (24, 1, 2), "offset 33");
+    let lits: Vec<u8> = (0..80).collect();
+    let mut tb = TestBlock {
+        ops: vec![op(80, 4, 78), op(0, 4, 33)],
+        lits: lits.clone(),
+        chunk: 2,
+        ..Default::default()
+    };
+    let (e, want) = test_pad(&mut TestBuilder::default(), &mut tb);
+    assert_eq!(e.chunks[0].vals[OFFC], [33, 24], "offset symbols");
+    assert_eq!(e.chunks[0].vals[4], [0x0e], "offset bits");
+    // Reading the first bit as the most significant would give offsets 75 and 34.
+    let msb = test_run(&[op(80, 4, 75), op(0, 4, 34)], &lits, 2, 0);
+    assert_ne!(
+        want[..88],
+        msb,
+        "the example must tell the bit orders apart"
+    );
+
+    let block = e.bytes();
+    simd_tiers(|_, _| test_decode(&block, &want));
+    struct Offsets(Vec<usize>);
+    impl SimdWalker for Offsets {
+        fn op(&mut self, _: usize, _: usize, offset: usize, repeat: bool) {
+            if !repeat {
+                self.0.push(offset);
+            }
+        }
+    }
+    let mut offs = Offsets(Vec::new());
+    let got = walk_simd_block(&block, &mut offs);
+    assert_eq!(got, Ok(want), "reference");
+    assert_eq!(offs.0, [78, 33], "reference offsets");
 }
 
 /// Parses "Class, values 1-33:" and "In-class length, symbols 1-175:".

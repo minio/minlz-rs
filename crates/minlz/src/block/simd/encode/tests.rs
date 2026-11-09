@@ -298,6 +298,20 @@ fn tables_match_go_formulas() {
     }
 }
 
+/// The example of SPEC_SIMD.md 4.4: offsets 78 and 33 are symbols 33 and 24, with the offset
+/// bits 0E.
+#[test]
+fn simd_encode_offset_bits_example() {
+    let mut out = [0; 64];
+    let mut e = Encoder::new(&mut out);
+    for off in [78, 33] {
+        let bits = e.put_offset(off);
+        e.put_bits(bits);
+    }
+    assert_eq!(e.s.offc[..2], [33, 24], "offset symbols");
+    assert_eq!((e.s.raw[0], e.nacc), (0x0e, 5), "offset bits");
+}
+
 /// TestSIMDEncode
 #[test]
 #[cfg_attr(miri, ignore)]
