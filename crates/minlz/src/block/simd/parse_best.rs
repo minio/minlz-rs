@@ -60,7 +60,8 @@ struct Scorer<'s> {
     token_bits: isize,
     symbol_bits: isize,
     ll_bits: isize,
-    /// simdSplitCost && e.noOverlap, which the parse can't change, as Smallest has no budget.
+    /// Go's `simdSplitCost && e.noOverlap`, which the parse can't change, as Smallest has no
+    /// budget.
     split_cost: bool,
     best: Match,
 }
@@ -205,8 +206,8 @@ impl Scorer<'_> {
 }
 
 impl<'a> Encoder<'a> {
-    /// encodeBlockBest parses src like the function encodeBlockBest, without its size and offset
-    /// limits, scoring matches by their estimated size in a SIMD block.
+    /// Parses src like Go's function `encodeBlockBest`, without its size and offset limits, scoring
+    /// matches by their estimated size in a SIMD block.
     pub(super) fn encode_block_best(&mut self, src: &'a [u8]) {
         let mut l_table = table_pool::get(&U64_20);
         let mut s_table = table_pool::get(&U64_18);

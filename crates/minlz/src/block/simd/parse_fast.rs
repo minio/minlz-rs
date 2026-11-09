@@ -23,23 +23,22 @@ use crate::block::load_store::{load32, load64};
 use crate::block::table_pool::{self, U16_13, U32_13};
 
 impl<'a> Encoder<'a> {
-    /// encodeFastBlockGo parses src like the function encodeFastBlockGo, without its size and
-    /// offset limits.
-    pub(super) fn encode_fast_block_go(&mut self, src: &'a [u8]) {
+    /// Parses src like Go's function `encodeFastBlockGo`, without its size and offset limits.
+    pub(super) fn encode_fast_block(&mut self, src: &'a [u8]) {
         let mut table = table_pool::get(&U32_13);
         self.parse_fast(src, &mut table);
         table_pool::put(&U32_13, table);
     }
 
-    /// encodeFastBlockGo64K is encodeFastBlockGo for blocks of at most 64 KB, with 16 bit table
-    /// entries.
-    pub(super) fn encode_fast_block_go_64k(&mut self, src: &'a [u8]) {
+    /// Parses src as [`Encoder::encode_fast_block`] does, for blocks of at most 64 KB, with 16 bit
+    /// table entries.
+    pub(super) fn encode_fast_block_64k(&mut self, src: &'a [u8]) {
         let mut table = table_pool::get(&U16_13);
         self.parse_fast(src, &mut table);
         table_pool::put(&U16_13, table);
     }
 
-    /// The body of encodeFastBlockGo and encodeFastBlockGo64K, which differ only in their tables.
+    /// The body of encode_fast_block and encode_fast_block_64k, which differ only in their tables.
     ///
     /// Its loads are unchecked, as Go's: src has more than MIN_SAVING bytes, s and the entries
     /// of the zeroed table stay at most s_limit, and candidates and repeat sources are below s.

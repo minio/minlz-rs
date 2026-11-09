@@ -50,23 +50,22 @@ impl Entry for u16 {
 }
 
 impl<'a> Encoder<'a> {
-    /// encodeBlockGo parses src like the function encodeBlockGo, without its size and offset
-    /// limits.
-    pub(super) fn encode_block_go(&mut self, src: &'a [u8]) {
+    /// Parses src like Go's function `encodeBlockGo`, without its size and offset limits.
+    pub(super) fn encode_block(&mut self, src: &'a [u8]) {
         let mut table = table_pool::get(&U32_15);
         self.parse_block(src, &mut table);
         table_pool::put(&U32_15, table);
     }
 
-    /// encodeBlockGo64K is encodeBlockGo for blocks of at most 64 KB, with fewer and 16 bit table
-    /// entries.
-    pub(super) fn encode_block_go_64k(&mut self, src: &'a [u8]) {
+    /// Parses src as [`Encoder::encode_block`] does, for blocks of at most 64 KB, with fewer and 16
+    /// bit table entries.
+    pub(super) fn encode_block_64k(&mut self, src: &'a [u8]) {
         let mut table = table_pool::get(&U16_14);
         self.parse_block(src, &mut table);
         table_pool::put(&U16_14, table);
     }
 
-    /// The body of encodeBlockGo and encodeBlockGo64K, which differ only in their tables.
+    /// The body of encode_block and encode_block_64k, which differ only in their tables.
     ///
     /// Its loads are unchecked, as Go's: src has more than MIN_SAVING bytes, s and the entries
     /// of the zeroed table stay at most s_limit, and candidates and repeat sources are below s.

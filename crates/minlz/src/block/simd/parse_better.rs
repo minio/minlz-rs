@@ -23,12 +23,11 @@ use crate::block::hash::{hash4, hash7};
 use crate::block::load_store::{load32, load64};
 use crate::block::table_pool::{self, U16_13, U16_16, U32_14, U32_17};
 
-/// simdBetterMaxOff returns the largest offsets of new 4 and 5 byte matches that Balanced SIMD
-/// takes in a block of n bytes, indexed by length&1. Farther short matches cost more than their
-/// literals: up to 2 KB the operation streams are stored, so every token, literal length and
-/// offset symbol costs 8 bits; in larger blocks the offset bits grow with the offset.
-/// Between 2 and 8 KB fewer operations can make a coded stream go stored, so the bound is looser
-/// there.
+/// Returns the largest offsets of new 4 and 5 byte matches that Balanced SIMD takes in a block of n
+/// bytes, indexed by length&1 (Go's `simdBetterMaxOff`). Farther short matches cost more than their
+/// literals: up to 2 KB the operation streams are stored, so every token, literal length and offset
+/// symbol costs 8 bits; in larger blocks the offset bits grow with the offset. Between 2 and 8 KB
+/// fewer operations can make a coded stream go stored, so the bound is looser there.
 pub(super) fn better_max_off(n: usize) -> [usize; 2] {
     if n <= 2 << 10 {
         [127, 511]
@@ -40,9 +39,8 @@ pub(super) fn better_max_off(n: usize) -> [usize; 2] {
 }
 
 impl<'a> Encoder<'a> {
-    /// encodeBlockBetterGo parses src like the function encodeBlockBetterGo, without its size and
-    /// offset limits.
-    pub(super) fn encode_block_better_go(&mut self, src: &'a [u8]) {
+    /// Parses src like Go's function `encodeBlockBetterGo`, without its size and offset limits.
+    pub(super) fn encode_block_better(&mut self, src: &'a [u8]) {
         let mut l_table = table_pool::get(&U32_17);
         let mut s_table = table_pool::get(&U32_14);
         self.parse_better(src, &mut l_table, &mut s_table);
@@ -50,9 +48,9 @@ impl<'a> Encoder<'a> {
         table_pool::put(&U32_17, l_table);
     }
 
-    /// encodeBlockBetterGo64K is encodeBlockBetterGo for blocks of at most 64 KB, with fewer and
-    /// 16 bit table entries.
-    pub(super) fn encode_block_better_go_64k(&mut self, src: &'a [u8]) {
+    /// Parses src as [`Encoder::encode_block_better`] does, for blocks of at most 64 KB, with fewer
+    /// and 16 bit table entries.
+    pub(super) fn encode_block_better_64k(&mut self, src: &'a [u8]) {
         let mut l_table = table_pool::get(&U16_16);
         let mut s_table = table_pool::get(&U16_13);
         self.parse_better(src, &mut l_table, &mut s_table);
@@ -60,7 +58,7 @@ impl<'a> Encoder<'a> {
         table_pool::put(&U16_16, l_table);
     }
 
-    /// The body of encodeBlockBetterGo and encodeBlockBetterGo64K, which differ only in their
+    /// The body of encode_block_better and encode_block_better_64k, which differ only in their
     /// tables.
     ///
     /// Its loads are unchecked, as Go's: src has more than MIN_SAVING bytes, s and the entries

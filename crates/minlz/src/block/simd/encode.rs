@@ -227,7 +227,7 @@ impl Out<'_> {
         self.append(&b[..n]);
     }
 
-    /// appendRvarint
+    /// Appends the reverse varint of v.
     fn append_rvarint(&mut self, v: u64) {
         let mut b = [0u8; 10];
         let n = put_uvarint_at(&mut b, v);
@@ -293,9 +293,9 @@ thread_local! {
     static ENCODERS: Cell<Option<Box<Scratch>>> = const { Cell::new(None) };
 }
 
-/// encodeBlockSIMD encodes src to dst as a SIMD block without its indicator byte, and returns its
-/// size. It returns 0 if the block would not save the level's minimum, and at least
-/// [`MIN_SAVING`] bytes.
+/// Encodes src to dst as a SIMD block without its indicator byte, and returns its size. It returns
+/// 0 if the block would not save the level's minimum, and at least [`MIN_SAVING`] bytes. Port of
+/// Go's `encodeBlockSIMD`.
 pub(crate) fn encode_block_simd(dst: &mut [u8], src: &[u8], level: i32) -> usize {
     // No block this small saves MIN_SAVING bytes, and the parsers load 8 bytes at 1.
     if src.len() <= MIN_SAVING {
@@ -308,7 +308,7 @@ pub(crate) fn encode_block_simd(dst: &mut [u8], src: &[u8], level: i32) -> usize
     n
 }
 
-/// matchAt returns how many bytes match at src[a..] and src[b..], like matchLen.
+/// Returns how many bytes match at src[a..] and src[b..], like `match_len`.
 ///
 /// # Safety
 /// `b < a <= src.len()` must hold.
@@ -411,26 +411,26 @@ impl<'a> Encoder<'a> {
                 }
                 self.reset(src, delta, src.len() >> 3);
                 if src.len() <= 64 << 10 {
-                    self.encode_fast_block_go_64k(src);
+                    self.encode_fast_block_64k(src);
                 } else {
-                    self.encode_fast_block_go(src);
+                    self.encode_fast_block(src);
                 }
             }
             LEVEL_FASTEST => {
                 self.fast_code = 4096;
                 self.reset(src, delta, src.len() >> 5);
                 if src.len() <= 64 << 10 {
-                    self.encode_block_go_64k(src);
+                    self.encode_block_64k(src);
                 } else {
-                    self.encode_block_go(src);
+                    self.encode_block(src);
                 }
             }
             LEVEL_BALANCED => {
                 self.reset(src, delta, src.len() >> 5);
                 if src.len() <= 64 << 10 {
-                    self.encode_block_better_go_64k(src);
+                    self.encode_block_better_64k(src);
                 } else {
-                    self.encode_block_better_go(src);
+                    self.encode_block_better(src);
                 }
             }
             _ => {
@@ -478,7 +478,7 @@ impl<'a> Encoder<'a> {
         s.c.have = [false; LITS + 1];
     }
 
-    /// emitLiterals adds the literals after the last operation.
+    /// Adds the literals after the last operation.
     pub(super) fn emit_literals(&mut self, lits: &'a [u8]) {
         self.tail = lits;
         self.pos += lits.len();
@@ -504,15 +504,14 @@ impl<'a> Encoder<'a> {
             && self.one_op(offset, s - base)
     }
 
-    /// oneOp reports whether put_match can add a match of length bytes at offset.
+    /// Reports whether put_match can add a match of length bytes at offset.
     #[inline(always)]
     pub(super) fn one_op(&self, offset: usize, length: usize) -> bool {
         length <= MAX_LEN && (offset >= length || !self.no_overlap)
             || length <= MAX_LONG && offset >= MAX_LEN
     }
 
-    /// putOffset adds the symbol of a match offset, and returns its raw bits and their count for
-    /// put_bits.
+    /// Adds the symbol of a match offset, and returns its raw bits and their count for put_bits.
     #[inline(always)]
     pub(super) fn put_offset(&mut self, offset: usize) -> (u64, usize) {
         // With the 8, offsets below 16 code as themselves without raw bits, and need no branch.
@@ -522,7 +521,7 @@ impl<'a> Encoder<'a> {
         ((offset & ((1 << b) - 1)) as u64, b)
     }
 
-    /// putBits adds the n raw bits of v.
+    /// Adds the n raw bits of v.
     #[inline(always)]
     pub(super) fn put_bits(&mut self, (v, n): (u64, usize)) {
         // Store and advance without a branch, since the stores come at an irregular pace.
@@ -536,8 +535,7 @@ impl<'a> Encoder<'a> {
         (self.acc, self.nacc) = (acc >> ((k << 5) & 63), n & 31);
     }
 
-    /// putLL adds the literal length ll, at most MAX_LONG, and returns the literal bit of the
-    /// operation.
+    /// Adds the literal length ll, at most MAX_LONG, and returns the literal bit of the operation.
     #[inline(always)]
     pub(super) fn put_ll(&mut self, ll: usize) -> u8 {
         // Operations with and without literals alternate unpredictably, so don't branch on it.
@@ -551,9 +549,8 @@ impl<'a> Encoder<'a> {
         (n as u8) << 1
     }
 
-    /// putLits adds the ll plain literals at src[from..], where ll is at most MAX_LONG.
-    /// src has at least MAX_LEN bytes from from, so the literals, as long as src, have as much
-    /// room after them.
+    /// Adds the ll plain literals at src[from..], where ll is at most MAX_LONG. src has at least
+    /// MAX_LEN bytes from from, so the literals, as long as src, have as much room after them.
     #[inline(always)]
     pub(super) fn put_lits(&mut self, src: &[u8], from: usize, ll: usize) {
         let n = self.n_lits;
@@ -568,9 +565,8 @@ impl<'a> Encoder<'a> {
         self.pos += ll;
     }
 
-    /// putMatch adds an operation with the literal and repeat bits t, and a match at offset that
-    /// satisfies one_op. The offset becomes the repeat offset. It returns whether the chunk is
-    /// full.
+    /// Adds an operation with the literal and repeat bits t, and a match at offset that satisfies
+    /// one_op. The offset becomes the repeat offset. It returns whether the chunk is full.
     #[inline(always)]
     pub(super) fn put_match(&mut self, mut t: u8, offset: usize, length: usize) -> bool {
         self.rep = offset;
@@ -600,7 +596,7 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// emitCopyLits adds lits, then a match of length bytes at offset.
+    /// Adds lits, then a match of length bytes at offset.
     pub(super) fn emit_copy_lits(&mut self, mut lits: &[u8], offset: usize, length: usize) {
         while lits.len() > MAX_LONG {
             self.emit_long(&lits[..MAX_LONG], self.rep, 1, 0);
@@ -631,7 +627,7 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// emitRepeatLits adds lits, then a match of length bytes at the repeat offset.
+    /// Adds lits, then a match of length bytes at the repeat offset.
     pub(super) fn emit_repeat_lits(&mut self, mut lits: &[u8], length: usize) {
         while lits.len() > MAX_LONG {
             self.emit_long(&lits[..MAX_LONG], self.rep, 1, 0);
@@ -658,7 +654,7 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// emitCopy adds a match of length bytes at offset, without literals.
+    /// Adds a match of length bytes at offset, without literals.
     pub(super) fn emit_copy(&mut self, offset: usize, length: usize) {
         debug_assert!(self.pos > 0, "first operation without literals");
         self.rep = offset;
@@ -667,10 +663,9 @@ impl<'a> Encoder<'a> {
         self.emit_long(&[], 0, 0, length);
     }
 
-    /// emitLong adds an operation with lits, at most MAX_LONG of them, and a match of length
-    /// bytes at self.rep, split into more operations if needed. t is the repeat bit of the
-    /// operation, and prev the repeat offset before it. The offset of the match must already be
-    /// added.
+    /// Adds an operation with lits, at most MAX_LONG of them, and a match of length bytes at
+    /// self.rep, split into more operations if needed. t is the repeat bit of the operation, and
+    /// prev the repeat offset before it. The offset of the match must already be added.
     fn emit_long(&mut self, lits: &[u8], prev: usize, mut t: u8, mut length: usize) {
         if !lits.is_empty() {
             let mut n = lits.len();
@@ -762,8 +757,8 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// deltaLits adds lits, and their delta literals (SPEC_SIMD.md 4.5), for an operation at
-    /// self.pos with repeat offset rep.
+    /// Adds lits, and their delta literals (SPEC_SIMD.md 4.5), for an operation at self.pos with
+    /// repeat offset rep.
     fn delta_lits(&mut self, lits: &[u8], rep: usize) {
         let n = self.n_lits;
         let s = &mut *self.s;
@@ -801,7 +796,7 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// endChunk codes the streams of the current chunk to out and its record to chunk_recs.
+    /// Codes the streams of the current chunk to out and its record to chunk_recs.
     pub(super) fn end_chunk(&mut self) {
         while self.nacc > 0 {
             self.s.raw[self.n_raw] = self.acc as u8;
@@ -910,12 +905,12 @@ impl<'a> Encoder<'a> {
         self.out.n
     }
 
-    /// litBits returns the estimated size of lits in bits, for the parsers.
+    /// Returns the estimated size of lits in bits, for the parsers.
     pub(super) fn lit_bits(&mut self, lits: &[u8]) -> usize {
         self.s.c.lit_bits(lits)
     }
 
-    /// litsFit reports whether the literals, with the tail, can fit in room bytes.
+    /// Reports whether the literals, with the tail, can fit in room bytes.
     fn lits_fit(&mut self, room: isize) -> bool {
         let need = (self.n_lits + self.tail.len()) as isize - room;
         if need <= 0 {
@@ -926,9 +921,8 @@ impl<'a> Encoder<'a> {
         s.c.sample_save(self.tail, need) <= 0
     }
 
-    /// deltaChunk reports whether the current chunk, with lz bytes of operations, takes delta
-    /// literals: when they are estimated to save 1/delta_div of the chunk. It records where the
-    /// literals switch.
+    /// Reports whether the current chunk, with lz bytes of operations, takes delta literals: when
+    /// they are estimated to save 1/delta_div of the chunk. It records where the literals switch.
     fn delta_chunk(&mut self, lz: usize) -> bool {
         let start = self.chunk_lits;
         self.chunk_lits = self.op_lits;
@@ -948,9 +942,8 @@ impl<'a> Encoder<'a> {
 }
 
 impl LitSplit {
-    /// litBlocks returns the boundaries of the literal blocks of lits.
-    /// With split_lits, they are on LIT_SEG boundaries, chosen for the smallest estimated size.
-    /// Otherwise the blocks are equal.
+    /// Returns the boundaries of the literal blocks of lits. With split_lits, they are on LIT_SEG
+    /// boundaries, chosen for the smallest estimated size. Otherwise the blocks are equal.
     fn lit_blocks(&mut self, split_lits: bool, lits: &[u8]) -> &[usize] {
         self.cuts.clear();
         if !split_lits {
@@ -999,10 +992,10 @@ impl LitSplit {
     }
 }
 
-/// simdLitBits estimates the size in bits of a literal block of n values with histogram h:
-/// stored, or its entropy plus the overhead of a block with a new table of about 16 bytes.
-/// The entropy is cheaper than building the tables, which would dominate the encoding of
-/// literal-heavy data.
+/// Estimates the size in bits of a literal block of n values with histogram h: stored, or its
+/// entropy plus the overhead of a block with a new table of about 16 bytes. The entropy is cheaper
+/// than building the tables, which would dominate the encoding of literal-heavy data. Go's
+/// `simdLitBits`.
 fn lit_bits(h: &[u64; 256], n: usize) -> usize {
     if n < MIN_CODED {
         return 8 * n;
@@ -1017,9 +1010,9 @@ fn lit_bits(h: &[u64; 256], n: usize) -> usize {
     (8 * n).min((e >> 8).max(0) as usize + BLOCK_BITS + TABLE_BITS + 16 * 8)
 }
 
-/// simdEntropyBits returns a lower bound of the entropy in bits of the counts h of n values.
-/// log2 is within -1.88 and +0.5 of 256*log2, so n*log2(n) - sum(f*log2(f)) in 1/256 bits, as
-/// lit_bits computes it, is at most 2.38n above 256 times the entropy.
+/// Returns a lower bound of the entropy in bits of the counts h of n values (Go's
+/// `simdEntropyBits`). log2 is within -1.88 and +0.5 of 256*log2, so n*log2(n) - sum(f*log2(f)) in
+/// 1/256 bits, as lit_bits computes it, is at most 2.38n above 256 times the entropy.
 fn entropy_bits(h: &[u64], n: usize) -> usize {
     let mut e = (n * log2(n as u64)) as isize - (5 * n).div_ceil(2) as isize;
     for &f in h {
@@ -1030,7 +1023,7 @@ fn entropy_bits(h: &[u64], n: usize) -> usize {
     (e.max(0) >> 8) as usize
 }
 
-/// simdLog2 returns log2(x) for x > 0 in 1/256 units, from the 9 top bits of x.
+/// Returns log2(x) for x > 0 in 1/256 units, from the 9 top bits of x (Go's `simdLog2`).
 fn log2(x: u64) -> usize {
     let b = 63 - x.leading_zeros() as usize;
     (b << 8) + LOG2_FRAC[((x << (63 - b)) >> 55 & 0xff) as usize] as usize
@@ -1043,18 +1036,17 @@ impl Coder {
         self.pv.histogram(&mut self.hist, v);
     }
 
-    /// litBits returns the estimated size of lits in bits.
+    /// Returns the estimated size of lits in bits.
     fn lit_bits(&mut self, lits: &[u8]) -> usize {
         self.histogram(lits, 256);
         self.tmp[0].set_code(LITS, &self.hist);
         self.tmp[0].cost(&self.hist, 256).0
     }
 
-    /// sampleSave returns need less the bytes that coding lits in blocks of up to
-    /// pivco::MAX_BLOCK_SIZE saves, estimated from the entropy of 16 samples of 256 bytes spread
-    /// over each block. It stops when need is met, as no block codes larger than stored. The
-    /// samples' entropy is lower than the block's on average, so literals that coding would fit
-    /// rarely fail.
+    /// Returns need less the bytes that coding lits in blocks of up to pivco::MAX_BLOCK_SIZE saves,
+    /// estimated from the entropy of 16 samples of 256 bytes spread over each block. It stops when
+    /// need is met, as no block codes larger than stored. The samples' entropy is lower than the
+    /// block's on average, so literals that coding would fit rarely fail.
     fn sample_save(&mut self, mut lits: &[u8], mut need: isize) -> isize {
         const RUNS: usize = 16;
         const RUN: usize = 4096 / RUNS;
@@ -1205,7 +1197,7 @@ impl Table {
         (n as usize, ok)
     }
 
-    /// setCode sets t to the Huffman code of h, as code lengths of stream k. h must not be empty.
+    /// Sets t to the Huffman code of h, as code lengths of stream k. h must not be empty.
     fn set_code(&mut self, k: usize, h: &[u64; 256]) {
         let syms = 2 * CODE_BYTES[k];
         assert!(
@@ -1217,8 +1209,8 @@ impl Table {
         self.set_nibbles(&lens[..syms]);
     }
 
-    /// setClass sets t to the class lengths of h for layout k (SPEC_SIMD.md 2.3).
-    /// The values of the stream are below syms.
+    /// Sets t to the class lengths of h for layout k (SPEC_SIMD.md 2.3). The values of the stream
+    /// are below syms.
     fn set_class(&mut self, k: usize, h: &[u64; 256], syms: usize) {
         let mut cl = [0u8; 24];
         let n;
@@ -1258,8 +1250,8 @@ impl Table {
     }
 }
 
-/// simdTokClassLens sets cl to the token class lengths of h (SPEC_SIMD.md A.4),
-/// and lens to the code lengths. It returns the number of class lengths.
+/// Sets cl to the token class lengths of h (SPEC_SIMD.md A.4), and lens to the code lengths. It
+/// returns the number of class lengths. Go's `simdTokClassLens`.
 fn tok_class_lens(h: &[u64; 256], cl: &mut [u8; 24], lens: &mut [u8; 256]) -> usize {
     const GROUPS: usize = 14;
     const MAX: u8 = pivco::MAX_CODE_LEN as u8;
@@ -1296,9 +1288,9 @@ fn tok_class_lens(h: &[u64; 256], cl: &mut [u8; 24], lens: &mut [u8; 256]) -> us
     GROUPS + 8
 }
 
-/// simdLimitedLens sets l to the lengths of an optimal complete prefix code for the weights w,
-/// with `l[i] <= lim[i]`, using package-merge. Weights of 0 get no code,
-/// except that a code always has at least 2 lengths. w.len() must be at most 24.
+/// Sets l to the lengths of an optimal complete prefix code for the weights w, with
+/// `l[i] <= lim[i]`, using package-merge (Go's `simdLimitedLens`). Weights of 0 get no code, except
+/// that a code always has at least 2 lengths. w.len() must be at most 24.
 fn limited_lens(w: &[u64], lim: &[u8], l: &mut [u8]) {
     l.fill(0);
     let mut sym = [0u8; 24];

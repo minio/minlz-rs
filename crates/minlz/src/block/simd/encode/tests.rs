@@ -61,12 +61,12 @@ impl Rng {
         -(1.0 - self.f64()).ln()
     }
 
-    /// genEncRandom
+    /// Returns n random bytes (Go's `genEncRandom`).
     fn random(&mut self, n: usize) -> Vec<u8> {
         (0..n).map(|_| self.next() as u8).collect()
     }
 
-    /// genEncText
+    /// Returns size bytes of random words (Go's `genEncText`).
     fn text(&mut self, size: usize) -> Vec<u8> {
         const WORDS: [&str; 15] = [
             "lorem",
@@ -94,7 +94,7 @@ impl Rng {
         out
     }
 
-    /// genEncMixed alternates incompressible and compressible runs.
+    /// Alternates incompressible and compressible runs (Go's `genEncMixed`).
     fn mixed(&mut self, size: usize) -> Vec<u8> {
         const RUN: usize = 4 << 10;
         let pattern = b"the quick brown fox jumps over the lazy dog. ";
@@ -107,8 +107,8 @@ impl Rng {
         out
     }
 
-    /// simdRuns returns n bytes of runs of length bytes of one value, which differs from the run
-    /// before.
+    /// Returns n bytes of runs of length bytes of one value, which differs from the run before
+    /// (Go's `simdRuns`).
     fn runs(&mut self, length: usize, n: usize) -> Vec<u8> {
         let mut b: Vec<u8> = Vec::with_capacity(n + length);
         while b.len() < n {
@@ -210,8 +210,8 @@ fn chunk_flags(b: &[u8], f: impl FnMut(u8)) {
     walk_simd_block(b, &mut W(f)).unwrap();
 }
 
-/// simdTestStats adds the entry modes of the streams of SIMD block b to modes, with the literals
-/// as LITS, and how many chunks have each chunk flag to flags.
+/// Adds the entry modes of the streams of SIMD block b to modes, with the literals as LITS, and how
+/// many chunks have each chunk flag to flags (Go's `simdTestStats`).
 fn test_stats(b: &[u8], modes: &mut [[usize; 8]; LITS + 1], flags: &mut [usize; 2]) {
     let (_, body) = simd_header(&b[1..]).unwrap();
     let body = &body[1..];
@@ -593,7 +593,7 @@ fn simd_encode_split_chunk_end() {
     assert_eq!(decode_simd_block_strict(&out[..1 + n]), Ok(src));
 }
 
-/// simdParseResult is the state of an Encoder after a block is parsed, and the block.
+/// The state of an Encoder after a block is parsed, and the block (Go's `simdParseResult`).
 struct ParseResult {
     chunks: usize,
     size: usize,
@@ -601,8 +601,8 @@ struct ParseResult {
     block: Vec<u8>,
 }
 
-/// simdParseRun parses src with the SuperFast parser, encodeFastBlockGo64K if k64, as parse does
-/// but without the size limit. The block starts with a zero byte.
+/// Parses src with the SuperFast parser, encode_fast_block_64k if k64, as parse does but without
+/// the size limit (Go's `simdParseRun`). The block starts with a zero byte.
 fn parse_run(src: &[u8], k64: bool, no_overlap: bool, budget: bool) -> ParseResult {
     let mut out = vec![0; 1 + 2 * src.len() + (1 << 16)];
     let mut e = Encoder::new(&mut out[1..]);
@@ -610,9 +610,9 @@ fn parse_run(src: &[u8], k64: bool, no_overlap: bool, budget: bool) -> ParseResu
     e.reset(src, 0, 0);
     e.out.limit = isize::MAX / 2;
     if k64 {
-        e.encode_fast_block_go_64k(src);
+        e.encode_fast_block_64k(src);
     } else {
-        e.encode_fast_block_go(src);
+        e.encode_fast_block(src);
     }
     if e.n_tok > 0 {
         e.end_chunk();
@@ -817,8 +817,8 @@ fn simd_encode_chunk_edge() {
     }
 }
 
-/// simdTestParseInput returns 1 MiB of literal runs and matches around the lengths where the
-/// parsers leave operations to the emitters.
+/// Returns 1 MiB of literal runs and matches around the lengths where the parsers leave operations
+/// to the emitters (Go's `simdTestParseInput`).
 fn test_parse_input(rng: &mut Rng) -> Vec<u8> {
     const LENS: [usize; 12] = [0, 1, 4, 8, 31, 32, 33, 287, 288, 289, 290, 600];
     const OFFS: [usize; 10] = [1, 3, 8, 15, 16, 31, 32, 33, 1000, 100000];
@@ -1030,9 +1030,9 @@ fn simd_entropy_bits() {
                 let mut e = Encoder::with_scratch(&mut out, s);
                 e.reset(src, 0, 0);
                 match level {
-                    0 => e.encode_fast_block_go_64k(src),
-                    1 => e.encode_block_go_64k(src),
-                    _ => e.encode_block_better_go_64k(src),
+                    0 => e.encode_fast_block_64k(src),
+                    1 => e.encode_block_64k(src),
+                    _ => e.encode_block_better_64k(src),
                 }
                 let name = format!("input {i} level {level}");
                 let (n_tok, n_ll, n_offc, n_esc, n_lits) =
@@ -1120,7 +1120,7 @@ fn simd_encode_random_stored() {
 }
 
 impl Rng {
-    /// simdOtherByte returns a random byte that is not in not.
+    /// Returns a random byte that is not in not (Go's `simdOtherByte`).
     fn other(&mut self, not: &[u8]) -> u8 {
         loop {
             let c = self.next() as u8;
@@ -1131,17 +1131,17 @@ impl Rng {
     }
 }
 
-/// simdParseRun parses src with the Balanced parser, or with the 64 KB one, as parse does but
-/// without the size limit, and returns the repeat offset and the literals.
+/// Parses src with the Balanced parser, or with the 64 KB one, as parse does but without the size
+/// limit, and returns the repeat offset and the literals.
 fn better_parse_run(src: &[u8], big: bool) -> (usize, Vec<u8>) {
     let mut out = vec![0; 2 * src.len() + (1 << 16)];
     let mut e = Encoder::new(&mut out);
     e.reset(src, 0, 0);
     e.out.limit = isize::MAX / 2;
     if big {
-        e.encode_block_better_go(src);
+        e.encode_block_better(src);
     } else {
-        e.encode_block_better_go_64k(src);
+        e.encode_block_better_64k(src);
     }
     if e.n_tok > 0 {
         e.end_chunk();
@@ -1149,9 +1149,9 @@ fn better_parse_run(src: &[u8], big: bool) -> (usize, Vec<u8>) {
     (e.rep, [&e.s.buf[..e.n_lits], e.tail].concat())
 }
 
-/// simdShortInput returns n random bytes with a copy of length bytes at offset off, whose ends
-/// Balanced's search checks, so it finds the copy unless a random match comes first. For other
-/// lengths only the bytes after the copy differ.
+/// Returns n random bytes with a copy of length bytes at offset off, whose ends Balanced's search
+/// checks, so it finds the copy unless a random match comes first. For other lengths only the bytes
+/// after the copy differ.
 fn short_input(n: usize, off: usize, length: usize) -> Vec<u8> {
     // Not Go's seed n+off: its bytes differ here, and with n+off a short table entry of the copy's
     // source is overwritten before the search reaches the copy.
@@ -1174,11 +1174,10 @@ fn short_input(n: usize, off: usize, length: usize) -> Vec<u8> {
     b
 }
 
-/// simdFarRepeatInput returns a block where Balanced finds a copy of 4 bytes at offset far+210
-/// that is the repeat offset, which it keeps, where it passes over those at other offsets over its
-/// bound, and the position of the copy. The repeat check finds such copies at the positions that
-/// the search checks one after another, so this one is at a position that it reaches with a step
-/// of 2.
+/// Returns a block where Balanced finds a copy of 4 bytes at offset far+210 that is the repeat
+/// offset, which it keeps, where it passes over those at other offsets over its bound, and the
+/// position of the copy. The repeat check finds such copies at the positions that the search checks
+/// one after another, so this one is at a position that it reaches with a step of 2.
 fn far_repeat_input(rng: &mut Rng, far: usize) -> (Vec<u8>, usize) {
     // Zeros end an operation at q, so the search checks q to q+128, then every other position.
     let mut b = rng.random(16);
