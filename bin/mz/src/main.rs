@@ -36,8 +36,8 @@ Usage:
   mz c [options] <input>       Compress one file (or - for stdin).
   mz d [options] <input>       Decompress one file (or - for stdin).
   mz cat [options] <input>     Alias for `d -c` (decompress to stdout).
-  mz tail [options] <input>    Alias for `d -c --tail=1K+nl`; with --follow,
-                               behaves like `tail -f`.
+  mz tail [options] <input>    Alias for `d -c --tail=1K+nl`.  To follow a
+                               growing file, use `mz cat --follow`.
   mz verify <input>            Read and validate; no output.
   mz bench [options] <input>   Repeat compress/decompress and report throughput.
 

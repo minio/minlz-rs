@@ -797,6 +797,13 @@ mod tests {
     }
 
     #[test]
+    fn follow_with_cat_not_tail() {
+        let cli = parse_argv(&["cat", "--follow", "file.mz"]).unwrap();
+        assert!(cli.options.follow && cli.options.stdout && cli.options.tail.is_none());
+        assert!(parse_argv(&["tail", "--follow", "file.mz"]).is_err());
+    }
+
+    #[test]
     fn go_style_single_dash_follow() {
         let cli = parse_argv(&["d", "-follow", "file.mz"]).unwrap();
         assert!(cli.options.follow);
