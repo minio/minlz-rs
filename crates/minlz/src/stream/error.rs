@@ -26,8 +26,8 @@ pub enum Error {
     /// The stream is structurally malformed (bad chunk header, truncated
     /// chunk, invalid stream identifier, etc.).  Equivalent to Go `ErrCorrupt`.
     Corrupt,
-    /// A chunk's masked CRC32C did not match its contents.  Equivalent to
-    /// Go `ErrCRC`.
+    /// A chunk's checksum did not match its contents: the masked CRC32C, or
+    /// the XXH3-64 hash of a SIMD chunk.  Equivalent to Go `ErrCRC`.
     Crc,
     /// A block's declared or actual uncompressed size exceeds the configured
     /// [`max_block_size`](super::ReaderBuilder::max_block_size).
