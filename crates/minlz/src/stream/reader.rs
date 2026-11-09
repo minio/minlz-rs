@@ -783,9 +783,6 @@ pub(crate) fn simd_chunk_header(payload: &[u8], max_block: usize) -> Result<(usi
         return Err(Error::Corrupt);
     };
     // As for min_lz_chunk_len, other block types are corrupt.
-    if get_uvarint(block).map_or(0, |(v, _)| v >> 24) != simd::BLOCK_TYPE {
-        return Err(Error::Corrupt);
-    }
     let (n, block) = simd::simd_header(block).map_err(|e| match e {
         BlockError::TooLarge => Error::TooLarge,
         _ => Error::Corrupt,
