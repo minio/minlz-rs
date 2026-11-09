@@ -502,6 +502,123 @@ fn simd_encode_max_chunks() {
     }
 }
 
+/// Returns 8 MiB that LevelSmallestSIMD codes in 3 literal runs whose cuts on segments take
+/// 1026 literal blocks. The literals are 7-bit bytes whose 4-grams all differ (7 bits at a time
+/// of the m-sequence of x^28+x^3+1), so the parser finds only the matches put in: 32 bytes at
+/// offset 4096. They are inverted on odd segments of each run, so the cost DP cuts every
+/// segment, and each run ends in a partial segment.
+///
+/// The parser splits the literals before a match into operations of MAX_LONG. 19 matches after
+/// 100*MAX_LONG+1 literals each leave chunk 1 575*LIT_SEG+2739 literals in its CHUNK_OPS
+/// operations. The literals run on to the last match: chunk 2, whose first 32 literals of each
+/// operation are the bytes 4096 back plus 1 or 2, so it takes delta literals (the reference is
+/// the repeat offset). The tail is plain.
+fn over_max_lit_blocks() -> Vec<u8> {
+    const OFF: usize = 4096;
+    let s1 = 100 * MAX_LONG + 1;
+    // Where chunk 2 and the tail start, in literals.
+    let la = 19 * s1 + (CHUNK_OPS - 19 * 101) * MAX_LONG;
+    let lb = la + 299 * LIT_SEG + 2400;
+    let mut x = 1u32;
+    let mut mseq = || {
+        let mut b = 0;
+        for _ in 0..7 {
+            let n = (x >> 27 ^ x >> 24) & 1;
+            x = (x << 1 | n) & ((1 << 28) - 1);
+            b = b << 1 | n as u8;
+        }
+        b
+    };
+    let mut src: Vec<u8> = Vec::with_capacity(8 << 20);
+    let mut lit = 0;
+    while src.len() < 8 << 20 {
+        let matched = lit > 0 && (lit % s1 == 0 && lit <= 19 * s1 || lit == lb);
+        if matched {
+            // The match must not extend back, nor on (below).
+            let p = src.len();
+            if src[p - 1] == src[p - 1 - OFF] {
+                src[p - 1] ^= 1;
+            }
+            src.extend_from_within(p - OFF..p - OFF + 32);
+        }
+        let p = src.len();
+        let start = if lit < la {
+            0
+        } else if lit < lb {
+            la
+        } else {
+            lb
+        };
+        let mut b = mseq();
+        if (lit - start) / LIT_SEG % 2 == 1 {
+            b = !b;
+        }
+        if (la..lb).contains(&lit) && (lit - 19 * s1) % MAX_LONG < 32 {
+            b = src[p - OFF].wrapping_add(1 + (mseq() & 1));
+        }
+        if matched && b == src[p - OFF] {
+            b ^= 1;
+        }
+        src.push(b);
+        lit += 1;
+    }
+    src
+}
+
+/// LevelSmallestSIMD writes at most MAX_LIT_BLOCKS literal blocks: when its cuts on segments
+/// take more, it cuts each run into equal blocks, as the other levels do.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn simd_encode_max_lit_blocks() {
+    let src = over_max_lit_blocks();
+    let enc = encode_level(&src, LEVEL_SMALLEST);
+    let mut modes = [[0; 8]; LITS + 1];
+    let mut flags = [0; 2];
+    test_stats(&enc, &mut modes, &mut flags);
+    let lit_blocks: usize = modes[LITS].iter().sum();
+    // Runs of 575*LIT_SEG+2739, 299*LIT_SEG+2400 and 149*LIT_SEG+2413 literals: 72, 38 and 19
+    // equal blocks.
+    assert!(
+        flags[0] == 1 && lit_blocks == 72 + 38 + 19,
+        "{} delta chunks, {lit_blocks} literal blocks",
+        flags[0]
+    );
+    assert!(decode_block(&enc) == Ok(src));
+}
+
+/// lit_blocks keeps the cuts on segments of runs that take MAX_LIT_BLOCKS blocks, and cuts runs
+/// that would take more into equal blocks.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn simd_lit_blocks_max() {
+    let mut rng = Rng(1);
+    let mut split = LitSplit::default();
+    for (last, want) in [
+        (147 * LIT_SEG + 2400, MAX_LIT_BLOCKS),
+        (148 * LIT_SEG + 2400, 72 + 38 + 19),
+    ] {
+        // 7-bit literals, inverted on odd segments of each run, so the DP cuts every segment.
+        let (mut lits, mut ends) = (Vec::new(), Vec::new());
+        for n in [575 * LIT_SEG + 2739, 299 * LIT_SEG + 2413, last] {
+            lits.extend((0..n).map(|i| {
+                let b = rng.next() as u8 & 0x7f;
+                if i / LIT_SEG % 2 == 1 { !b } else { b }
+            }));
+            ends.push(lits.len());
+        }
+        let cuts = split.lit_blocks(true, [&lits, &lits], &ends);
+        assert!(
+            cuts.len() - 1 == want
+                && ends.iter().all(|e| cuts.contains(e))
+                && cuts
+                    .windows(2)
+                    .all(|c| c[1] - c[0] <= pivco::MAX_BLOCK_SIZE),
+            "last run of {last}: {} blocks, want {want}",
+            cuts.len() - 1
+        );
+    }
+}
+
 /// TestSIMDEncodeOps decodes encoded blocks with the strict reference decoder, which also checks
 /// the no-overlap flags.
 #[test]

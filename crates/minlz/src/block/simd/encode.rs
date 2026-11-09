@@ -22,7 +22,7 @@ use std::cell::Cell;
 
 use super::{
     BLOCK_TYPE, CLASS_LENS, CODE_BYTES, CODE_LENS, CURRENT, DELTA, DELTA_LENS, ESC, LAYOUTS, LITS,
-    LL, MAX_CHUNKS, MAX_LEN, MIN_SAVING, OFFC, TOK,
+    LL, MAX_CHUNKS, MAX_LEN, MAX_LIT_BLOCKS, MIN_SAVING, OFFC, TOK,
 };
 use crate::block::format::{put_uvarint, put_uvarint_at};
 use crate::block::load_store::{load8, load64};
@@ -152,6 +152,7 @@ pub(super) struct Scratch {
     /// The literals of the block, then, with plain and delta literals, the delta literals.
     buf: Vec<u8>,
     /// The literal positions where plain and delta literals take turns, starting with plain.
+    /// finish adds the end of the literals: then it holds the end of each run.
     switches: Vec<usize>,
     lit_recs: Vec<u8>,
     chunk_recs: Vec<u8>,
@@ -876,26 +877,24 @@ impl<'a> Encoder<'a> {
         if s.switches.len() & 1 == 1 {
             s.switches.push(self.op_lits);
         }
-        let mut start = 0;
-        for i in 0..=s.switches.len() {
-            let end = s.switches.get(i).copied().unwrap_or(self.n_lits);
+        s.switches.push(self.n_lits);
+        let lits = [&s.buf[..], &s.buf[self.dlits..]];
+        let cuts = s.split.lit_blocks(self.split_lits, lits, &s.switches);
+        let mut i = 0;
+        for c in cuts.windows(2) {
+            // Blocks don't span runs.
+            while s.switches[i] <= c[0] {
+                i += 1;
+            }
             let (k, at) = if i & 1 == 1 || self.delta_div < 0 {
                 (DELTA, self.dlits)
             } else {
                 (LITS, 0)
             };
-            let lits = &s.buf[at + start..at + end];
-            start = end;
-            if lits.is_empty() {
-                continue;
-            }
-            let cuts = s.split.lit_blocks(self.split_lits, lits);
-            for c in cuts.windows(2) {
-                let v = &lits[c[0]..c[1]];
-                s.c.put(&mut self.out, &mut s.lit_recs, k, v, self.fast_code);
-                if !self.out.fits(s.lit_recs.len()) {
-                    return 0;
-                }
+            let v = &s.buf[at + c[0]..at + c[1]];
+            s.c.put(&mut self.out, &mut s.lit_recs, k, v, self.fast_code);
+            if !self.out.fits(s.lit_recs.len()) {
+                return 0;
             }
         }
         self.out.append(&s.lit_recs);
@@ -944,17 +943,45 @@ impl<'a> Encoder<'a> {
 }
 
 impl LitSplit {
-    /// Returns the boundaries of the literal blocks of lits. With split_lits, they are on LIT_SEG
-    /// boundaries, chosen for the smallest estimated size. Otherwise the blocks are equal.
-    fn lit_blocks(&mut self, split_lits: bool, lits: &[u8]) -> &[usize] {
+    /// Returns the boundaries of the literal blocks of the runs that end at ends, from 0. Run i
+    /// holds `lits[i & 1]` from the end of run i-1. With split_lits, the blocks are on LIT_SEG
+    /// boundaries of each run, chosen for the smallest estimated size. Otherwise, or if that
+    /// takes more than MAX_LIT_BLOCKS blocks, the blocks of each run are equal.
+    fn lit_blocks(&mut self, split_lits: bool, lits: [&[u8]; 2], ends: &[usize]) -> &[usize] {
         self.cuts.clear();
-        if !split_lits {
-            let parts = lits.len().div_ceil(pivco::MAX_BLOCK_SIZE);
-            let size = lits.len().div_ceil(parts);
-            self.cuts.extend((0..lits.len()).step_by(size));
-            self.cuts.push(lits.len());
-            return &self.cuts;
+        self.cuts.push(0);
+        if split_lits {
+            let mut start = 0;
+            for (i, &end) in ends.iter().enumerate() {
+                self.split(&lits[i & 1][start..end], start);
+                start = end;
+            }
+            // A run of n literals takes up to ceil(n/LIT_SEG) blocks, so runs that end in
+            // partial segments can take a few more than MAX_LIT_BLOCKS. Equal blocks take fewer
+            // than 8 MiB/65535 plus one per run, at most 257: chunks switch between plain and
+            // delta literals at most once each, which leaves at most MAX_CHUNKS+1 runs with
+            // literals.
+            if self.cuts.len() <= MAX_LIT_BLOCKS + 1 {
+                return &self.cuts;
+            }
+            self.cuts.truncate(1);
         }
+        let mut start = 0;
+        for &end in ends {
+            if end > start {
+                let parts = (end - start).div_ceil(pivco::MAX_BLOCK_SIZE);
+                let size = (end - start).div_ceil(parts);
+                self.cuts.extend((start + size..end).step_by(size));
+                self.cuts.push(end);
+            }
+            start = end;
+        }
+        &self.cuts
+    }
+
+    /// Adds the ends of the literal blocks of lits, which start at start, on LIT_SEG boundaries
+    /// chosen for the smallest estimated size.
+    fn split(&mut self, lits: &[u8], start: usize) {
         let n = lits.len().div_ceil(LIT_SEG);
         self.segs.clear();
         self.segs.resize(n, [0; 256]);
@@ -983,14 +1010,13 @@ impl LitSplit {
                 }
             }
         }
+        let k = self.cuts.len();
         let mut i = n;
         while i > 0 {
-            self.cuts.push((i * LIT_SEG).min(lits.len()));
+            self.cuts.push(start + (i * LIT_SEG).min(lits.len()));
             i = from[i];
         }
-        self.cuts.push(0);
-        self.cuts.reverse();
-        &self.cuts
+        self.cuts[k..].reverse();
     }
 }
 
