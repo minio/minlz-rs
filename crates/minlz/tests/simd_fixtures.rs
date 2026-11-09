@@ -561,9 +561,6 @@ impl Rng {
     }
 }
 
-/// Go's SIMD int levels.
-const RUST_LEVELS: [i32; 7] = [4, 5, 6, 7, 260, 261, 262];
-
 fn rust_encode(src: &[u8], level: i32) -> Vec<u8> {
     let mut out = Vec::new();
     minlz::encode(&mut out, src, minlz::Level::try_from(level).unwrap()).unwrap();
@@ -588,7 +585,7 @@ fn block_diff(a: &[u8], b: &[u8]) -> String {
 #[test]
 fn rust_encodes_fixtures() {
     let mut n = 0;
-    for f in fixtures().iter().filter(|f| RUST_LEVELS.contains(&f.level)) {
+    for f in fixtures() {
         let got = rust_encode(&f.input, f.level);
         assert!(
             got == f.block,
@@ -680,7 +677,7 @@ fn rust_encodes_as_go() {
     let mut bad = Vec::new();
     let inputs = cross_inputs();
     for (name, src) in &inputs {
-        for level in RUST_LEVELS {
+        for level in LEVELS {
             let (got, want) = (rust_encode(src, level), enc.encode(src, level));
             if got != want {
                 bad.push(format!("{name} L{level}: {}", block_diff(&got, &want)));
