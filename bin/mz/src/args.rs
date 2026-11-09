@@ -367,7 +367,8 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
         "avx2" => set_cpu(opts, cpu::AVX2, on()?),
         "avx512" => set_cpu(opts, cpu::AVX512, on()?),
         "neon" => set_cpu(opts, cpu::NEON, on()?),
-        _ => {
+        "level" | "block-size" | "pad" | "o" | "output" | "bench" | "threads" | "cpu"
+        | "offset" | "tail" => {
             let val = match val {
                 Some(v) => v.to_owned(),
                 None => it
@@ -380,6 +381,8 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
             };
             return set_long_value(name, &val, opts);
         }
+        // Go reports an undefined flag without consuming the argument after it.
+        _ => return Err(ParseError::UnknownFlag(format!("--{name}"))),
     }
     Ok(())
 }
@@ -603,6 +606,20 @@ mod tests {
             assert_eq!(cli.options.cpu_off, 0, "{args:?}");
         }
         assert!(parse_argv(&["c", "-q=maybe", "x"]).is_err());
+    }
+
+    #[test]
+    fn unknown_flag_takes_no_value() {
+        for argv in [
+            ["c", "a.txt", "-x"],
+            ["c", "a.txt", "--bogus"],
+            ["c", "-x", "a.txt"],
+        ] {
+            assert!(
+                matches!(parse_argv(&argv), Err(ParseError::UnknownFlag(_))),
+                "{argv:?}"
+            );
+        }
     }
 
     #[test]
