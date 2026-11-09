@@ -16,9 +16,9 @@
 //!
 //! Ports `encode_l2.go:encodeBlockBetterGo` (for inputs > 64 KiB) and
 //! `encode_l2.go:encodeBlockBetterGo64K` (for inputs ≤ 64 KiB).  Uses a
-//! long (8-byte hash) table and a short (4-byte hash) table, with the
-//! long table from [`table_pool`], so the SIMD Balanced parser shares it
-//! (Go's `encLPool`).
+//! long (8-byte hash) table and a short (4-byte hash) table, from
+//! [`table_pool`] except the 8 KiB short table of the 64 KiB path, so the
+//! SIMD Balanced parser shares the big ones (Go's `encLPool`).
 
 use super::emit::{emit_copy, emit_copy_lits2, emit_copy_lits3, emit_literal, emit_repeat};
 use super::format::{
@@ -27,7 +27,7 @@ use super::format::{
 };
 use super::hash::{hash4, hash6, hash7};
 use super::load_store::{load32, load64};
-use super::table_pool::{self, U16_15, U32_17};
+use super::table_pool::{self, U16_15, U32_14, U32_17};
 
 /// Entry point: dispatches on `src.len()`.  Returns the number of bytes
 /// written into `dst` or `0` if the block is incompressible.
@@ -57,8 +57,9 @@ fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
     let dst_limit = src.len() - (src.len() >> 5) - 6;
 
     let mut l_table = table_pool::get(&U32_17);
-    let mut s_table = [0u32; S_TABLE_SIZE_BIG];
+    let mut s_table = table_pool::get(&U32_14);
     let n = encode_better_inner_big(dst, src, s_limit, dst_limit, &mut l_table, &mut s_table);
+    table_pool::put(&U32_14, s_table);
     table_pool::put(&U32_17, l_table);
     n
 }
