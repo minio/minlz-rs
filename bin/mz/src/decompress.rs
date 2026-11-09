@@ -230,7 +230,17 @@ fn decompress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Res
 fn decompress_block(input: &Path, opts: &Options) -> io::Result<()> {
     let (mut src, _) = open_input(input)?;
     let mut buf = Vec::new();
-    src.read_to_end(&mut buf)?;
+    if input == Path::new("-") {
+        // Go caps stdin at MaxEncodedLen(MaxBlockSize); one byte more turns its silent
+        // truncation into an error.
+        let max = minlz::MAX_BLOCK_SIZE + 2;
+        src.take(max as u64 + 1).read_to_end(&mut buf)?;
+        if buf.len() > max {
+            return Err(io::Error::other("maximum encoded block size exceeded"));
+        }
+    } else {
+        src.read_to_end(&mut buf)?;
+    }
     let dst_path = dest_path(input, opts)?;
     if !opts.quiet {
         eprint!(

@@ -560,6 +560,30 @@ fn block_stdin_oversize_fails_without_buffering_all() {
 }
 
 #[test]
+fn block_decompress_stdin_oversize_fails_without_buffering_all() {
+    let mut child = Command::new(mz_bin())
+        .args(["d", "--block", "-c", "-q", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mz");
+    let mut stdin = child.stdin.take().unwrap();
+    // Zeros form a valid literal block (0x00, size 0), so only a read bound can stop it.
+    let chunk = vec![0u8; 1 << 20];
+    let mut written = 0usize;
+    while written < 128 << 20 && stdin.write_all(&chunk).is_ok() {
+        written += chunk.len();
+    }
+    drop(stdin);
+    assert!(!child.wait().unwrap().success());
+    assert!(
+        written < 32 << 20,
+        "mz consumed {written} bytes before rejecting"
+    );
+}
+
+#[test]
 fn compress_stream_verify() {
     let dir = tmp_dir();
     let src = dir.join("input.txt");
