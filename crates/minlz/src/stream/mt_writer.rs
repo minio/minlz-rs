@@ -55,6 +55,8 @@ enum OrderItem {
     /// Pre-formatted bytes — header / EOF / padding / user-chunk.  Written
     /// directly without waiting on a worker.
     Raw(Vec<u8>),
+    /// Flush `W` and answer once everything queued before it is written.
+    Flush(SyncSender<()>),
 }
 
 /// What a worker sends back: (header, body) so the writer thread can
@@ -687,11 +689,21 @@ impl<W: Write + Send + 'static> Write for MtWriter<W> {
         Ok(written)
     }
 
-    /// Push any pending input into the encode pipeline, but do not emit
-    /// EOF.  The writer thread keeps draining.
+    /// Write all pending input to `W` and flush it, but do not emit EOF.
     fn flush(&mut self) -> io::Result<()> {
         self.check_err()?;
         self.flush_ibuf()?;
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        // `order_tx` is `Some` until `finish()`/`Drop` (see `submit_raw`).
+        let sent = self
+            .order_tx
+            .as_ref()
+            .unwrap()
+            .send(OrderItem::Flush(done_tx));
+        // A failed writer thread drops `done_tx` unanswered.
+        if sent.is_err() || done_rx.recv().is_err() {
+            return Err(self.collect_pipeline_error());
+        }
         Ok(())
     }
 }
@@ -801,6 +813,10 @@ fn writer_loop<W: Write + Send + 'static>(
                 OrderItem::Raw(bytes) => {
                     w.write_all(&bytes).map_err(|e| record(&err_slot, e))?;
                     comp_written += bytes.len() as u64;
+                }
+                OrderItem::Flush(done) => {
+                    w.flush().map_err(|e| record(&err_slot, e))?;
+                    let _ = done.send(());
                 }
                 OrderItem::Block(rx) => match rx.recv() {
                     Ok(out) => {

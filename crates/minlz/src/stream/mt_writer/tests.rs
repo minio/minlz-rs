@@ -751,3 +751,57 @@ fn forked_child_skips_inherited_engines() {
     w.write_all(b"child").unwrap();
     assert_eq!(decode(&w.finish().unwrap()), b"child");
 }
+
+// -------------------- flush --------------------
+
+/// Records what reached it and how often it was flushed; each write is slow.
+struct SlowSink(Arc<Mutex<(Vec<u8>, usize)>>);
+
+impl Write for SlowSink {
+    fn write(&mut self, p: &[u8]) -> io::Result<usize> {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        self.0.lock().unwrap().0.extend_from_slice(p);
+        Ok(p.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.lock().unwrap().1 += 1;
+        Ok(())
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "300 KiB stream is impractical under miri")]
+fn flush_reaches_sink() {
+    let state = Arc::new(Mutex::new((Vec::new(), 0)));
+    let mut w = MtWriterBuilder::new()
+        .block_size(64 << 10)
+        .concurrency(2)
+        .generate_index(false)
+        .build(SlowSink(state.clone()))
+        .unwrap();
+    let data: Vec<u8> = (0..300u32 << 10).map(|i| (i * 7 / 13) as u8).collect();
+    w.write_all(&data).unwrap();
+    w.flush().unwrap();
+    let (at_flush, flushes) = {
+        let s = state.lock().unwrap();
+        (s.0.len(), s.1)
+    };
+    assert!(flushes >= 1, "W::flush not called");
+    w.finish().unwrap();
+    // finish only adds the EOF chunk: a 4-byte header and uvarint(300 KiB).
+    assert_eq!(state.lock().unwrap().0.len() - at_flush, 7);
+}
+
+#[test]
+fn flush_reports_sink_error() {
+    let mut w = MtWriterBuilder::new()
+        .block_size(MIN_BLOCK_SIZE + 9)
+        .concurrency(2)
+        .build(Sink {
+            fail: true,
+            _token: Arc::new(()),
+        })
+        .unwrap();
+    w.write_all(b"data").unwrap();
+    assert!(w.flush().is_err());
+}
