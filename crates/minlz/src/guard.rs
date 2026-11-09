@@ -29,7 +29,8 @@ pub(crate) struct Buffer {
 /// Reports whether [`Buffer`]s are guarded here.
 pub(crate) const fn supported() -> bool {
     // sys declares mmap with a 64-bit off_t and MAP_ANON = 0x20, which 32-bit glibc and
-    // MIPS Linux do not match.
+    // MIPS Linux do not match. Linux arches other than x86_64 and aarch64 stay unguarded
+    // because the declaration is unverified there, not because it is known to be wrong.
     cfg!(all(
         any(
             windows,
