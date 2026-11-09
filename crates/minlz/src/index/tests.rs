@@ -110,6 +110,22 @@ fn add_rejects_decreasing_offset() {
 }
 
 #[test]
+fn add_rejects_decreasing_uncompressed_offset() {
+    for est in [0, 1 << 20] {
+        let mut idx = Index::new();
+        if est > 0 {
+            idx.reset(est);
+        }
+        idx.add(0, 2 << 20).unwrap();
+        let res = idx.add(10, 1 << 20);
+        assert!(matches!(res, Err(Error::Invalid(_))), "est {est}: {res:?}");
+        let mut buf = Vec::new();
+        idx.append_to(&mut buf, Some(3 << 20), None).unwrap();
+        Index::default().load(&buf).unwrap();
+    }
+}
+
+#[test]
 fn find_basic() {
     let idx = make_index(8, 1 << 20);
     // The index uses est_block_uncomp = 1 << 20 (from reset, since gap matches).

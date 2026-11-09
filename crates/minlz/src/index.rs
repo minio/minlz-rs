@@ -200,9 +200,10 @@ impl Index {
     /// Matches Go `Index.add`:
     /// * An entry at the last entry's uncompressed offset replaces its compressed
     ///   offset, so the index points at the block after the chunks before it.
-    /// * If the uncompressed gap from the last entry is `< est_block_uncomp`
-    ///   (including a decreasing offset), the call is a no-op — used to
-    ///   thin the index during writing.
+    /// * A decreasing uncompressed offset is rejected ([`Error::Invalid`]), where
+    ///   Go, which only adds growing offsets, skips it.
+    /// * If the uncompressed gap from the last entry is `< est_block_uncomp`,
+    ///   the call is a no-op — used to thin the index during writing.
     /// * Otherwise, and for a replacement, a *decreasing* compressed offset is
     ///   rejected ([`Error::Invalid`]).
     /// * After insertion, if the entry count would exceed 65 535, the
@@ -223,8 +224,9 @@ impl Index {
                 latest.compressed = compressed;
                 return Ok(());
             }
-            // Decreasing uncompressed offset → gap 0 → skipped below.
-            let gap = uncompressed.saturating_sub(latest.uncompressed);
+            let gap = uncompressed
+                .checked_sub(latest.uncompressed)
+                .ok_or(Error::Invalid("uncompressed offset decreased"))?;
             if gap < self.est_block_uncomp {
                 return Ok(());
             }
