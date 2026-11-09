@@ -127,22 +127,13 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }
     let start = Instant::now();
-    let mut w = builder.build(dst)?;
-    // We can't wrap the underlying writer in a counter (it's owned by
-    // the MT writer thread); track input bytes via the reader-side.
+    let mut w = builder.build(CountingWriter::new(dst))?;
     let mut counted_src = CountingReader::new(&mut src);
     io::copy(&mut counted_src, &mut w)?;
     let mut out = w.finish()?;
     out.flush()?;
     let elapsed = start.elapsed();
-    // For output size, ask the filesystem (we wrote to a real file).
-    let out_size = if dst_path == Path::new("-") {
-        // stdout: best-effort approximation (unknown).
-        0
-    } else {
-        std::fs::metadata(&dst_path).map(|m| m.len()).unwrap_or(0)
-    };
-    print_compress_summary(opts, counted_src.bytes, out_size, elapsed);
+    print_compress_summary(opts, counted_src.bytes, out.bytes, elapsed);
     if opts.remove && input != Path::new("-") {
         drop(src);
         std::fs::remove_file(input)?;

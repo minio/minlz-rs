@@ -487,3 +487,18 @@ fn block_level_zero_is_uncompressed() {
         assert!(got == input, "len {}: round trip", input.len());
     }
 }
+
+#[test]
+fn mt_stdout_summary_counts_output() {
+    let dir = tmp_dir();
+    let src = dir.join("in.txt");
+    fs::write(&src, sample_payload(7, 100_000)).unwrap();
+    let out = Command::new(mz_bin())
+        .args(["c", "-c", "--threads", "2"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(&format!("-> {} [", out.stdout.len())), "{err}");
+}
