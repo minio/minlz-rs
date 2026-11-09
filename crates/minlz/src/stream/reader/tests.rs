@@ -888,9 +888,9 @@ fn find_chunk(b: &[u8], nth: usize, pick: impl Fn(u8) -> bool) -> usize {
 }
 
 /// Ports `TestReaderEmptyStream` (`minlz_test.go`): an EOF chunk directly
-/// after an EOF chunk is an empty stream: if it has a size, the size must be
-/// 0 (SPEC 4.6). The writer writes only an EOF chunk (and the index) for empty
-/// input.
+/// after an EOF chunk is an empty stream, so if it has a size, the size must
+/// be 0 (SPEC.md 4.6), also after a `ReadSeeker` jump. The writer writes only
+/// an EOF chunk (and the index) for empty input.
 #[test]
 #[cfg_attr(miri, ignore = "200 KB streams too slow for miri")]
 fn reader_empty_stream() {
@@ -946,13 +946,21 @@ fn reader_empty_stream() {
             .map(|c| c.writer);
         // Skipping past the end reads every EOF chunk.
         let skip = Reader::new(Cursor::new(&stream)).skip(u64::MAX);
-        let index = crate::index::index_stream(Cursor::new(&stream));
+        // index_stream doesn't check EOF sizes. The seek jumps into the first
+        // stream, past its identifier.
+        let idx = crate::index::index_stream(Cursor::new(&stream))
+            .unwrap_or_else(|e| panic!("{name}/IndexStream: {e}"));
+        let off = want.as_ref().map_or(data.len(), Vec::len) / 2;
+        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+        rs.seek(SeekFrom::Start(off as u64)).unwrap();
+        let mut seek = Vec::new();
+        let seek = rs.read_to_end(&mut seek).map(|_| seek);
         let Some(want) = want else {
-            // index_stream doesn't check EOF sizes.
             for (api, res) in [
                 ("Read", read.map(drop)),
                 ("DecodeConcurrent", conc.map(drop)),
                 ("Skip", skip),
+                ("ReadSeeker", seek.map(drop)),
             ] {
                 let e = res.expect_err(name);
                 assert!(is_err(&e, Error::Corrupt), "{name}/{api}: {e}");
@@ -963,7 +971,7 @@ fn reader_empty_stream() {
         assert!(conc.unwrap() == want, "{name}/DecodeConcurrent");
         let e = skip.expect_err(name);
         assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{name}/Skip: {e}");
-        index.unwrap_or_else(|e| panic!("{name}/IndexStream: {e}"));
+        assert!(seek.unwrap() == want[off..], "{name}/ReadSeeker");
     }
 }
 
@@ -1786,6 +1794,47 @@ fn read_seeker_concat_jump_into_later_stream() {
     let mut got = Vec::new();
     rs.read_to_end(&mut got).unwrap();
     assert!(got == want[off..]);
+}
+
+/// Ports `TestReadSeekerConcatOffsets` (`seek_simd_test.go`) without the Snappy row: offsets
+/// count from the first stream, and an index jump into a later stream accepts its larger blocks,
+/// uncompressed ones too, and checks its EOF chunk. Go's `WriteTo` rows have no Rust counterpart.
+#[test]
+#[cfg_attr(miri, ignore = "1.3 MiB streams too slow for miri")]
+fn read_seeker_concat_offsets() {
+    let (a, mut b) = (seek_test_data(300 << 10, 1), seek_test_data(1000 << 10, 2));
+    // An uncompressed chunk larger than the first stream allows.
+    b[768 << 10..].copy_from_slice(&rand_bytes(3, 232 << 10));
+    let want = [&a[..], &b].concat();
+    let large = write_stream(&b, WriterBuilder::new().block_size(256 << 10));
+    for (name, sb) in [
+        ("equal", seek_test_stream(block::Level::BalancedSimd, &b)),
+        ("larger", large),
+    ] {
+        let stream = [seek_test_stream(block::Level::Balanced, &a), sb].concat();
+        let idx = crate::index::index_stream(&stream[..]).unwrap();
+        let new_rs = || ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+        let mut rs = new_rs();
+        let mut got = [0u8; 1000];
+        let off = a.len() - 500;
+        rs.read_exact_at(&mut got, off as u64).unwrap();
+        assert!(got[..] == want[off..off + 1000], "{name}: ReadAt({off})");
+        let pos = rs.stream_position().unwrap();
+        assert_eq!(pos, (off + 1000) as u64, "{name}: position after ReadAt");
+        rs.read_exact_at(&mut got, 10).unwrap();
+        assert!(got[..] == want[10..1010], "{name}: ReadAt(10) after");
+        // From an index jump into the second block of the second stream, on a reader that has
+        // only read the first identifier, to the EOF chunk. Then seek to the end.
+        let off = a.len() + (256 << 10) + 1000;
+        let mut rs = new_rs();
+        rs.seek(SeekFrom::Start(off as u64)).unwrap();
+        let mut rest = Vec::new();
+        rs.read_to_end(&mut rest).unwrap();
+        assert!(rest == want[off..], "{name}: from {off}");
+        let end = rs.seek(SeekFrom::End(0)).unwrap();
+        assert_eq!(end, want.len() as u64, "{name}: Seek to end");
+        assert_eq!(rs.read(&mut got).unwrap(), 0, "{name}: Read at end");
+    }
 }
 
 /// Two concatenated 400 and 300 KiB streams, their decoded bytes and index.

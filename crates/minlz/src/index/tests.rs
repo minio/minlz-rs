@@ -521,9 +521,13 @@ fn add_rejects_decreasing_compressed_offset() {
     let mut idx = Index::default();
     idx.reset(1 << 20);
     idx.add(1000, 1 << 20).unwrap();
-    // Larger uncomp gap but smaller comp — error.
-    let err = idx.add(999, 2 << 20).unwrap_err();
-    assert!(matches!(err, Error::Invalid(_)));
+    // Larger uncomp gap but smaller comp — error, also where the entry would be skipped (Go
+    // 51ce6ee).
+    for u in [(1 << 20) + 100, 2 << 20] {
+        let res = idx.add(999, u);
+        assert!(matches!(res, Err(Error::Invalid(_))), "{u}: {res:?}");
+    }
+    assert_eq!(idx.offsets.len(), 1);
 }
 
 #[test]

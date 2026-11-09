@@ -198,15 +198,14 @@ impl Index {
     /// order.
     ///
     /// Matches Go `Index.add`:
+    /// * An offset below the last entry's is rejected ([`Error::Invalid`]),
+    ///   even where the entry would be skipped.
     /// * An entry at the last entry's uncompressed offset replaces its compressed
     ///   offset, so the index points at the block after the chunks before it.
-    /// * A decreasing uncompressed offset is rejected ([`Error::Invalid`]), where
-    ///   Go, which only adds growing offsets, skips it.
     /// * If the uncompressed gap from the last entry is `< est_block_uncomp`,
     ///   the call is a no-op — used to thin the index during writing.
-    /// * Otherwise a compressed offset that does not increase is rejected
-    ///   ([`Error::Invalid`]), where Go accepts an equal one. A replacement
-    ///   rejects only a *decreasing* one.
+    /// * Otherwise a compressed offset equal to the last entry's is rejected
+    ///   ([`Error::Invalid`]), where Go accepts it.
     /// * After insertion, if the entry count would exceed 65 535, the
     ///   internal `reduce_light` shrinker doubles `est_block_uncomp` and
     ///   re-thins entries in place.
@@ -218,20 +217,20 @@ impl Index {
             return Err(Error::Invalid("offset exceeds i64 wire range"));
         }
         if let Some(latest) = self.offsets.last_mut() {
+            if latest.uncompressed > uncompressed {
+                return Err(Error::Invalid("uncompressed offset decreased"));
+            }
+            if latest.compressed > compressed {
+                return Err(Error::Invalid("compressed offset decreased"));
+            }
             if uncompressed == latest.uncompressed {
-                if latest.compressed > compressed {
-                    return Err(Error::Invalid("compressed offset decreased"));
-                }
                 latest.compressed = compressed;
                 return Ok(());
             }
-            let gap = uncompressed
-                .checked_sub(latest.uncompressed)
-                .ok_or(Error::Invalid("uncompressed offset decreased"))?;
-            if gap < self.est_block_uncomp {
+            if uncompressed - latest.uncompressed < self.est_block_uncomp {
                 return Ok(());
             }
-            if latest.compressed >= compressed {
+            if latest.compressed == compressed {
                 return Err(Error::Invalid("compressed offset not increasing"));
             }
         }
