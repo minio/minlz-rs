@@ -187,12 +187,11 @@ cargo +nightly fuzz run decode_arbitrary fuzz/artifacts/decode_arbitrary/crash-d
 cargo +nightly fuzz tmin decode_arbitrary fuzz/artifacts/decode_arbitrary/crash-deadbeef
 ```
 
-Once minimised, keep the bytes as a permanent regression: preferably a
-named unit test with the bytes inlined, like the other block
-regressions.  A seed under `corpus/decode_arbitrary/` also works, but
-`corpus/` is gitignored, so commit it with `git add -f`; CI's test job
-then replays it in the corpus-smoke unit tests, and the fuzz job at
-startup.
+Once minimised, keep the bytes as a permanent regression: a named unit
+test with the bytes inlined, like the other block regressions.  Don't
+commit seeds under `corpus/`: fuzz.yml treats a non-empty
+`corpus/<target>/` as a restored cache, so on a cold cache it would
+skip the upstream tarball for that target.
 
 ## 4. Coverage report (optional)
 
