@@ -1270,7 +1270,6 @@ fn simd_validation() {
                     decode_simd(&mut dst[..n], body).is_err(),
                     "{name}: no error"
                 );
-                assert!(dst[..n].iter().all(|&v| v == 0), "{name}: dst not cleared");
                 assert!(
                     dst[n..].iter().all(|&v| v == 0xfe),
                     "{name}: wrote past dst"
@@ -1533,14 +1532,14 @@ fn simd_corrupt_clears() {
         let (mut e, want) = test_pad(&mut b, &mut tb);
         e.lits.pop();
         let block = e.bytes();
-        let (n, body) = simd_header(&block[1..]).unwrap();
+        let (n, _) = simd_header(&block[1..]).unwrap();
         assert_eq!(n, want.len());
         let mut dst = vec![0; n];
-        let r = decode_simd(&mut dst, body);
-        let z = dst.iter().filter(|&&v| v == b'Z').count();
+        let r = crate::decode(&mut dst, &block);
         assert!(
-            r.is_err() && dst.iter().all(|&v| v == 0),
-            "error {r:?}, {z} Z bytes in dst"
+            r.is_err() && dst.is_empty(),
+            "error {r:?}, {} bytes in dst",
+            dst.len()
         );
     });
 }

@@ -100,7 +100,8 @@ pub(crate) fn decode_simd(dst: &mut [u8], block: &[u8]) -> Result<(), Error> {
 /// Is [`decode_simd`], which with hash also returns the XXH3 hash of dst (Go `decodeSIMDHash`).
 /// It hashes the output of each chunk as soon as the chunk has run, while it is still in cache:
 /// hashing a large block after decoding it reads it back from memory.
-/// On error, dst is zeroed.
+/// On error, dst may hold literals of earlier blocks, which the cached decoder keeps, so callers
+/// must not expose it.
 pub(crate) fn decode_simd_hash(dst: &mut [u8], block: &[u8], hash: bool) -> Result<u64, Error> {
     let mut s = DECODERS
         .try_with(Cell::take)
@@ -115,8 +116,6 @@ pub(crate) fn decode_simd_hash(dst: &mut [u8], block: &[u8], hash: bool) -> Resu
     let sum = if hash { s.h.sum64() } else { 0 };
     let _ = DECODERS.try_with(|c| c.set(Some(s)));
     if !ok {
-        // Literals of earlier blocks may have been copied.
-        dst.fill(0);
         return Err(Error::Corrupt("invalid SIMD block"));
     }
     Ok(sum)
