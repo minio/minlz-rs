@@ -247,11 +247,12 @@ fn user_non_skippable_without_callback_errors() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 }
 
-/// Fails once with `TimedOut` when it reaches `fail_at`, then serves the rest.
+/// Fails once with `kind` when it reaches `fail_at`, then serves the rest.
 struct FailOnce<'a> {
     data: &'a [u8],
     pos: usize,
     fail_at: usize,
+    kind: io::ErrorKind,
     failed: bool,
 }
 
@@ -259,7 +260,7 @@ impl Read for FailOnce<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if !self.failed && self.pos == self.fail_at {
             self.failed = true;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, std::fmt::Error));
+            return Err(io::Error::new(self.kind, std::fmt::Error));
         }
         let end = if self.failed {
             self.data.len()
@@ -287,6 +288,7 @@ fn header_read_errors_are_sticky() {
             data: &s,
             pos: 0,
             fail_at,
+            kind: io::ErrorKind::TimedOut,
             failed: false,
         };
         let mut r = Reader::new(inner);
@@ -305,6 +307,20 @@ fn header_read_errors_are_sticky() {
         let err = r.read(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "skip={skip}: retry");
     }
+
+    // An `UnexpectedEof` from the source is corruption, as in a chunk body.
+    // Seeking clears a sticky `UnexpectedEof`, which would resume mid-header.
+    let mut r = Reader::new(FailOnce {
+        data: &s,
+        pos: 0,
+        fail_at,
+        kind: io::ErrorKind::UnexpectedEof,
+        failed: false,
+    });
+    let mut buf = vec![0u8; 4096];
+    r.read_exact(&mut buf).unwrap();
+    let err = r.read(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
     // A truncated header after a complete stream must not turn into a
     // clean EOF on retry.

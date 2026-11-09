@@ -697,7 +697,9 @@ enum ReadOutcome {
 ///
 /// When `allow_eof` is true and the underlying reader reports EOF *before*
 /// any bytes have been read, returns `Ok(Eof)`.  Otherwise mirrors Go's
-/// `io.ReadFull`: short reads become [`Error::Corrupt`].
+/// `readFull`: short reads and `UnexpectedEof` errors become
+/// [`Error::Corrupt`].  A seek clears a sticky `UnexpectedEof` without
+/// realigning to a chunk header.
 fn read_full_or_eof<R: Read>(
     r: &mut R,
     buf: &mut [u8],
@@ -715,6 +717,7 @@ fn read_full_or_eof<R: Read>(
             }
             Ok(n) => total += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(Error::Corrupt.into()),
             Err(e) => return Err(e),
         }
     }
