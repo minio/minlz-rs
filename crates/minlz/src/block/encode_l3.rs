@@ -678,7 +678,7 @@ fn match_at_repeat(
     next_emit: usize,
     s_limit: usize,
 ) -> Match {
-    if best.rep || s <= offset || offset + 3 > src.len() {
+    if best.rep || s <= offset || offset + 4 > src.len() {
         return Match {
             offset,
             s,
@@ -687,16 +687,7 @@ fn match_at_repeat(
     }
     const CHECKBYTES: usize = 3;
     let mask: u32 = (1 << (8 * CHECKBYTES)) - 1;
-    // SAFETY: offset + 4 > src.len() is rejected above; here offset + 4 ≤ src.len()
-    // is not necessarily true (we only checked + 3).  load32 reads 4 bytes,
-    // so guard one more time.
-    if offset + 4 > src.len() {
-        return Match {
-            offset,
-            s,
-            ..Match::default()
-        };
-    }
+    // SAFETY: offset + 4 ≤ src.len() (checked above).
     if (unsafe { load32(src, offset) } & mask) != (first & mask) {
         return Match {
             offset,
@@ -722,7 +713,7 @@ fn match_at_repeat(
             }
             break;
         }
-        // SAFETY: sx + 8 ≤ src.len(); m.length + 8 ≤ src.len() (same range).
+        // SAFETY: sx + 8 ≤ src.len(), and m.length < sx because offset < s.
         let diff = unsafe { load64(src, sx) ^ load64(src, m.length) };
         if diff != 0 {
             m.length += (diff.trailing_zeros() as usize) >> 3;
@@ -773,4 +764,26 @@ fn best_of(a: Match, b: Match) -> Match {
         return if a.nextrep { a } else { b };
     }
     if a.offset > b.offset { a } else { b }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `s <= offset` is what keeps `m.length` behind `sx`, and so the
+    /// `load64(src, m.length)` in bounds.
+    #[test]
+    fn match_at_repeat_rejects_offset_not_before_s() {
+        let src = [0u8; 32];
+        let m = match_at_repeat(
+            &src,
+            20,
+            4,
+            0,
+            &Match::default(),
+            0,
+            src.len() - INPUT_MARGIN_L3,
+        );
+        assert_eq!(m.length, 0);
+    }
 }
