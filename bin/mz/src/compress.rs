@@ -145,14 +145,15 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
 }
 
 fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
-    let (mut src, src_size) = open_input(input)?;
+    let (src, src_size) = open_input(input)?;
     if let Some(sz) = src_size
         && sz > MAX_BLOCK_SIZE as u64
     {
         return Err(io::Error::other("maximum block size of 8 MiB exceeded"));
     }
     let mut buf = Vec::with_capacity(src_size.unwrap_or(0) as usize);
-    src.read_to_end(&mut buf)?;
+    // Stdin has no size to check up front; one byte past the limit is enough to reject it.
+    src.take(MAX_BLOCK_SIZE as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > MAX_BLOCK_SIZE {
         return Err(io::Error::other("maximum block size of 8 MiB exceeded"));
     }

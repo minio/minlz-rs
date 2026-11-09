@@ -502,3 +502,26 @@ fn mt_stdout_summary_counts_output() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains(&format!("-> {} [", out.stdout.len())), "{err}");
 }
+
+#[test]
+fn block_stdin_oversize_fails_without_buffering_all() {
+    let mut child = Command::new(mz_bin())
+        .args(["c", "--block", "-c", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mz");
+    let mut stdin = child.stdin.take().unwrap();
+    let chunk = vec![0u8; 1 << 20];
+    let mut written = 0usize;
+    while written < 128 << 20 && stdin.write_all(&chunk).is_ok() {
+        written += chunk.len();
+    }
+    drop(stdin);
+    assert!(!child.wait().unwrap().success());
+    assert!(
+        written < 32 << 20,
+        "mz consumed {written} bytes before rejecting"
+    );
+}
