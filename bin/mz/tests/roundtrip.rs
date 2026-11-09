@@ -464,3 +464,26 @@ fn output_same_as_input_is_rejected() {
         assert_eq!(fs::read(&src).unwrap(), payload, "{args:?}: input modified");
     }
 }
+
+/// `-0 --block` writes Go's uncompressed block (SPEC 1.1: size 0 means the rest is literals):
+/// `0x00` when empty, else `0x00 0x00` and the input.
+#[test]
+fn block_level_zero_is_uncompressed() {
+    let payload = sample_payload(9, 78_000);
+    for input in [&payload[..], &[]] {
+        let block = mz_pipe(&mz_bin(), &["c", "--block", "-0", "-c", "-q", "-"], input);
+        let want = if input.is_empty() {
+            vec![0]
+        } else {
+            [&[0, 0], input].concat()
+        };
+        assert!(
+            block == want,
+            "len {}: got {} bytes",
+            input.len(),
+            block.len()
+        );
+        let got = mz_pipe(&mz_bin(), &["d", "--block", "-c", "-q", "-"], &block);
+        assert!(got == input, "len {}: round trip", input.len());
+    }
+}

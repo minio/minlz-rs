@@ -18,7 +18,6 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use minlz::Level;
 use minlz::stream::{MAX_BLOCK_SIZE, MtWriterBuilder, WriterBuilder};
 
 use crate::args::Options;
@@ -168,16 +167,20 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
     }
     let dst_path = dest_path(input, opts, EXT_BLOCK)?;
     let mut dst = open_output(&dst_path)?;
-    // -0: block::encode has no uncompressed mode; the encoder will fall back
-    // to the inline literal block if the data doesn't compress, which is the
-    // closest analog.
-    let level = opts.level.unwrap_or(Level::Fastest);
     if !opts.quiet {
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }
     let start = Instant::now();
     let mut enc = Vec::with_capacity(minlz::max_encoded_len(buf.len()).unwrap_or(buf.len() + 16));
-    minlz::encode(&mut enc, &buf, level).map_err(io::Error::other)?;
+    match opts.level {
+        Some(level) => minlz::encode(&mut enc, &buf, level).map_err(io::Error::other)?,
+        // Go's encodeUncompressed; `Level` has no uncompressed variant.
+        None if buf.is_empty() => enc.push(0),
+        None => {
+            enc.extend_from_slice(&[0, 0]);
+            enc.extend_from_slice(&buf);
+        }
+    }
     dst.write_all(&enc)?;
     dst.flush()?;
     let elapsed = start.elapsed();
