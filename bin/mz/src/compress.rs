@@ -68,11 +68,10 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let mut counted_dst = CountingWriter::new(dst);
 
     let mut builder = WriterBuilder::new();
-    if opts.uncompressed {
-        builder = builder.uncompressed();
-    } else if let Some(lvl) = opts.level {
-        builder = builder.level(lvl);
-    }
+    builder = match opts.level {
+        Some(lvl) => builder.level(lvl),
+        None => builder.uncompressed(),
+    };
     builder = builder.block_size(opts.block_size.unwrap_or(CLI_DEFAULT_BLOCK_SIZE));
     if let Some(pad) = opts.padding {
         builder = builder.padding(pad);
@@ -109,11 +108,10 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
     let dst = open_output_send(&dst_path)?;
 
     let mut builder = MtWriterBuilder::new();
-    if opts.uncompressed {
-        builder = builder.uncompressed();
-    } else if let Some(lvl) = opts.level {
-        builder = builder.level(lvl);
-    }
+    builder = match opts.level {
+        Some(lvl) => builder.level(lvl),
+        None => builder.uncompressed(),
+    };
     builder = builder
         .block_size(opts.block_size.unwrap_or(CLI_DEFAULT_BLOCK_SIZE))
         .concurrency(threads);
@@ -170,13 +168,10 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
     }
     let dst_path = dest_path(input, opts, EXT_BLOCK)?;
     let mut dst = open_output(&dst_path)?;
-    let level = if opts.uncompressed {
-        Level::Fastest // block::encode has no uncompressed mode; the encoder
-    // will fall back to the inline literal block if the
-    // data doesn't compress, which is the closest analog.
-    } else {
-        opts.level.unwrap_or(Level::Balanced)
-    };
+    // -0: block::encode has no uncompressed mode; the encoder will fall back
+    // to the inline literal block if the data doesn't compress, which is the
+    // closest analog.
+    let level = opts.level.unwrap_or(Level::Fastest);
     if !opts.quiet {
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }

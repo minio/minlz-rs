@@ -37,14 +37,15 @@ pub enum Subcommand {
 
 #[derive(Debug)]
 pub struct Options {
-    /// The level to write. After [`parse`] it is a SIMD level unless `--classic` is given,
-    /// and `None` only with `-0`.
+    /// The level to write, set by [`parse`]: a SIMD level unless `--classic`; `None` with `-0`.
     pub level: Option<Level>,
-    pub uncompressed: bool,
+    /// `-1/-2/-3/--level/-xfast`; [`parse`] resolves it into `level`.
+    base: Option<Level>,
+    uncompressed: bool,
     /// `--classic`: write classic MinLZ blocks (Go `-classic`).
-    pub classic: bool,
+    classic: bool,
     /// `--simd.delta`: SIMD delta literals (Go `-simd.delta`).
-    pub simd_delta: bool,
+    simd_delta: bool,
     /// `minlz::cpu` features turned off by the hidden `--avx2/--avx512/--neon=false`.
     pub cpu_off: u32,
     pub block_size: Option<usize>,
@@ -84,6 +85,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             level: None,
+            base: None,
             uncompressed: false,
             classic: false,
             simd_delta: false,
@@ -193,13 +195,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     };
 
     // Sanity: cannot combine -0 (uncompressed) with --level.
-    if opts.uncompressed && opts.level.is_some() {
+    if opts.uncompressed && opts.base.is_some() {
         return Err(ParseError::ConflictingLevels);
     }
     let level = write_level(&opts)?;
-    if !opts.uncompressed {
-        opts.level = Some(level);
-    }
+    opts.level = (!opts.uncompressed).then_some(level);
     if subcommand == Subcommand::Bench && opts.bench_n.is_none() {
         opts.bench_n = Some(5);
     }
@@ -252,7 +252,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
 
 /// The level Go's `mainCompress` writes: SIMD blocks unless `--classic`.
 fn write_level(opts: &Options) -> Result<Level, ParseError> {
-    let level = opts.level.unwrap_or(Level::Balanced);
+    let level = opts.base.unwrap_or(Level::Balanced);
     if opts.simd_delta && (opts.classic || opts.uncompressed || level == Level::Smallest) {
         return Err(ParseError::InvalidValue(
             "--simd.delta".into(),
@@ -270,7 +270,7 @@ fn write_level(opts: &Options) -> Result<Level, ParseError> {
         (Level::Balanced, false) => Level::BalancedSimd,
         (Level::Balanced, true) => Level::BalancedSimdDelta,
         (Level::Smallest, _) => Level::SmallestSimd,
-        (l, _) => l,
+        (simd, _) => unreachable!("level flags set only classic levels, not {simd:?}"),
     })
 }
 
@@ -348,10 +348,10 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
     match name {
         // Go's level flags are bools too; `=false` leaves the level alone.
         "xfast" | "1" | "2" | "3" if !on()? => {}
-        "xfast" => opts.level = Some(Level::SuperFast),
-        "1" => opts.level = Some(Level::Fastest),
-        "2" => opts.level = Some(Level::Balanced),
-        "3" => opts.level = Some(Level::Smallest),
+        "xfast" => opts.base = Some(Level::SuperFast),
+        "1" => opts.base = Some(Level::Fastest),
+        "2" => opts.base = Some(Level::Balanced),
+        "3" => opts.base = Some(Level::Smallest),
         "0" => opts.uncompressed = on()?,
         "block" => opts.block = on()?,
         "c" | "stdout" => opts.stdout = on()?,
@@ -386,7 +386,7 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
 
 fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), ParseError> {
     match name {
-        "level" => opts.level = Some(parse_level(val)?),
+        "level" => opts.base = Some(parse_level(val)?),
         "block-size" => {
             opts.block_size = Some(
                 parse_size(val)

@@ -49,11 +49,7 @@ enum BenchMode {
 fn run_inner(opts: &Options, input: Option<&std::path::Path>, mode: BenchMode) -> io::Result<()> {
     let input = input.ok_or_else(|| io::Error::other("no input file given"))?;
     let n = opts.bench_n.unwrap_or(5);
-    let level = if opts.uncompressed {
-        Level::Fastest
-    } else {
-        opts.level.unwrap_or(Level::Balanced)
-    };
+    let level = opts.level.unwrap_or(Level::Fastest);
     let (mut src, _) = open_input(input)?;
     let mut data = Vec::new();
     src.read_to_end(&mut data)?;
