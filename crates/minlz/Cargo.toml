@@ -2,6 +2,7 @@
 name = "minio-minlz"
 version = "1.3.0"
 description = "MinLZ compression"
+readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true
 # The AVX-512 histogram is MIT licensed: src/pivco/kernel/LICENSE-histogram.
