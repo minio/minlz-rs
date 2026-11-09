@@ -156,22 +156,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
             alias = subcommand_alias(&s);
             continue;
         }
-        if s == "-" {
-            // stdin/stdout sentinel; we still record it so we know it's
-            // present.
-            input = Some(PathBuf::from("-"));
-            continue;
-        }
-        if let Some(rest) = s.strip_prefix("--") {
+        // As in Go's flag package, `-name` and `--name` are the same flag; `-` is stdin.
+        if s != "-"
+            && let Some(rest) = s.strip_prefix("--").or_else(|| s.strip_prefix('-'))
+        {
             apply_long_flag(rest, &mut it, &mut opts)?;
-            continue;
-        }
-        if let Some(rest) = s.strip_prefix('-') {
-            if rest.is_empty() {
-                input = Some(PathBuf::from("-"));
-                continue;
-            }
-            apply_short_flag(rest, &mut it, &mut opts)?;
             continue;
         }
         if input.is_some() {
@@ -343,12 +332,16 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
         return set_long_value(k, v, opts);
     }
     match name {
+        "0" => opts.uncompressed = true,
+        "1" => opts.level = Some(Level::Fastest),
+        "2" => opts.level = Some(Level::Balanced),
+        "3" => opts.level = Some(Level::Smallest),
         "block" => opts.block = true,
-        "stdout" => opts.stdout = true,
+        "c" | "stdout" => opts.stdout = true,
         "rm" => opts.remove = true,
-        "quiet" => opts.quiet = true,
+        "q" | "quiet" => opts.quiet = true,
         "verify" => opts.verify = true,
-        "help" => opts.help = true,
+        "h" | "help" => opts.help = true,
         "no-index" => opts.index = false,
         "follow" => opts.follow = true,
         "xfast" => opts.level = Some(Level::SuperFast),
@@ -386,7 +379,7 @@ fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), Parse
                     as u32,
             )
         }
-        "output" => opts.output = Some(PathBuf::from(val)),
+        "o" | "output" => opts.output = Some(PathBuf::from(val)),
         "bench" => {
             opts.bench_n = Some(
                 val.parse()
@@ -426,56 +419,6 @@ fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), Parse
             }
         }
         _ => return Err(ParseError::UnknownFlag(format!("--{name}"))),
-    }
-    Ok(())
-}
-
-fn apply_short_flag<I: Iterator<Item = OsString>>(
-    rest: &str,
-    it: &mut std::iter::Peekable<I>,
-    opts: &mut Options,
-) -> Result<(), ParseError> {
-    // Multi-char form like `-index=true` / `-offset 64K` — forward to
-    // the long-flag handler for Go `cmd/mz` parity.
-    let stem = rest.split_once('=').map(|(k, _)| k).unwrap_or(rest);
-    if stem.len() > 1 {
-        return apply_long_flag(rest, it, opts);
-    }
-    // Single-char shorts: -0, -1, -2, -3, -c, -q, -h, -o FILE
-    let mut chars = rest.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '0' => opts.uncompressed = true,
-            '1' => opts.level = Some(Level::Fastest),
-            '2' => opts.level = Some(Level::Balanced),
-            '3' => opts.level = Some(Level::Smallest),
-            'c' => opts.stdout = true,
-            'q' => opts.quiet = true,
-            'h' => opts.help = true,
-            'o' => {
-                let val = if let Some(c) = chars.next() {
-                    // `-oFILE` or `-o FILE`.
-                    let mut s: String = std::iter::once(c).chain(chars.by_ref()).collect();
-                    if s.is_empty() {
-                        s = it
-                            .next()
-                            .ok_or_else(|| ParseError::MissingValue("-o".into()))?
-                            .into_string()
-                            .map_err(|_| {
-                                ParseError::InvalidValue("-o".into(), "<non-utf8>".into())
-                            })?;
-                    }
-                    s
-                } else {
-                    it.next()
-                        .ok_or_else(|| ParseError::MissingValue("-o".into()))?
-                        .into_string()
-                        .map_err(|_| ParseError::InvalidValue("-o".into(), "<non-utf8>".into()))?
-                };
-                opts.output = Some(PathBuf::from(val));
-            }
-            _ => return Err(ParseError::UnknownFlag(format!("-{c}"))),
-        }
     }
     Ok(())
 }
@@ -643,6 +586,25 @@ mod tests {
             cli.options.output.as_deref(),
             Some(std::path::Path::new("foo.mz"))
         );
+    }
+
+    #[test]
+    fn go_style_flag_values() {
+        let cli = parse_argv(&["c", "-o=out.mz", "in.txt"]).unwrap();
+        assert_eq!(
+            cli.options.output.as_deref(),
+            Some(std::path::Path::new("out.mz"))
+        );
+        let cli = parse_argv(&["c", "--o", "out.mz", "--1", "in.txt"]).unwrap();
+        assert_eq!(
+            cli.options.output.as_deref(),
+            Some(std::path::Path::new("out.mz"))
+        );
+        assert_eq!(cli.options.level, Some(Level::FastestSimd));
+        assert!(matches!(
+            parse_argv(&["c", "a.txt", "-"]),
+            Err(ParseError::TooManyInputs)
+        ));
     }
 
     #[test]
