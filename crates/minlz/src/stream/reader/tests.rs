@@ -1806,6 +1806,28 @@ fn read_seeker_jump_detects_dropped_chunk() {
     }
 }
 
+/// What an index jump leaves unknown about the stream start ends at the next stream identifier,
+/// not only at an EOF chunk: the next stream's EOF size is checked exactly even when the
+/// jumped-into stream has no EOF chunk.
+#[test]
+#[cfg_attr(miri, ignore = "700 KiB streams too slow for miri")]
+fn read_seeker_jump_ends_at_next_identifier() {
+    let (stream, want, _, _) = seek_test_concat();
+    let eof = |nth| find_chunk(&stream, nth, |t| t == CHUNK_TYPE_EOF);
+    let (ea, eb) = (eof(1), eof(2));
+    let ea_end = ea + CHUNK_HEADER_SIZE + read_chunk_len(&stream[ea + 1..]);
+    // The second stream's EOF size includes the first stream, which after a jump into the first
+    // only the second identifier rules out.
+    let bad = [&stream[..ea], &stream[ea_end..eb], &eof_chunk(want.len())].concat();
+    let idx = crate::index::index_stream(&bad[..]).unwrap();
+    let e = decode_to_end(Reader::new(&bad[..])).unwrap_err();
+    assert!(is_corrupt(&e), "Reader: {e}");
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&bad)), &idx).unwrap();
+    rs.seek(SeekFrom::Start((1 << 16) + 5)).unwrap();
+    let e = rs.read_to_end(&mut Vec::new()).unwrap_err();
+    assert!(is_corrupt(&e), "ReadSeeker: {e}");
+}
+
 /// Ports `TestReaderSIMDFlagStrict` (`seek_simd_test.go`): reads still require the flag of the
 /// last identifier they read.
 #[test]
