@@ -70,6 +70,8 @@ pub(crate) const MIN_SAVING: usize = 64;
 pub(crate) const MAX_CHUNK: usize = crate::pivco::MAX_BLOCK_SIZE;
 /// The most chunks of a block.
 pub(crate) const MAX_CHUNKS: usize = 128;
+/// The most literal blocks of a block.
+pub(crate) const MAX_LIT_BLOCKS: usize = 1024;
 pub(crate) const MAX_LEN: usize = 32;
 /// How far the fast loops write past the end of an operation.
 pub(crate) const SLACK: usize = 32;

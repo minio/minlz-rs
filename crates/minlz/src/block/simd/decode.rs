@@ -20,7 +20,8 @@ use core::cell::Cell;
 use super::exec::{Tier, exec_exact, load64};
 use super::{
     CLASS_LENS, CODE_BYTES, CODE_LENS, CURRENT, DELTA, DELTA_LENS, ESC, LAYOUTS, LITS, LL,
-    MAX_CHUNK, MAX_CHUNKS, MAX_LEN, OFF_TAB, OFFC, PAD, SLACK, STORED, TOK, rvarint,
+    MAX_CHUNK, MAX_CHUNKS, MAX_LEN, MAX_LIT_BLOCKS, OFF_TAB, OFFC, PAD, SLACK, STORED, TOK,
+    rvarint,
 };
 use crate::Error;
 use crate::block::format::get_uvarint;
@@ -42,6 +43,8 @@ pub(super) struct Tables {
 pub(super) struct Lits {
     pub(super) buf: Vec<u8>,
     pub(super) n: usize,
+    /// The literal blocks decoded so far.
+    blocks: usize,
 }
 
 /// Decodes SIMD blocks (Go `simdDecoder`). It keeps its buffers between blocks: a thread
@@ -185,7 +188,7 @@ impl Decoder {
         if self.lits.buf.len() < size + PAD {
             self.lits.buf = vec![0; size + PAD];
         }
-        self.lits.n = 0;
+        (self.lits.n, self.lits.blocks) = (0, 0);
         Some(Reader {
             recs: &sec[end..sec.len() - n],
             body: sec,
@@ -308,6 +311,10 @@ impl Lits {
         size: usize,
     ) -> Option<()> {
         while !r.recs.is_empty() && self.n - l < need {
+            if self.blocks == MAX_LIT_BLOCKS {
+                return None;
+            }
+            self.blocks += 1;
             let n = self.n;
             let hi = pivco::MAX_BLOCK_SIZE.min(size - n);
             let (nv, v) = t.stream(r, LITS, 1, hi, &mut self.buf[n..])?;

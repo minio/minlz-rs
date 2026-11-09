@@ -34,6 +34,8 @@ const MODE_DELTA_LENGTHS: usize = 4;
 
 /// The most chunks of a block.
 const MAX_CHUNKS: usize = 128;
+/// The most literal blocks of a block.
+const MAX_LIT_BLOCKS: usize = 1024;
 
 /// The values of each class, in ascending order.
 struct ClassLayout(Vec<Vec<usize>>);
@@ -415,7 +417,11 @@ impl SimdDecoder<'_> {
     /// Decodes the literal section.
     fn literals(&mut self, sec: &[u8]) -> Result<(), String> {
         let mut r = entries(sec, "literal")?;
+        let mut i = 0;
         while !r.recs.is_empty() {
+            if i == MAX_LIT_BLOCKS {
+                return Err(format!("more than {MAX_LIT_BLOCKS} literal blocks"));
+            }
             let v = self.stream(&mut r, STREAM_LITERALS, None)?;
             if v.is_empty() || v.len() > 65535 {
                 return Err(format!("literal block of {} literals", v.len()));
@@ -424,6 +430,7 @@ impl SimdDecoder<'_> {
                 return Err("more literals than the decoded size".into());
             }
             self.lits.extend_from_slice(&v);
+            i += 1;
         }
         if self.lits.is_empty() {
             return Err("no literal blocks".into());

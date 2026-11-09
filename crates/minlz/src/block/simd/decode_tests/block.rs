@@ -21,7 +21,7 @@ use crate::Error;
 use crate::block::format::get_uvarint;
 use crate::block::simd::decode::{Decoder, Tables, ll_stats, off_stats, tok_stats};
 use crate::block::simd::exec::{Tier, simd_tiers};
-use crate::block::simd::{MAX_CHUNK, MAX_CHUNKS, OFF_TAB, PAD, rvarint};
+use crate::block::simd::{MAX_CHUNK, MAX_CHUNKS, MAX_LIT_BLOCKS, OFF_TAB, PAD, rvarint};
 use crate::guard::Buffer;
 use crate::reference::decode_simd_block;
 
@@ -204,9 +204,9 @@ fn simd_layouts_spec() {
 #[cfg_attr(miri, ignore = "40 blocks of up to 5000 operations: over 30 minutes")]
 fn simd_decode_built() {
     simd_tiers(|_, _| {
-        // Go's draws make blocks of more than MAX_CHUNKS chunks, or chunks of 1 operation with
-        // code length tables, which never pad to 64 bytes below their output. Go's seed avoids
-        // both; so does this one.
+        // Go's draws make blocks of more than MAX_CHUNKS chunks or MAX_LIT_BLOCKS literal
+        // blocks, or chunks of 1 operation with code length tables, which never pad to 64 bytes
+        // below their output. Go's seed avoids these; so does this one.
         let mut rng = Rng(4);
         let mut b = TestBuilder::default();
         let modes = [STORED, CODE_LENS, CURRENT, CLASS_LENS, CURRENT];
@@ -554,6 +554,22 @@ fn validation_cases() -> Vec<VCase> {
             want
         }))
     };
+    // A block of n literal blocks of one literal each. The operations read only the first 32,
+    // so the decoder reaches the last literal blocks after the chunks.
+    let lit_blocks = |n: usize| -> Option<Change> {
+        Some(Box::new(move |b, e, _| {
+            let mut ops = vec![op(MAX_LEN, 288, MAX_LEN)];
+            ops.resize(9, op(0, 288, 0));
+            let (ne, want) = b.build(&TestBlock {
+                ops,
+                lits: vec![b'a'; n],
+                lit_block: 1,
+                ..Default::default()
+            });
+            *e = ne;
+            want
+        }))
+    };
     let ones = |n| Some(vec![TestOp::default(); n]);
     let raw = |f: fn(Vec<u8>) -> Vec<u8>| -> Option<Raw> { Some(Box::new(f)) };
     vec![
@@ -743,6 +759,17 @@ fn validation_cases() -> Vec<VCase> {
                 want.resize(want.len() + 65535, 0);
                 want
             })),
+            ..Default::default()
+        },
+        VCase {
+            name: "1024 literal blocks",
+            ok: true,
+            change: lit_blocks(MAX_LIT_BLOCKS),
+            ..Default::default()
+        },
+        VCase {
+            name: "1025 literal blocks",
+            change: lit_blocks(MAX_LIT_BLOCKS + 1),
             ..Default::default()
         },
         VCase {
@@ -1181,9 +1208,10 @@ fn validation_cases() -> Vec<VCase> {
 #[test]
 fn simd_validation() {
     // Miri: 60 short operations, still in three chunks and literal blocks. It skips the cases
-    // of 64 KiB or more, and the slowest valid blocks, whose decoding simd_reference and
-    // simd_class_len_16 cover. Literal blocks of 80 leave the last one longer than the literals
-    // after the operations, so "literal over-read" still fails in an operation.
+    // of 64 KiB or more, those of 1024 literal blocks, whose count is checked in safe code, and
+    // the slowest valid blocks, whose decoding simd_reference and simd_class_len_16 cover.
+    // Literal blocks of 80 leave the last one longer than the literals after the operations,
+    // so "literal over-read" still fails in an operation.
     let (n_ops, max_ml, chunk, lit_block) = if cfg!(miri) {
         (60, 64, 24, 80)
     } else {
@@ -1198,6 +1226,8 @@ fn simd_validation() {
         "valid coded",
         "valid class",
         "chunk at limit",
+        "1024 literal blocks",
+        "1025 literal blocks",
     ];
     simd_tiers(|_, _| {
         let mut b = TestBuilder::default();
@@ -1986,7 +2016,8 @@ fn simd_lit_lazy() {
             lits: lits.clone(),
             limit: 2,
             chunk: 500 + rng.intn(3000),
-            lit_block: 1 + rng.intn(200),
+            // Change 3 adds a literal block, and a block holds at most MAX_LIT_BLOCKS.
+            lit_block: (1 + rng.intn(200)).max(lits.len() / (MAX_LIT_BLOCKS - 1) + 1),
             modes: vec![CODE_LENS, CURRENT],
             lit_modes: lit_modes[i..].to_vec(),
             delta,
