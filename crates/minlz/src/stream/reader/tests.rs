@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cell::RefCell;
-use std::io::{self, Cursor, Read};
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
 use crate::block;
@@ -23,7 +23,7 @@ use crate::stream::format::{
     CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_PADDING, CHUNK_TYPE_UNCOMPRESSED_DATA,
     DEFAULT_BLOCK_SIZE, make_stream_header, put_uvarint,
 };
-use crate::stream::{Reader, ReaderBuilder};
+use crate::stream::{ReadSeeker, Reader, ReaderBuilder};
 
 // -------------------- builders --------------------
 
@@ -274,6 +274,12 @@ impl Read for FailOnce<'_> {
     }
 }
 
+impl Seek for FailOnce<'_> {
+    fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+        unreachable!("seeks within the decoded block do no source I/O")
+    }
+}
+
 /// A chunk header read that fails part-way must keep failing: a retry would
 /// parse the next header from the wrong offset.
 #[test]
@@ -309,18 +315,25 @@ fn header_read_errors_are_sticky() {
     }
 
     // An `UnexpectedEof` from the source is corruption, as in a chunk body.
-    // Seeking clears a sticky `UnexpectedEof`, which would resume mid-header.
-    let mut r = Reader::new(FailOnce {
+    // Seeking clears a sticky `UnexpectedEof` without moving the source, so
+    // a read after a seek within the block would resume mid-header.
+    let idx = crate::index::index_stream(&s[..]).unwrap();
+    let inner = FailOnce {
         data: &s,
         pos: 0,
         fail_at,
         kind: io::ErrorKind::UnexpectedEof,
         failed: false,
-    });
+    };
+    let mut rs = ReadSeeker::new(Reader::new(inner), &idx).unwrap();
     let mut buf = vec![0u8; 4096];
-    r.read_exact(&mut buf).unwrap();
-    let err = r.read(&mut buf).unwrap_err();
+    rs.read_exact(&mut buf).unwrap();
+    let err = rs.read(&mut buf).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let err = rs.seek(SeekFrom::Start(0)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "seek");
+    let err = rs.read(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "read after seek");
 
     // A truncated header after a complete stream must not turn into a
     // clean EOF on retry.
