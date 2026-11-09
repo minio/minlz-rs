@@ -887,8 +887,9 @@ fn find_chunk(b: &[u8], nth: usize, pick: impl Fn(u8) -> bool) -> usize {
 }
 
 /// Ports `TestReaderEmptyStream` (`minlz_test.go`): an EOF chunk directly
-/// after an EOF chunk is an empty stream, which must have size 0. The writer
-/// writes only an EOF chunk (and the index) for empty input.
+/// after an EOF chunk is an empty stream: if it has a size, the size must be
+/// 0 (SPEC 4.6). The writer writes only an EOF chunk (and the index) for empty
+/// input.
 #[test]
 #[cfg_attr(miri, ignore = "200 KB streams too slow for miri")]
 fn reader_empty_stream() {
@@ -930,6 +931,11 @@ fn reader_empty_stream() {
             "a+nonzero-size",
             [&a[..], &[CHUNK_TYPE_EOF, 1, 0, 0, 1]].concat(),
             None,
+        ),
+        (
+            "a+no-size",
+            [&a[..], &[CHUNK_TYPE_EOF, 0, 0, 0]].concat(),
+            Some(data.clone()),
         ),
     ];
     for (name, stream, want) in cases {
