@@ -1367,8 +1367,9 @@ fn encode_literal_header_minimal() {
                 let what = format!("n={n} litLen={lit_len} level={level:?}");
                 let mut enc = Vec::new();
                 encode(&mut enc, &src, level).unwrap();
-                let (literals, _, body, _) = parse_header(&enc).unwrap();
-                assert!(!literals, "{what}: block was not compressed");
+                let Ok(Header::Classic { body, .. }) = parse_header(&enc) else {
+                    panic!("{what}: block was not compressed");
+                };
                 let mut longest = 0;
                 walk_literal_headers(body, |hdr, length, repeat| {
                     if !repeat {

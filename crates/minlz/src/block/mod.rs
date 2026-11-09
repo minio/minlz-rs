@@ -275,15 +275,16 @@ pub fn append_decoded(dst: &mut Vec<u8>, src: &[u8]) -> Result<(), Error> {
 
 /// Decodes `src` into `dst` from `start`, keeping `dst[..start]`, all `dst` keeps on error.
 fn decode_at(dst: &mut Vec<u8>, start: usize, src: &[u8]) -> Result<(), Error> {
-    let (literals, simd, body, dlen) = parse_header(src).inspect_err(|_| dst.truncate(start))?;
-    if simd {
-        return simd::decode_at(dst, start, dlen, body);
-    }
+    let (body, dlen) = match parse_header(src).inspect_err(|_| dst.truncate(start))? {
+        Header::Simd { block, size } => return simd::decode_at(dst, start, size, block),
+        Header::Literal(lits) => {
+            dst.truncate(start);
+            dst.extend_from_slice(lits);
+            return Ok(());
+        }
+        Header::Classic { body, dlen } => (body, dlen),
+    };
     dst.truncate(start);
-    if literals {
-        dst.extend_from_slice(body);
-        return Ok(());
-    }
     // The decoder uses LZ4-style 16-byte overshoot stores in its hot path;
     // give it `OVERSHOOT_PAD` bytes of writable padding past `dlen`.
     dst.reserve(dlen + decode::OVERSHOOT_PAD);
@@ -303,8 +304,7 @@ fn decode_at(dst: &mut Vec<u8>, start: usize, src: &[u8]) -> Result<(), Error> {
 ///
 /// Equivalent to Go's `DecodedLen(src)`.
 pub fn decoded_len(src: &[u8]) -> Result<usize, Error> {
-    let (_, _, _, dlen) = parse_header(src)?;
-    Ok(dlen)
+    Ok(parse_header(src)?.decoded_len())
 }
 
 /// Returns `Some(uncompressed_size)` if `src` looks like a MinLZ block (leading
@@ -322,20 +322,37 @@ pub fn is_minlz(src: &[u8]) -> Result<Option<usize>, Error> {
         // Snappy/S2 fallback is out of scope.
         return Ok(None);
     }
-    let (_, _, _, dlen) = parse_header(src)?;
-    Ok(Some(dlen))
+    Ok(Some(parse_header(src)?.decoded_len()))
 }
 
-/// Parse the block header.  Returns `(is_literal_only, is_simd, body_slice, dlen)`.
-/// SIMD blocks are returned from their flags byte.
-fn parse_header(src: &[u8]) -> Result<(bool, bool, &[u8], usize), Error> {
+/// A parsed block header.
+enum Header<'a> {
+    /// An uncompressed block: its bytes.
+    Literal(&'a [u8]),
+    /// A classic block: its body and decoded length.
+    Classic { body: &'a [u8], dlen: usize },
+    /// A SIMD block from its flags byte, and its decoded size.
+    Simd { block: &'a [u8], size: usize },
+}
+
+impl Header<'_> {
+    fn decoded_len(&self) -> usize {
+        match *self {
+            Header::Literal(lits) => lits.len(),
+            Header::Classic { dlen, .. } => dlen,
+            Header::Simd { size, .. } => size,
+        }
+    }
+}
+
+fn parse_header(src: &[u8]) -> Result<Header<'_>, Error> {
     if src.is_empty() {
         return Err(Error::Corrupt("empty input"));
     }
     if src.len() == 1 {
         // Single byte: must be 0 (0-byte block).
         if src[0] == 0 {
-            return Ok((true, false, &src[1..], 0));
+            return Ok(Header::Literal(&[]));
         }
         return Err(Error::Corrupt("invalid single-byte block"));
     }
@@ -344,19 +361,12 @@ fn parse_header(src: &[u8]) -> Result<(bool, bool, &[u8], usize), Error> {
         return Err(Error::Corrupt("snappy/s2 stream not supported"));
     }
     let after_magic = &src[1..];
-    if let Some((v, _)) = format::get_uvarint(after_magic)
-        && v >= 1 << 24
-    {
-        let (size, block) = simd::simd_header(after_magic)?;
-        return Ok((false, true, block, size));
-    }
     let (v, n) =
         format::get_uvarint(after_magic).ok_or(Error::Corrupt("bad decoded-length varint"))?;
-    // Match Go decodedLen: anything that wouldn't fit in uint32 is corrupt …
-    if v > 0xffff_ffff {
-        return Err(Error::Corrupt("decoded length exceeds u32"));
+    if v >= 1 << 24 {
+        let (size, block) = simd::simd_header(after_magic)?;
+        return Ok(Header::Simd { block, size });
     }
-    // … and anything between uint32 and MaxBlockSize is "too large".
     if v > MAX_BLOCK_SIZE as u64 {
         return Err(Error::TooLarge);
     }
@@ -367,13 +377,13 @@ fn parse_header(src: &[u8]) -> Result<(bool, bool, &[u8], usize), Error> {
         return Err(Error::Corrupt("empty block body"));
     }
     if dlen == 0 {
-        return Ok((true, false, body, body.len()));
+        return Ok(Header::Literal(body));
     }
     if dlen < body.len() {
         // A compressed block may not be larger than the decompressed block.
         return Err(Error::Corrupt("compressed larger than decoded size"));
     }
-    Ok((false, false, body, dlen))
+    Ok(Header::Classic { body, dlen })
 }
 
 fn encode_uncompressed(dst: &mut Vec<u8>, src: &[u8]) {
