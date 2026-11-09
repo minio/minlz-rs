@@ -83,8 +83,9 @@ pub(crate) const ENCODE_SLACK: usize = 16;
 /// or later; streams store them as SIMD chunks (`SPEC.md` 4.5B). SIMD blocks typically compress
 /// better than classic ones, and decompress faster on platforms with SIMD when blocks are 64 KiB
 /// or more. See [SIMD blocks](crate::block#simd-blocks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum Level {
     /// The fastest compression level. It takes significant shortcuts and usually compresses
     /// much worse; use it only if [`Level::Fastest`] is confirmed to be too slow.
@@ -121,6 +122,23 @@ pub enum Level {
     FastestSimdDelta = 5 | 256,
     /// [`Level::BalancedSimd`] with delta literals. Go's `LevelBalancedSIMD | LevelSIMDDelta` (262).
     BalancedSimdDelta = 6 | 256,
+}
+
+impl Level {
+    /// Reports whether the level writes SIMD blocks, which need a decoder for MinLZ format
+    /// specification v1.1 or later.
+    pub const fn is_simd(self) -> bool {
+        match self {
+            Level::SuperFast | Level::Fastest | Level::Balanced | Level::Smallest => false,
+            Level::SuperFastSimd
+            | Level::FastestSimd
+            | Level::BalancedSimd
+            | Level::SmallestSimd
+            | Level::SuperFastSimdDelta
+            | Level::FastestSimdDelta
+            | Level::BalancedSimdDelta => true,
+        }
+    }
 }
 
 impl TryFrom<i32> for Level {
@@ -401,7 +419,15 @@ fn encode_body(dst: &mut [u8], src: &[u8], level: Level) -> usize {
         Level::Fastest => encode_l1::encode_block,
         Level::Balanced => encode_l2::encode_block,
         Level::Smallest => encode_l3::encode_block,
-        _ => return simd::encode_block_simd(&mut dst[..room], src, level.into()),
+        Level::SuperFastSimd
+        | Level::FastestSimd
+        | Level::BalancedSimd
+        | Level::SmallestSimd
+        | Level::SuperFastSimdDelta
+        | Level::FastestSimdDelta
+        | Level::BalancedSimdDelta => {
+            return simd::encode_block_simd(&mut dst[..room], src, level.into());
+        }
     };
     let h = format::put_uvarint_at(dst, src.len() as u64);
     let n = encode_block(&mut dst[h..], src);

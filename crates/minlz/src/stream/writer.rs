@@ -536,7 +536,7 @@ impl<W: Write> Write for Writer<W> {
 /// Reports whether a stream written at `level` has SIMD chunks, and so the flag in its
 /// identifier (Go `w.level >= LevelSuperFastSIMD`).
 pub(super) fn simd_stream(level: block::Level, uncompressed: bool) -> bool {
-    !uncompressed && i32::from(level) >= i32::from(block::Level::SuperFastSimd)
+    !uncompressed && level.is_simd()
 }
 
 /// Writes `src` as a compressed chunk to the start of `dst` and returns the chunk size, or 0 if

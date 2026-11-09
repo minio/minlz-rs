@@ -84,6 +84,13 @@ fn level_discriminants_match_go() {
 }
 
 #[test]
+fn level_is_simd() {
+    for level in ALL_LEVELS {
+        assert_eq!(level.is_simd(), i32::from(level) >= 4, "{level:?}");
+    }
+}
+
+#[test]
 fn empty() {
     roundtrip(&[]).expect("empty roundtrip");
 }
@@ -1659,7 +1666,7 @@ fn encode_chunk_body_reuses_dirty_buffer() {
                 continue;
             }
             let mut dec = Vec::new();
-            if i32::from(level) > 3 {
+            if level.is_simd() {
                 let mut blk = vec![0];
                 blk.extend_from_slice(&fresh[7..7 + n]);
                 decode(&mut dec, &blk).unwrap();

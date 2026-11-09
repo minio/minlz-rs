@@ -744,7 +744,7 @@ fn writer_simd_identifier() {
             }
             w.write_all(&data).unwrap();
             let (main, _) = w.finish();
-            let simd = level.is_some_and(|l| i32::from(l) >= 4);
+            let simd = level.is_some_and(Level::is_simd);
             assert_eq!(
                 main[MAGIC_BODY_LEN + 3] & STREAM_FLAG_SIMD != 0,
                 simd,
@@ -860,7 +860,7 @@ fn encoder_regression() {
         .enumerate()
     {
         for (name, opt) in opts {
-            if data.len() > 10000 && !matches!(opt, Opt::Level(l) if i32::from(l) >= 4) {
+            if data.len() > 10000 && !matches!(opt, Opt::Level(l) if l.is_simd()) {
                 continue;
             }
             for c1 in [false, true] {
