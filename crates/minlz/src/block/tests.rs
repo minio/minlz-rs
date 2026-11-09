@@ -1110,6 +1110,46 @@ fn max_offset_probes() {
     }
 }
 
+/// [`max_offset_probes`] for SuperFast, whose probes compare 8 bytes: a copy
+/// at distance `MAX_COPY3_OFFSET + delta` that only the probe at s+k finds
+/// (k 0..3), or the probe right after a copy that ends at it (k 3). The sizes
+/// are Go's (`-tags noasm`).
+#[test]
+#[cfg_attr(miri, ignore = "2 MiB inputs too slow for miri")]
+fn l0_max_offset_probes() {
+    use super::format::MAX_COPY3_OFFSET as M;
+    const X: usize = 1000;
+    let mut rng = Xor64::new(7);
+    let marker: Vec<u8> = (0..24).map(|_| rng.next() as u8 | 1).collect();
+    let tail: Vec<u8> = (0..16).map(|_| rng.next() as u8 | 1).collect();
+    for (k, sizes) in [[68, 72], [67, 72], [66, 72], [101, 98]]
+        .into_iter()
+        .enumerate()
+    {
+        for (delta, want) in sizes.into_iter().enumerate() {
+            let y = X + M + delta;
+            let mut src = vec![0u8; y + 4096];
+            src[X..X + 24].copy_from_slice(&marker);
+            let at = if k == 3 {
+                src[X + 100..X + 116].copy_from_slice(&tail);
+                src[y - 16..y].copy_from_slice(&tail);
+                0
+            } else {
+                k
+            };
+            for (i, b) in src[y..y + 24].iter_mut().enumerate() {
+                *b = marker[i] ^ if (at..at + 8).contains(&i) { 0 } else { 0x80 };
+            }
+            let mut enc = Vec::new();
+            encode(&mut enc, &src, Level::SuperFast).unwrap();
+            let mut dec = Vec::new();
+            decode(&mut dec, &enc).unwrap_or_else(|e| panic!("k {k} delta {delta}: {e}"));
+            assert!(dec == src, "k {k} delta {delta}: roundtrip mismatch");
+            assert_eq!(enc.len(), want, "k {k} delta {delta}");
+        }
+    }
+}
+
 /// Input with matches at the lengths and offsets where the encodings change
 /// size, repeated offsets, and copies of the block start. A Go copy of it made
 /// [`encode_matches_go`]'s golden values.
