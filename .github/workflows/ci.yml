@@ -39,7 +39,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       # rust-toolchain.toml pins stable and outranks `rustup default`;
-      # only this variable (or `cargo +toolchain`) outranks the file.
+      # this variable, like `cargo +toolchain` or `rustup override set`, outranks the file.
       RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
     steps:
       - uses: actions/checkout@v4
