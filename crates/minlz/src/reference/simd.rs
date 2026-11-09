@@ -416,7 +416,7 @@ impl SimdDecoder<'_> {
     fn literals(&mut self, sec: &[u8]) -> Result<(), String> {
         let mut r = entries(sec, "literal")?;
         while !r.recs.is_empty() {
-            let v = self.stream(&mut r, STREAM_LITERALS, -1)?;
+            let v = self.stream(&mut r, STREAM_LITERALS, None)?;
             if v.is_empty() || v.len() > 65535 {
                 return Err(format!("literal block of {} literals", v.len()));
             }
@@ -450,16 +450,18 @@ impl SimdDecoder<'_> {
                 return Err(format!("more than {MAX_CHUNKS} chunks"));
             }
             // The tokens give the number of values of the next streams, and the literal lengths
-            // add escapes (SPEC_SIMD.md 4.1). -1 is a number stored with the values.
+            // add escapes (SPEC_SIMD.md 4.1). The tokens store their number with the values, and
+            // the offset bits are only stored.
             let mut c: [Vec<u8>; STREAM_OFFSET_BITS + 1] = Default::default();
-            let mut counts: [isize; STREAM_OFFSET_BITS + 1] = [-1, 0, 0, 0, -1];
+            let mut counts = [0; STREAM_OFFSET_BITS + 1];
             for (k, ck) in c.iter_mut().enumerate() {
-                *ck = self.stream(&mut r, k, counts[k])?;
+                let count = matches!(k, STREAM_LIT_LENS..=STREAM_ESCAPES).then_some(counts[k]);
+                *ck = self.stream(&mut r, k, count)?;
                 for &v in ck.iter() {
                     match k {
                         STREAM_TOKENS => {
-                            counts[STREAM_LIT_LENS] += ((v >> 1) & 1) as isize;
-                            counts[STREAM_OFFSETS] += ((v & 1) ^ 1) as isize;
+                            counts[STREAM_LIT_LENS] += usize::from((v >> 1) & 1);
+                            counts[STREAM_OFFSETS] += usize::from((v & 1) ^ 1);
                             if v >> 2 == 33 {
                                 counts[STREAM_ESCAPES] += 1;
                             }
@@ -482,8 +484,13 @@ impl SimdDecoder<'_> {
     }
 
     /// Reads the next entry of `r` for stream `k`, and returns the stream's values.
-    /// A pivco block holds `count` values, or stores their number if `count` is -1.
-    fn stream(&mut self, r: &mut EntryReader, k: usize, count: isize) -> Result<Vec<u8>, String> {
+    /// A pivco block holds `count` values, or stores their number if `count` is None.
+    fn stream(
+        &mut self,
+        r: &mut EntryReader,
+        k: usize,
+        count: Option<usize>,
+    ) -> Result<Vec<u8>, String> {
         let s = &SIMD_STREAMS[k];
         let (e, n) = uvarint(r.recs).ok_or_else(|| format!("{}: invalid entry", s.name))?;
         r.recs = &r.recs[n..];
@@ -518,18 +525,20 @@ impl SimdDecoder<'_> {
         let vals = if mode == MODE_STORED {
             vals.to_vec()
         } else {
-            let mut count = count;
-            if count < 0 {
-                if vals.len() < 2 {
-                    return Err(format!("{}: number of values past the data", s.name));
+            let count = match count {
+                Some(n) => n,
+                None => {
+                    let [a, b, rest @ ..] = vals else {
+                        return Err(format!("{}: number of values past the data", s.name));
+                    };
+                    vals = rest;
+                    u16::from_le_bytes([*a, *b]).into()
                 }
-                count = u16::from_le_bytes([vals[0], vals[1]]) as isize;
-                vals = &vals[2..];
-            }
+            };
             let t = self.tables[k]
                 .as_ref()
                 .expect("table read or checked above");
-            t.decode(vals, count as usize)
+            t.decode(vals, count)
                 .map_err(|e| format!("{}: {e}", s.name))?
         };
         if let Some(v) = vals
