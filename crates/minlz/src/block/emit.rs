@@ -17,7 +17,7 @@
 //! Ported from `asm_none.go` (`emitLiteral`, `emitRepeat`, `emitCopy`,
 //! `emitCopyLits2`, `emitCopyLits3`, `encodeCopy3`) and `encode.go`
 //! (`encodeCopy2`).  These functions assume `dst` is large enough; the
-//! caller pre-allocates `max_encoded_len(src.len())` bytes.
+//! caller pre-allocates `max_encoded_len(src.len()) + ENCODE_SLACK` bytes.
 
 use super::format::{
     MAX_COPY1_OFFSET, MAX_COPY2_LITS, MAX_COPY2_OFFSET, MAX_COPY3_LITS, MIN_COPY2_OFFSET,

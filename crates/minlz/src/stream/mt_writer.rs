@@ -169,11 +169,12 @@ impl Engine {
         let id = NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
         let (run_tx, run_rx) = mpsc::channel::<Run>();
         let runner = std::thread::spawn(move || runner_loop(run_rx, id));
-        // encode_block needs the chunk header, the checksum or hash, and MaxEncodedLen(block_size);
-        // a smaller buffer would double on its first full block.
+        // encode_block needs the chunk header, the checksum or hash, and MaxEncodedLen(block_size)
+        // plus the encoders' slack; a smaller buffer would double on its first full block.
         let obuf_cap = CHUNK_HEADER_SIZE
             + SIMD_HASH_SIZE
-            + block::max_encoded_len(block_size).unwrap_or(block_size + 16);
+            + block::max_encoded_len(block_size).unwrap_or(block_size + 16)
+            + block::ENCODE_SLACK;
         // Keep every buffer a stream has in flight, so the next stream allocates none: up to
         // concurrency + 3 inputs (the order queue, the block being written, the one being
         // submitted) plus `ibuf`, and concurrency + 2 outputs.

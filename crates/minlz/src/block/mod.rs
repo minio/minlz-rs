@@ -69,6 +69,11 @@ pub use format::{MAX_BLOCK_SIZE, max_encoded_len};
 
 use crate::Error;
 
+/// Spare bytes the classic encoders get past [`max_encoded_len`]. Like Go's `encodeBlockBest`,
+/// L3 checks its size limit before it writes a literal header and a copy, so its last emission
+/// can end up to 9 bytes past that length; such a block is discarded as incompressible.
+pub(crate) const ENCODE_SLACK: usize = 16;
+
 /// Compression level for [`encode`].
 ///
 /// The levels map to the Go API's int levels (`LevelFastest = 1`, …) with [`i32::from`] and
@@ -172,7 +177,7 @@ pub fn encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(), Error> 
 /// Equivalent to Go's `AppendEncoded(dst, src, level)`.
 pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(), Error> {
     let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
-    dst.reserve(max);
+    dst.reserve(max + ENCODE_SLACK);
     let start = dst.len();
     // Worst case: a single literal block (header + raw bytes).
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
@@ -185,7 +190,8 @@ pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(),
     format::put_uvarint(dst, src.len() as u64);
     let mut body_start = dst.len();
     // Reserve worst-case body length so the encoder can write via index.
-    dst.resize(start + max, 0);
+    let end = start + max;
+    dst.resize(end + ENCODE_SLACK, 0);
 
     let n = match level {
         Level::SuperFast => encode_l0::encode_block(&mut dst[body_start..], src),
@@ -195,11 +201,11 @@ pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(),
         _ => {
             // A SIMD block has its own header after the indicator byte.
             body_start = start + 1;
-            simd::encode_block_simd(&mut dst[body_start..], src, level.into())
+            simd::encode_block_simd(&mut dst[body_start..end], src, level.into())
         }
     };
 
-    if n > 0 {
+    if n > 0 && body_start + n <= end {
         dst.truncate(body_start + n);
         Ok(())
     } else {
@@ -219,12 +225,13 @@ pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, E
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
         return Ok(false);
     }
-    dst.reserve(max);
+    dst.reserve(max + ENCODE_SLACK);
     let start = dst.len();
     dst.push(0);
     format::put_uvarint(dst, src.len() as u64);
     let mut body_start = dst.len();
-    dst.resize(start + max, 0);
+    let end = start + max;
+    dst.resize(end + ENCODE_SLACK, 0);
 
     let n = match level {
         Level::SuperFast => encode_l0::encode_block(&mut dst[body_start..], src),
@@ -233,7 +240,7 @@ pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, E
         Level::Smallest => encode_l3::encode_block(&mut dst[body_start..], src),
         _ => {
             body_start = start + 1;
-            simd::encode_block_simd(&mut dst[body_start..], src, level.into())
+            simd::encode_block_simd(&mut dst[body_start..end], src, level.into())
         }
     };
 
@@ -393,10 +400,11 @@ fn encode_uncompressed(dst: &mut Vec<u8>, src: &[u8]) {
 /// levels.  Returns 0 if compression isn't worthwhile (caller should emit a
 /// 0x01 chunk).
 ///
-/// `dst` grows to [`max_encoded_len`] bytes past `start` and keeps its length:
-/// the bytes after the body are left from earlier blocks.  The encoders only
-/// write their output, so a stream reuses `dst` for every block without
-/// zeroing it again (Go's `Writer.encodeBlock` on its `obuf`).
+/// `dst` grows to [`max_encoded_len`] + [`ENCODE_SLACK`] bytes past `start`
+/// and keeps its length: the bytes after the body are left from earlier
+/// blocks.  The encoders only write their output, so a stream reuses `dst`
+/// for every block without zeroing it again (Go's `Writer.encodeBlock` on its
+/// `obuf`).
 pub(crate) fn encode_chunk_body(
     dst: &mut Vec<u8>,
     start: usize,
@@ -404,16 +412,17 @@ pub(crate) fn encode_chunk_body(
     level: Level,
 ) -> Result<usize, Error> {
     let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
-    if dst.len() < start + max {
-        dst.resize(start + max, 0);
+    let end = start + max + ENCODE_SLACK;
+    if dst.len() < end {
+        dst.resize(end, 0);
     }
-    let dst = &mut dst[start..start + max];
+    let dst = &mut dst[start..end];
     let encode_block = match level {
         Level::SuperFast => encode_l0::encode_block,
         Level::Fastest => encode_l1::encode_block,
         Level::Balanced => encode_l2::encode_block,
         Level::Smallest => encode_l3::encode_block,
-        _ => return Ok(simd::encode_block_simd(dst, src, level.into())),
+        _ => return Ok(simd::encode_block_simd(&mut dst[..max], src, level.into())),
     };
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
         return Ok(0);

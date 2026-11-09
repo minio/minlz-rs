@@ -1650,3 +1650,58 @@ fn l1_repeated_fragment_compresses() {
         }
     }
 }
+
+/// `k` segments of 400 random bytes and `[a; 4]`, then 400 random bytes and
+/// `t` bytes of `k + 1`. Each segment costs L3 a 3-byte literal header and a
+/// repeat for its 404 bytes, so the output overtakes the input.
+fn l3_overflow_input(k: usize, t: usize) -> Vec<u8> {
+    let mut rng = Xor64::new(0);
+    let mut rnd = |avoid: u8| loop {
+        let b = (rng.next() >> 24) as u8;
+        if b != avoid && b != avoid.wrapping_add(1) {
+            return b;
+        }
+    };
+    let mut v = Vec::new();
+    for a in 1..=k as u8 {
+        v.extend((0..400).map(|_| rnd(a)));
+        v.extend_from_slice(&[a; 4]);
+    }
+    let last = k as u8 + 1;
+    v.extend((0..400).map(|_| rnd(last)));
+    v.extend(std::iter::repeat_n(last, t));
+    v
+}
+
+/// Regression: L3 (like Go's `encodeBlockBest`) checks its size limit before
+/// it writes a literal header and a repeat, so its last emission ended up to
+/// 9 bytes past `max_encoded_len`: heap corruption, and a truncated block
+/// from `encode`.
+#[test]
+#[cfg_attr(miri, ignore = "300 L3 encodes of 18 KB are impractical under miri")]
+fn l3_last_emission_stays_in_bounds() {
+    for k in [40, 43, 44, 45, 46] {
+        for t in 40..60 {
+            let src = l3_overflow_input(k, t);
+            let mut enc = Vec::new();
+            encode(&mut enc, &src, Level::Smallest).unwrap();
+            let mut out = Vec::new();
+            decode(&mut out, &enc).unwrap();
+            assert!(out == src, "k={k} t={t}");
+            let mut tried = Vec::new();
+            if try_encode(&mut tried, &src, Level::Smallest).unwrap() {
+                decode(&mut out, &tried).unwrap();
+                assert!(out == src, "try_encode k={k} t={t}");
+            }
+            let max = max_encoded_len(src.len()).unwrap();
+            let mut body = vec![0xaa; max + 64];
+            body.truncate(max);
+            let n = encode_chunk_body(&mut body, 0, &src, Level::Smallest).unwrap();
+            assert!(n < src.len(), "k={k} t={t}");
+            // SAFETY: `body` holds `max + 64` initialized bytes, and `encode_chunk_body`
+            // only grows its length to `max + ENCODE_SLACK`, within that capacity.
+            let tail = unsafe { std::slice::from_raw_parts(body.as_ptr().add(body.len()), 8) };
+            assert_eq!(tail, [0xaa; 8], "chunk body overflow k={k} t={t}");
+        }
+    }
+}
