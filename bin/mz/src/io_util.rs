@@ -51,18 +51,35 @@ pub fn open_output(path: &Path) -> io::Result<Box<dyn Write>> {
     Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, file)))
 }
 
-/// Rejects an output that names the input file: [`open_output`] would
-/// truncate it before the first read.
+/// Rejects an output that is the input file: [`open_output`] would
+/// truncate it before the first read. On Unix this compares file identity,
+/// so path aliases, symlinks and hard links are all caught. Elsewhere it
+/// compares canonical paths, which misses hard links: std has no stable
+/// file identity on Windows.
 pub fn check_not_input(input: &Path, output: &Path) -> io::Result<()> {
     let stdio = Path::new("-");
-    if input != stdio
-        && output != stdio
-        && let (Ok(a), Ok(b)) = (std::fs::canonicalize(input), std::fs::canonicalize(output))
-        && a == b
-    {
+    if input != stdio && output != stdio && is_same_file(input, output) {
         return Err(io::Error::other("input and output are the same file"));
     }
     Ok(())
+}
+
+// stat, not open: opening a FIFO given as -o would block until a writer appears.
+#[cfg(unix)]
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(a), Ok(b)) if a == b
+    )
 }
 
 /// Like [`open_output`], but `Send + 'static` so the value can be moved

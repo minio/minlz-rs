@@ -465,6 +465,39 @@ fn output_same_as_input_is_rejected() {
     }
 }
 
+// Only Unix: std has no stable file identity on Windows, so mz cannot see hard links there.
+#[cfg(unix)]
+#[test]
+fn output_hard_link_to_input_is_rejected() {
+    let dir = tmp_dir();
+    let payload = sample_payload(12, 64 * 1024);
+    for args in [
+        &["c", "-q", "--cpu", "1"][..],
+        &["c", "-q", "--cpu", "2"],
+        &["c", "-q", "--block", "--rm"],
+        &["d", "-q", "--cpu", "1"],
+        &["d", "-q", "--cpu", "2"],
+    ] {
+        let src = dir.join("hl-src.txt");
+        let link = dir.join("hl-dst.txt");
+        let _ = fs::remove_file(&link);
+        fs::write(&src, &payload).unwrap();
+        fs::hard_link(&src, &link).unwrap();
+        let out = Command::new(mz_bin())
+            .args(args)
+            .arg("-o")
+            .arg(&link)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{args:?}: accepted -o == hard link of input"
+        );
+        assert_eq!(fs::read(&src).unwrap(), payload, "{args:?}: input modified");
+    }
+}
+
 /// `-0 --block` writes Go's uncompressed block (SPEC 1.1: size 0 means the rest is literals):
 /// `0x00` when empty, else `0x00 0x00` and the input.
 #[test]
