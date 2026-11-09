@@ -56,13 +56,12 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.rust }}
       - name: cargo build
         run: cargo build --workspace --all-targets --verbose
-      - name: cargo test (debug, lib)
-        run: cargo test --workspace --lib --verbose
-      - name: cargo test (debug, integration + CLI)
-        # Covers integration tests under `crates/minlz/tests/` and CLI
-        # tests under `bin/mz/tests/`.  Cross-impl tests gated on
-        # `MINLZ_GO_CMD` self-skip cleanly when it's unset. The `reference`
-        # feature runs the SIMD fixtures through the reference decoder.
+      - name: cargo test (debug, lib + integration + CLI)
+        # Covers the lib/bin unit tests, integration tests under
+        # `crates/minlz/tests/` and CLI tests under `bin/mz/tests/`.
+        # Cross-impl tests gated on `MINLZ_GO_CMD` self-skip cleanly
+        # when it's unset. The `reference` feature runs the SIMD
+        # fixtures through the reference decoder.
         run: cargo test --workspace --tests --features minio-minlz/reference --verbose
       - name: cargo test (debug, doctests)
         # `--doc` cannot be combined with other target flags, so run
