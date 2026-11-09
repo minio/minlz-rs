@@ -228,10 +228,10 @@ fn test_stats(b: &[u8], modes: &mut [[usize; 8]; LITS + 1], flags: &mut [usize; 
         }
     };
     let table = |sec: &[u8]| -> Vec<u8> {
-        let (size, n) = rvarint(sec);
+        let (size, n) = rvarint(sec).unwrap();
         sec[sec.len() - n - size as usize..sec.len() - n].to_vec()
     };
-    let (lz, n) = rvarint(body);
+    let (lz, n) = rvarint(body).unwrap();
     let lz = lz as usize;
     let tab = table(&body[lz..body.len() - n]);
     let mut t = &tab[..];

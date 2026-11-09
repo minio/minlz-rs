@@ -54,7 +54,7 @@ fn simd_rvarint() {
         assert_eq!(got, b, "{v}");
         assert_eq!(
             rvarint(&[&[0x80, 0xff], b].concat()),
-            (v, b.len()),
+            Some((v, b.len())),
             "{b:x?}"
         );
     }
@@ -71,14 +71,16 @@ fn simd_rvarint() {
     ] {
         let mut b = vec![0x80];
         test_rvarint(&mut b, v);
-        assert_eq!(rvarint(&b), (v, b.len() - 1), "{v}");
-        let (_, n) = rvarint(&b[2..]);
-        assert!(n == 0 || v < 128, "{v}: truncated varint accepted");
+        assert_eq!(rvarint(&b), Some((v, b.len() - 1)), "{v}");
+        assert!(
+            rvarint(&b[2..]).is_none() || v < 128,
+            "{v}: truncated varint accepted"
+        );
     }
-    assert_eq!(rvarint(&[0x80; 10]).1, 0, "unterminated varint accepted");
+    assert_eq!(rvarint(&[0x80; 10]), None, "unterminated varint accepted");
     assert_eq!(
-        rvarint(&[&[2][..], &[0xff; 9]].concat()).1,
-        0,
+        rvarint(&[&[2][..], &[0xff; 9]].concat()),
+        None,
         "overflow accepted"
     );
 }
@@ -466,13 +468,13 @@ fn recode(
 /// Returns the start of the LZ section, its size and the size of L.
 fn sections(b: &[u8]) -> (usize, usize, usize) {
     let (_, h) = get_uvarint(&b[1..]).unwrap();
-    let (lz, n) = rvarint(b);
+    let (lz, n) = rvarint(b).unwrap();
     (2 + h, lz as usize, n)
 }
 
 /// Sets the reverse varint that ends at end to 1 more than the bytes from start to it.
 fn past(b: &[u8], start: usize, end: usize) -> Vec<u8> {
-    let (_, n) = rvarint(&b[..end]);
+    let (_, n) = rvarint(&b[..end]).unwrap();
     let mut out = b[..end - n].to_vec();
     test_rvarint(&mut out, (end - n - start + 1) as u64);
     out.extend_from_slice(&b[end..]);
@@ -643,7 +645,7 @@ fn validation_cases() -> Vec<VCase> {
         VCase {
             name: "L too large",
             raw: raw(|b| {
-                let (_, n) = rvarint(&b);
+                let (_, n) = rvarint(&b).unwrap();
                 let mut c = b[..b.len() - n].to_vec();
                 test_rvarint(&mut c, b.len() as u64);
                 c
@@ -2092,7 +2094,7 @@ fn simd_lit_fill() {
     let raw = e.bytes();
     let (_, h) = get_uvarint(&raw[1..]).unwrap();
     let body = &raw[2 + h..];
-    let (_, n) = rvarint(body);
+    let (_, n) = rvarint(body).unwrap();
     let mut s = Decoder::new();
     s.lits.buf = vec![0xa5; lits.len() + PAD];
     let mut r = s

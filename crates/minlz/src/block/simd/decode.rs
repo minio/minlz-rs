@@ -140,8 +140,8 @@ impl Decoder {
     pub(super) fn decode(&mut self, dst: &mut [u8], block: &[u8], hash: bool) -> Option<()> {
         let limit = (1024 << (block[0] & 7)).min(MAX_CHUNK);
         let body = &block[1..];
-        let (lz, n) = rvarint(body);
-        if n == 0 || lz > (body.len() - n) as u64 {
+        let (lz, n) = rvarint(body)?;
+        if lz > (body.len() - n) as u64 {
             return None;
         }
         let lz = lz as usize;
@@ -173,8 +173,8 @@ impl Decoder {
     /// literal blocks.
     pub(super) fn literals<'a>(&mut self, sec: &'a [u8], size: usize) -> Option<Reader<'a>> {
         self.t.have = Default::default();
-        let (t, n) = rvarint(sec);
-        if n == 0 || t > (sec.len() - n) as u64 {
+        let (t, n) = rvarint(sec)?;
+        if t > (sec.len() - n) as u64 {
             return None;
         }
         let end = sec.len() - n - t as usize;
@@ -203,8 +203,8 @@ impl Decoder {
         lr: &mut Reader,
         hash: bool,
     ) -> Option<()> {
-        let (t, n) = rvarint(&body[..end]);
-        if n == 0 || t > (end - n) as u64 {
+        let (t, n) = rvarint(&body[..end])?;
+        if t > (end - n) as u64 {
             return None;
         }
         let t = t as usize;

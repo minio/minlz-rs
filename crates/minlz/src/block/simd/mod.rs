@@ -227,23 +227,23 @@ const fn new_layout(k: usize, lo: usize, hi: usize) -> Layout {
 }
 
 /// Reads the reverse varint that ends at the end of `b`.
-/// Returns the value and its size, or a size of 0 if it is invalid.
+/// Returns the value and its size, or None if it is invalid.
 #[inline]
-pub(crate) fn rvarint(b: &[u8]) -> (u64, usize) {
+pub(crate) fn rvarint(b: &[u8]) -> Option<(u64, usize)> {
     const MAX_VARINT_LEN64: usize = 10;
     let (mut x, mut s) = (0u64, 0u32);
     for i in 0..b.len().min(MAX_VARINT_LEN64) {
         let c = b[b.len() - 1 - i];
         if c < 0x80 {
             if i == MAX_VARINT_LEN64 - 1 && c > 1 {
-                return (0, 0);
+                return None;
             }
-            return (x | (c as u64) << s, i + 1);
+            return Some((x | (c as u64) << s, i + 1));
         }
         x |= ((c & 0x7f) as u64) << s;
         s += 7;
     }
-    (0, 0)
+    None
 }
 
 /// Parses the header of a SIMD block without its indicator byte.
@@ -284,10 +284,10 @@ mod tests {
 
     #[test]
     fn rvarint_spec_examples() {
-        assert_eq!(rvarint(&[0x05]), (5, 1));
-        assert_eq!(rvarint(&[0x02, 0xac]), (300, 2));
-        assert_eq!(rvarint(&[0x06, 0x8d, 0xa0]), (100000, 3));
-        assert_eq!(rvarint(&[0x80]), (0, 0));
+        assert_eq!(rvarint(&[0x05]), Some((5, 1)));
+        assert_eq!(rvarint(&[0x02, 0xac]), Some((300, 2)));
+        assert_eq!(rvarint(&[0x06, 0x8d, 0xa0]), Some((100000, 3)));
+        assert_eq!(rvarint(&[0x80]), None);
     }
 
     struct Case {
