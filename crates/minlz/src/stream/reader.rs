@@ -428,6 +428,11 @@ impl<R: Read> Reader<R> {
     /// worker) — use [`Read::read`] for the lowest-overhead single-threaded
     /// path.
     ///
+    /// The buffers of each thread are sized for the largest block the reader
+    /// accepts, [`ReaderBuilder::max_block_size`] until it has read a stream
+    /// identifier. Setting that to the stream's block size uses less memory
+    /// with small blocks.
+    ///
     /// `W: Send + 'static` is required because the writer thread spawned
     /// inside outlives any caller-stack borrow.  Borrowed sinks
     /// (`&mut Vec<u8>`) are not supported; wrap them in an owned adapter
