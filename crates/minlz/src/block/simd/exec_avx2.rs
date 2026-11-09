@@ -233,7 +233,8 @@ unsafe fn exec<const DELTA: bool, const FLAT: bool>(
             let mut ml = t >> 2;
             if FLAT && r < ml {
                 cold();
-                // Valid blocks never take it. Escaped matches (code 33) only raise r to 32.
+                // Encoders only take it with an escaped match (code 33) at offset 32, which keeps
+                // r: escaped matches only raise r to 32.
                 r = if ml == MAX_LEN + 1 {
                     r.max(MAX_LEN)
                 } else {

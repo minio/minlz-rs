@@ -787,7 +787,7 @@ fn validation_cases() -> Vec<VCase> {
             change: same(|e| e.chunks[0].flags |= 3 << 2),
             ..Default::default()
         },
-        // The flag raises the offsets of the overlapping matches (SPEC_SIMD.md 4.3).
+        // The flag raises offsets below min(ml, 32) (SPEC_SIMD.md 4.3).
         VCase {
             name: "chunk no-overlap flag",
             ok: true,

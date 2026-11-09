@@ -250,7 +250,8 @@ pub(crate) struct Encoder<'a> {
     acc: u64,
     pub(super) pos: usize,
     pub(super) rep: usize,
-    /// A match of the chunk overlaps its output.
+    /// A match of up to 32 bytes overlaps its output, so the chunk can't have the no-overlap
+    /// flag. The flag keeps the offsets of longer matches, which are at least 32.
     overlap: bool,
 
     s: Box<Scratch>,
@@ -272,8 +273,9 @@ pub(crate) struct Encoder<'a> {
     fast_code: usize,
     /// Delta literals must save 1/delta_div of a chunk; 0 disables them, -1 uses only them.
     delta_div: isize,
-    /// no_overlap splits the matches that overlap their output, so every chunk has the no-overlap
-    /// flag. With budget, a chunk stops splitting once that cost it more than split_budget, and
+    /// no_overlap splits the matches of up to 32 bytes that overlap their output, so every chunk
+    /// has the no-overlap flag. Longer matches have offsets of at least 32, which the flag allows.
+    /// With budget, a chunk stops splitting once that cost it more than split_budget, and
     /// overlaps. split_cost is what splitting cost the chunk: operations and offsets, against
     /// operations of 32 bytes.
     pub(super) no_overlap: bool,

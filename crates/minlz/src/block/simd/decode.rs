@@ -73,7 +73,8 @@ pub(super) struct Chunk<'a> {
     pub(super) bits: usize,
     pub(super) delta: bool,
     /// flat is set for chunks with the no-overlap flag. Their offsets are raised to the match
-    /// length, so matches are plain copies.
+    /// length or 32, so copying 32 bytes at a time needs no overlap test. Longer matches can
+    /// still overlap their output.
     pub(super) flat: bool,
 }
 

@@ -243,9 +243,10 @@ impl<'a> Loop<'a> {
 
     /// Copies the match with length code ml from r = min(LAST, d) back, r below ml selecting
     /// a pattern row (Go's clamp, pattern and check), or with FLAT from
-    /// r = min(max(LAST, min(ml, 32)), d) back, which never overlaps (raise, clampcheck, clamp
-    /// and copy), then moves past it (long, next). Codes from 33 on are escapes: Go tests the
-    /// token, the batch takes the code alone out of the token word.
+    /// r = min(max(LAST, min(ml, 32)), d) back (raise, clampcheck, clamp and copy), at least
+    /// min(ml, 32) as d is, so the 32-byte forward copies need no overlap test, then moves past
+    /// it (long, next). Codes from 33 on are escapes: Go tests the token, the batch takes the
+    /// code alone out of the token word.
     #[inline(always)]
     unsafe fn copy<const FLAT: bool>(&mut self, ml: usize) {
         // SAFETY: r <= d keeps the source in dst, and its 32 bytes end at most at dp + 32;

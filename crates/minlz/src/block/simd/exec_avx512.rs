@@ -363,8 +363,9 @@ unsafe fn exec<const DELTA: bool, const FLAT: bool>(
                 last = o;
             }
             if FLAT && DELTA {
-                // Without delta, the expansion raised the offset. Valid blocks never raise.
-                // Escaped matches (code 33) only raise it to 32.
+                // Without delta, the expansion raised the offset. Encoders only take it with an
+                // escaped match (code 33) at offset 32, which keeps o: escaped matches only raise
+                // it to 32.
                 t >>= 2;
                 if o < t {
                     cold();
