@@ -392,6 +392,17 @@ fn level_ints() {
     }
 }
 
+/// Scratch::new builds the Scratch on the stack before boxing it, three copies deep in debug
+/// builds, so its large members must live behind their own boxes.
+#[test]
+fn scratch_is_small() {
+    assert!(
+        size_of::<Scratch>() <= 1024,
+        "Scratch is {} bytes",
+        size_of::<Scratch>()
+    );
+}
+
 /// Blocks don't depend on what the thread's pooled encoder and tables coded before: Go's pool
 /// can hand out a new encoder at any time.
 #[test]

@@ -123,11 +123,11 @@ impl Default for Table {
 /// What put codes with.
 struct Coder {
     pv: pivco::Encoder,
-    cur: [Table; LITS + 1],
+    cur: Box<[Table; LITS + 1]>,
     have: [bool; LITS + 1],
-    tmp: [Table; 2],
-    hist: [u64; 256],
-    sample: [u8; 4096],
+    tmp: Box<[Table; 2]>,
+    hist: Box<[u64; 256]>,
+    sample: Box<[u8; 4096]>,
 }
 
 /// The literal block splits: cuts, and for LevelSmallestSIMD the segment histograms and the
@@ -174,22 +174,22 @@ impl Scratch {
             split: LitSplit::default(),
             c: Coder {
                 pv: pivco::Encoder::default(),
-                cur: Default::default(),
+                cur: zeroed(),
                 have: [false; LITS + 1],
-                tmp: Default::default(),
-                hist: [0; 256],
-                sample: [0; 4096],
+                tmp: zeroed(),
+                hist: zeroed(),
+                sample: zeroed(),
             },
         })
     }
 }
 
-/// Allocates a stream on the heap: `Box::new([0; N])` builds it on the stack first, and the
-/// streams would overflow a small thread stack.
-fn zeroed<const N: usize>() -> Box<[u8; N]> {
-    match vec![0; N].into_boxed_slice().try_into() {
+/// Allocates `[T::default(); N]` on the heap: `Box::new` builds it on the stack first, and the
+/// streams and tables would overflow a small thread stack.
+fn zeroed<T: Clone + Default, const N: usize>() -> Box<[T; N]> {
+    match vec![T::default(); N].into_boxed_slice().try_into() {
         Ok(b) => b,
-        Err(_) => unreachable!("the vector has N bytes"),
+        Err(_) => unreachable!("the vector has N elements"),
     }
 }
 
@@ -1060,11 +1060,11 @@ impl Coder {
                     let at = i * (v.len() - RUN) / (RUNS - 1);
                     self.sample[i * RUN..(i + 1) * RUN].copy_from_slice(&v[at..at + RUN]);
                 }
-                s = &self.sample;
+                s = &self.sample[..];
             }
-            self.hist = [0; 256];
+            *self.hist = [0; 256];
             self.pv.histogram(&mut self.hist, s);
-            let bits = entropy_bits(&self.hist, s.len()) * v.len() / s.len();
+            let bits = entropy_bits(&*self.hist, s.len()) * v.len() / s.len();
             need -= v.len() as isize - (bits / 8) as isize;
         }
         need
