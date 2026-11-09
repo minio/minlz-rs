@@ -184,7 +184,7 @@ pub fn encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(), Error> 
 /// Equivalent to Go's `AppendEncoded(dst, src, level)`.
 pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(), Error> {
     let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
-    dst.reserve(max + ENCODE_SLACK);
+    reserve_room(dst, max);
     let start = dst.len();
     // Worst case: a single literal block (header + raw bytes).
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
@@ -209,6 +209,17 @@ pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(),
     }
 }
 
+/// Reserves the encoders' room after `dst`. An empty `dst`, such as one made with Go's idiom
+/// `with_capacity(max_encoded_len(n))`, grows by the slack instead of doubling; appends keep
+/// amortized growth.
+fn reserve_room(dst: &mut Vec<u8>, max: usize) {
+    if dst.is_empty() {
+        dst.reserve_exact(max + ENCODE_SLACK);
+    } else {
+        dst.reserve(max + ENCODE_SLACK);
+    }
+}
+
 /// Try to encode `src` at the given [`Level`]; on success, append the block to
 /// `dst` and return `true`. Returns `false` (leaving `dst` unchanged) if the
 /// input is too small or does not compress to fewer bytes than the input — the
@@ -218,7 +229,7 @@ pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, E
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
         return Ok(false);
     }
-    dst.reserve(max + ENCODE_SLACK);
+    reserve_room(dst, max);
     let start = dst.len();
     dst.push(0);
     dst.resize(start + max + ENCODE_SLACK, 0);

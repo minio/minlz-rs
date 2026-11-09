@@ -1721,6 +1721,39 @@ fn l3_last_emission_stays_in_bounds() {
     }
 }
 
+/// A dst sized with `max_encoded_len`, as in Go, grows by `ENCODE_SLACK` on the first encode
+/// instead of doubling, and appending many blocks keeps amortized growth.
+#[test]
+#[cfg_attr(miri, ignore = "1000 encodes of 4 KiB are impractical under miri")]
+fn presized_dst_grows_by_slack() {
+    let src: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    let max = max_encoded_len(src.len()).unwrap();
+    for level in [Level::Fastest, Level::Smallest, Level::FastestSimd] {
+        let mut dst = Vec::with_capacity(max);
+        encode(&mut dst, &src, level).unwrap();
+        assert!(
+            dst.capacity() <= max + ENCODE_SLACK,
+            "encode {level:?}: {}",
+            dst.capacity()
+        );
+        let mut dst = Vec::with_capacity(max);
+        try_encode(&mut dst, &src, level).unwrap();
+        assert!(
+            dst.capacity() <= max + ENCODE_SLACK,
+            "try_encode {level:?}: {}",
+            dst.capacity()
+        );
+    }
+    let mut dst = Vec::new();
+    let mut grows = 0;
+    for _ in 0..1000 {
+        let c = dst.capacity();
+        append_encoded(&mut dst, &src, Level::Fastest).unwrap();
+        grows += usize::from(dst.capacity() != c);
+    }
+    assert!(grows < 20, "{grows} reallocations in 1000 appends");
+}
+
 /// The emitters write through unchecked stores; debug builds catch a store
 /// past `dst`, as they do for the loads.
 #[test]
