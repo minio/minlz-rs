@@ -143,12 +143,12 @@ struct LitSplit {
 /// streams of the current chunk, the buffers and the tables.
 pub(super) struct Scratch {
     // The fast paths mask their indexes, so the compiler drops the bounds checks.
-    tok: [u8; CHUNK_OPS],
-    ll: [u8; CHUNK_OPS],
-    offc: [u8; CHUNK_OPS],
-    esc: [u8; 2 * CHUNK_OPS],
+    tok: Box<[u8; CHUNK_OPS]>,
+    ll: Box<[u8; CHUNK_OPS]>,
+    offc: Box<[u8; CHUNK_OPS]>,
+    esc: Box<[u8; 2 * CHUNK_OPS]>,
     /// Room for a 4 byte store at any u16 index. An offset has at most 20 raw bits.
-    raw: [u8; (1 << 16) + 3],
+    raw: Box<[u8; (1 << 16) + 3]>,
     /// The literals of the block, then, with plain and delta literals, the delta literals.
     buf: Vec<u8>,
     /// The literal positions where plain and delta literals take turns, starting with plain.
@@ -162,11 +162,11 @@ pub(super) struct Scratch {
 impl Scratch {
     pub(super) fn new() -> Box<Self> {
         Box::new(Scratch {
-            tok: [0; CHUNK_OPS],
-            ll: [0; CHUNK_OPS],
-            offc: [0; CHUNK_OPS],
-            esc: [0; 2 * CHUNK_OPS],
-            raw: [0; (1 << 16) + 3],
+            tok: zeroed(),
+            ll: zeroed(),
+            offc: zeroed(),
+            esc: zeroed(),
+            raw: zeroed(),
             buf: Vec::new(),
             switches: Vec::new(),
             lit_recs: Vec::new(),
@@ -181,6 +181,15 @@ impl Scratch {
                 sample: [0; 4096],
             },
         })
+    }
+}
+
+/// Allocates a stream on the heap: `Box::new([0; N])` builds it on the stack first, and the
+/// streams would overflow a small thread stack.
+fn zeroed<const N: usize>() -> Box<[u8; N]> {
+    match vec![0; N].into_boxed_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => unreachable!("the vector has N bytes"),
     }
 }
 
