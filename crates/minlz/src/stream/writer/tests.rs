@@ -351,7 +351,7 @@ fn empty_writes_are_noop() {
     let mut w = Writer::new(buf);
     assert_eq!(w.write(b"").unwrap(), 0);
     let out = w.finish().unwrap();
-    // Empty stream: stream id + EOF only.
+    // Empty stream: the EOF chunk alone, with no stream identifier (SPEC 4.6).
     let mut decoded = Vec::new();
     Reader::new(Cursor::new(&out))
         .read_to_end(&mut decoded)
