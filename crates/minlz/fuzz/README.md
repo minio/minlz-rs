@@ -44,4 +44,5 @@ for both.
 
 CI (`.github/workflows/fuzz.yml`) fetches the tarball and generates the
 seeds without Go's zips once per run, and shares both with the matrix jobs
-via workflow artifacts.
+via workflow artifacts. The pivco targets and `simd_decode` also run on an
+arm64 runner, the only place the NEON tiers get fuzzed.

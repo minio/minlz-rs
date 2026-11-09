@@ -8,8 +8,10 @@ name: Fuzz
 # and extracts the matching target subfolder, if the tarball has one.
 # Every job also adds the seeds `write_fuzz_seeds` derives from the
 # repo (SIMD fixtures, pivco cases).  Subsequent runs accumulate beyond
-# the seed via the cache.  Long-form fuzzing (≥ 20 min/target) happens
-# locally per `crates/minlz/fuzz/RUNBOOK.md` before tagged releases.
+# the seed via the cache.  The pivco targets and simd_decode also run
+# on an arm64 runner, the only place the NEON tiers get fuzzed.
+# Long-form fuzzing (≥ 20 min/target) happens locally per
+# `crates/minlz/fuzz/RUNBOOK.md` before tagged releases.
 on:
   push:
     branches: [main]
@@ -84,12 +86,13 @@ jobs:
           if-no-files-found: error
 
   fuzz:
-    name: cargo fuzz run (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    name: cargo fuzz run (${{ matrix.target }}${{ matrix.suffix }})
+    runs-on: ${{ matrix.os }}
     needs: seed
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         target:
           - decode_arbitrary
           - roundtrip
@@ -100,6 +103,14 @@ jobs:
           - pivco_roundtrip
           - pivco_table
           - simd_decode
+        # arm64 runs the targets aimed at the NEON kernels: the pivco ones
+        # compare every kernel tier, simd_decode runs each exec tier with
+        # its pivco tier. suffix keeps their caches and artifacts apart.
+        include:
+          - { os: ubuntu-24.04-arm, suffix: -arm64, target: pivco_decode }
+          - { os: ubuntu-24.04-arm, suffix: -arm64, target: pivco_roundtrip }
+          - { os: ubuntu-24.04-arm, suffix: -arm64, target: pivco_table }
+          - { os: ubuntu-24.04-arm, suffix: -arm64, target: simd_decode }
     steps:
       - uses: actions/checkout@v4
 
@@ -110,7 +121,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/minlz/fuzz -> target
-          key: fuzz-${{ matrix.target }}
+          key: fuzz${{ matrix.suffix }}-${{ matrix.target }}
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -125,9 +136,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: crates/minlz/fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          key: fuzz-corpus${{ matrix.suffix }}-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: |
-            fuzz-corpus-${{ matrix.target }}-
+            fuzz-corpus${{ matrix.suffix }}-${{ matrix.target }}-
 
       - name: Download seed tarball artifact
         if: needs.seed.outputs.has_seed == 'true'
@@ -173,13 +184,13 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
+          name: fuzz-artifacts${{ matrix.suffix }}-${{ matrix.target }}
           path: crates/minlz/fuzz/artifacts/${{ matrix.target }}/
 
       - name: Upload coverage-growth corpus
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          name: fuzz-corpus${{ matrix.suffix }}-${{ matrix.target }}-${{ github.run_id }}
           path: crates/minlz/fuzz/corpus/${{ matrix.target }}/
           retention-days: 7
