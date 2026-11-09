@@ -4,7 +4,8 @@ version = "1.3.0"
 description = "MinLZ compression"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# The AVX-512 histogram is MIT licensed: src/pivco/kernel/LICENSE-histogram.
+license = "Apache-2.0 AND MIT"
 repository.workspace = true
 authors.workspace = true
 

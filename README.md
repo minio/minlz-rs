@@ -856,3 +856,7 @@ MSRV: **Rust 1.89**.
 
 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) —
 same as the upstream Go implementation.
+
+The AVX-512 histogram in `crates/minlz/src/pivco/kernel/avx512.rs` is a
+port of Harold Aptroot's histogram under the MIT License; see
+[`crates/minlz/src/pivco/kernel/LICENSE-histogram`](crates/minlz/src/pivco/kernel/LICENSE-histogram).
