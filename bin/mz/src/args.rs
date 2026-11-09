@@ -342,6 +342,7 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
         "q" | "quiet" => opts.quiet = true,
         "verify" => opts.verify = true,
         "h" | "help" => opts.help = true,
+        "index" => opts.index = true,
         "no-index" => opts.index = false,
         "follow" => opts.follow = true,
         "xfast" => opts.level = Some(Level::SuperFast),
@@ -605,6 +606,22 @@ mod tests {
             parse_argv(&["c", "a.txt", "-"]),
             Err(ParseError::TooManyInputs)
         ));
+    }
+
+    #[test]
+    fn bare_index_is_a_toggle() {
+        for args in [
+            &["c", "--no-index", "--index", "e.txt"][..],
+            &["c", "-index", "e.txt"],
+        ] {
+            let cli = parse_argv(args).unwrap();
+            assert!(cli.options.index, "{args:?}");
+            assert_eq!(cli.input, Some(PathBuf::from("e.txt")), "{args:?}");
+        }
+        let cli = parse_argv(&["c", "-index", "-c", "e.txt"]).unwrap();
+        assert!(cli.options.index && cli.options.stdout);
+        let cli = parse_argv(&["c", "-index=false", "e.txt"]).unwrap();
+        assert!(!cli.options.index);
     }
 
     #[test]
