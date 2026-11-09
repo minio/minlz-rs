@@ -14,9 +14,10 @@
 
 //! Go's `FuzzEncodingBlocks`: encode arbitrary bytes (up to `MAX_BLOCK_SIZE`) at every level,
 //! classic and SIMD, and decode them back. A SIMD block must decode on every exec tier and with
-//! the strict reference decoder, and no block may exceed `max_encoded_len`. As in Go, outputs
-//! are filled with garbage first. Each has exactly the capacity its coder asks for, so ASan
-//! flags writes past it.
+//! the strict reference decoder, and no block may exceed `max_encoded_len`. As in Go, decode
+//! outputs are filled with garbage first; `encode` zeroes its own, and
+//! `encode_chunk_body_reuses_dirty_buffer` covers the encoders on dirty buffers. Each output has
+//! exactly the capacity its coder asks for, so ASan flags writes past it.
 //!
 //! Seeds: raw inputs, see `RUNBOOK.md` §1.
 //!
@@ -49,11 +50,11 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let mel = max_encoded_len(data.len()).unwrap();
-    let mut enc = Vec::with_capacity(mel);
+    // `encode` reserves the encoders' room past `max_encoded_len` itself.
+    let mut enc = Vec::new();
     // The SIMD decoder writes exactly the output, so this never grows.
     let mut sdec = Vec::with_capacity(data.len());
     for level in LEVELS {
-        common::garbage(&mut enc, 0xff);
         encode(&mut enc, data, level).expect("encode");
         assert!(
             enc.len() <= mel,
