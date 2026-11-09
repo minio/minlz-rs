@@ -465,8 +465,6 @@ fn output_same_as_input_is_rejected() {
     }
 }
 
-// Only Unix: std has no stable file identity on Windows, so mz cannot see hard links there.
-#[cfg(unix)]
 #[test]
 fn output_hard_link_to_input_is_rejected() {
     let dir = tmp_dir();
@@ -495,6 +493,35 @@ fn output_hard_link_to_input_is_rejected() {
             "{args:?}: accepted -o == hard link of input"
         );
         assert_eq!(fs::read(&src).unwrap(), payload, "{args:?}: input modified");
+    }
+}
+
+/// An existing default output name gets the same check as `-o`.
+#[test]
+fn default_output_hard_link_to_input_is_rejected() {
+    let payload = sample_payload(13, 64 * 1024);
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-"], &payload);
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &payload);
+    for (args, src, dst, data) in [
+        (&["c", "-q", "--cpu", "1"][..], "x", "x.mz", &payload),
+        (&["c", "-q", "--cpu", "2", "--rm"], "x", "x.mz", &payload),
+        (&["c", "-q", "--block"], "x", "x.mzb", &payload),
+        (&["d", "-q", "--cpu", "1"], "x.mz", "x", &stream),
+        (&["d", "-q", "--cpu", "2", "--rm"], "x.mz", "x", &stream),
+        (&["d", "-q"], "x.mzb", "x", &block),
+        (&["d", "-q", "--block"], "x.bin", "x.bin.out", &block),
+    ] {
+        let dir = tmp_dir();
+        let (src, dst) = (dir.join(src), dir.join(dst));
+        fs::write(&src, data).unwrap();
+        fs::hard_link(&src, &dst).unwrap();
+        let out = Command::new(mz_bin())
+            .args(args)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}: accepted {dst:?}");
+        assert!(fs::read(&src).unwrap() == *data, "{args:?}: input modified");
     }
 }
 

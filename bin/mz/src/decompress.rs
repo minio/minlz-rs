@@ -279,26 +279,23 @@ fn dest_path(input: &Path, opts: &Options) -> io::Result<PathBuf> {
     if opts.verify {
         return Ok(PathBuf::from("(verify)"));
     }
-    if opts.stdout {
+    if opts.stdout || (opts.output.is_none() && input == Path::new("-")) {
         return Ok(PathBuf::from("-"));
     }
-    if let Some(out) = opts.output.as_ref() {
-        check_not_input(input, out)?;
-        return Ok(out.clone());
-    }
-    if input == Path::new("-") {
-        return Ok(PathBuf::from("-"));
-    }
-    // Strip a recognized compression extension to get the destination name.
-    let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
-    Ok(if matches!(ext, "mz" | "mzb") {
-        input.with_extension("")
-    } else {
-        // Unrecognised extension — write to `<input>.out` to avoid clobbering.
-        let mut p = input.as_os_str().to_owned();
-        p.push(".out");
-        PathBuf::from(p)
-    })
+    let out = opts.output.clone().unwrap_or_else(|| {
+        // Strip a recognized compression extension to get the destination name.
+        let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if matches!(ext, "mz" | "mzb") {
+            input.with_extension("")
+        } else {
+            // Unrecognised extension — write to `<input>.out` to avoid clobbering.
+            let mut p = input.as_os_str().to_owned();
+            p.push(".out");
+            PathBuf::from(p)
+        }
+    });
+    check_not_input(input, &out)?;
+    Ok(out)
 }
 
 /// Consume bytes from `r` until just past the next `\n`, so that

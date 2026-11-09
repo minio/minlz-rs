@@ -269,20 +269,17 @@ impl<W: Write> Write for Tee<W> {
 /// Decide the destination path given `input`, `--output`, `--stdout` and the
 /// target extension.
 pub fn dest_path(input: &Path, opts: &Options, ext: &str) -> io::Result<PathBuf> {
-    if opts.stdout {
+    if opts.stdout || (opts.output.is_none() && input == Path::new("-")) {
         return Ok(PathBuf::from("-"));
     }
-    if let Some(out) = opts.output.as_ref() {
-        check_not_input(input, out)?;
-        return Ok(out.clone());
-    }
-    if input == Path::new("-") {
-        return Ok(PathBuf::from("-"));
-    }
-    let mut p = input.as_os_str().to_owned();
-    p.push(".");
-    p.push(ext);
-    Ok(PathBuf::from(p))
+    let out = opts.output.clone().unwrap_or_else(|| {
+        let mut p = input.as_os_str().to_owned();
+        p.push(".");
+        p.push(ext);
+        PathBuf::from(p)
+    });
+    check_not_input(input, &out)?;
+    Ok(out)
 }
 
 fn print_compress_summary(opts: &Options, input: u64, output: u64, elapsed: std::time::Duration) {
