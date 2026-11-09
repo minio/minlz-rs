@@ -510,12 +510,10 @@ fn add_rejects_decreasing_compressed_offset() {
 
 #[test]
 fn add_equal_offsets_after_skip_window_succeed() {
-    // After the skip check, equal offsets are accepted (Go uses `<`/`>`,
-    // never `<=` — equality on either field is fine).
+    // An entry equal to the last one replaces it with itself.
     let mut idx = Index::default();
     idx.reset(1 << 20);
     idx.add(0, 0).unwrap();
-    // Same offsets are skipped by the gap check (gap=0 < 1MB).
     idx.add(0, 0).unwrap();
     assert_eq!(idx.offsets.len(), 1);
 }
@@ -544,6 +542,18 @@ fn add_same_uncompressed_rejects_decreasing_compressed() {
     idx.add(100, 0).unwrap();
     idx.add(5000, 1 << 20).unwrap();
     assert!(matches!(idx.add(50, 1 << 20), Err(Error::Invalid(_))));
+    let mut buf = Vec::new();
+    idx.append_to(&mut buf, Some(2 << 20), None).unwrap();
+    Index::default().load(&buf).unwrap();
+}
+
+#[test]
+fn add_new_entry_rejects_equal_compressed() {
+    let mut idx = Index::default();
+    idx.reset(1 << 20);
+    idx.add(100, 0).unwrap();
+    assert!(matches!(idx.add(100, 1 << 20), Err(Error::Invalid(_))));
+    assert_eq!(idx.offsets.len(), 1);
     let mut buf = Vec::new();
     idx.append_to(&mut buf, Some(2 << 20), None).unwrap();
     Index::default().load(&buf).unwrap();

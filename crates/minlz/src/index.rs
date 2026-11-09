@@ -204,8 +204,9 @@ impl Index {
     ///   Go, which only adds growing offsets, skips it.
     /// * If the uncompressed gap from the last entry is `< est_block_uncomp`,
     ///   the call is a no-op — used to thin the index during writing.
-    /// * Otherwise, and for a replacement, a *decreasing* compressed offset is
-    ///   rejected ([`Error::Invalid`]).
+    /// * Otherwise a compressed offset that does not increase is rejected
+    ///   ([`Error::Invalid`]), where Go accepts an equal one. A replacement
+    ///   rejects only a *decreasing* one.
     /// * After insertion, if the entry count would exceed 65 535, the
     ///   internal `reduce_light` shrinker doubles `est_block_uncomp` and
     ///   re-thins entries in place.
@@ -230,8 +231,8 @@ impl Index {
             if gap < self.est_block_uncomp {
                 return Ok(());
             }
-            if latest.compressed > compressed {
-                return Err(Error::Invalid("compressed offset decreased"));
+            if latest.compressed >= compressed {
+                return Err(Error::Invalid("compressed offset not increasing"));
             }
         }
         self.offsets.push(OffsetPair {
