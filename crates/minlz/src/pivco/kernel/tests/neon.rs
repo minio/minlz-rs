@@ -16,10 +16,11 @@
 //! [`Tier::tiers`] and `vec_tiers`; these are NEON specific.
 
 use super::*;
-use crate::guard;
+use crate::{cpu, guard};
 
 #[test]
 fn neon_selected() {
+    let _d = cpu::Disabled::new(0);
     assert!(
         Tier::best() == Tier::Neon
             && Tier::tiers() == [Tier::Neon, Tier::Generic]
