@@ -18,20 +18,11 @@
 //! The types in this module are the contract the tiers implement; the vector tiers rely on
 //! the [`Op`] layout and the slack constants.
 //!
-//! Dispatch is a `match` on [`Tier`] with direct calls.
+//! Dispatch is a `match` on [`Tier`] with direct calls: each vector tier's arm checks its
+//! CPU features in its guard, and every other case runs the generic kernel.
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 mod avx2;
-/// Without x86-64 (or under Miri) the AVX2 tier runs the generic kernels.
-#[cfg(not(all(target_arch = "x86_64", not(miri))))]
-mod avx2 {
-    pub(super) use super::generic::{
-        gather_generic as gather_avx2, part_full_generic as part_full_avx2,
-        part_none_generic as part_none_avx2, part_right_generic as part_right_avx2,
-    };
-    pub(super) use super::generic_exec::exec_generic as exec_avx2;
-    pub(super) use super::generic_pack::pack_generic as pack_avx2;
-}
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 mod avx512;
 mod generic;
@@ -40,17 +31,6 @@ mod generic_pack;
 mod layout;
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
 mod neon;
-
-/// Without NEON, [`Tier::Neon`] runs the generic kernels (Go `neon_other.go`).
-#[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
-mod neon {
-    pub(super) use super::generic::{
-        gather_generic as gather_neon, part_full_generic as part_full_neon,
-        part_none_generic as part_none_neon, part_right_generic as part_right_neon,
-    };
-    pub(super) use super::generic_exec::exec_generic as exec_neon;
-    pub(super) use super::generic_pack::pack_generic as pack_neon;
-}
 
 #[cfg(test)]
 mod tests;
@@ -275,10 +255,15 @@ impl Tier {
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
                 avx512::gather(ranks, src, s2r)
             },
-            Tier::Avx512 => generic::gather_generic(ranks, src, s2r),
-            Tier::Avx2 => avx2::gather_avx2(ranks, src, s2r),
-            Tier::Neon => neon::gather_neon(ranks, src, s2r),
-            Tier::Generic => generic::gather_generic(ranks, src, s2r),
+            #[cfg(all(target_arch = "x86_64", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Avx2 if cpu::has(cpu::PIVCO_AVX2) => unsafe {
+                avx2::gather_avx2(ranks, src, s2r)
+            },
+            #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Neon if cpu::has(cpu::NEON) => unsafe { neon::gather_neon(ranks, src, s2r) },
+            _ => generic::gather_generic(ranks, src, s2r),
         }
     }
 
@@ -293,10 +278,17 @@ impl Tier {
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
                 avx512::part_full(ranks, right, bm, thr)
             },
-            Tier::Avx512 => generic::part_full_generic(ranks, right, bm, thr),
-            Tier::Avx2 => avx2::part_full_avx2(ranks, right, bm, thr),
-            Tier::Neon => neon::part_full_neon(ranks, right, bm, thr),
-            Tier::Generic => generic::part_full_generic(ranks, right, bm, thr),
+            #[cfg(all(target_arch = "x86_64", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Avx2 if cpu::has(cpu::PIVCO_AVX2) => unsafe {
+                avx2::part_full_avx2(ranks, right, bm, thr)
+            },
+            #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Neon if cpu::has(cpu::NEON) => unsafe {
+                neon::part_full_neon(ranks, right, bm, thr)
+            },
+            _ => generic::part_full_generic(ranks, right, bm, thr),
         }
     }
 
@@ -309,10 +301,17 @@ impl Tier {
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
                 avx512::part_right(ranks, right, bm, thr)
             },
-            Tier::Avx512 => generic::part_right_generic(ranks, right, bm, thr),
-            Tier::Avx2 => avx2::part_right_avx2(ranks, right, bm, thr),
-            Tier::Neon => neon::part_right_neon(ranks, right, bm, thr),
-            Tier::Generic => generic::part_right_generic(ranks, right, bm, thr),
+            #[cfg(all(target_arch = "x86_64", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Avx2 if cpu::has(cpu::PIVCO_AVX2) => unsafe {
+                avx2::part_right_avx2(ranks, right, bm, thr)
+            },
+            #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Neon if cpu::has(cpu::NEON) => unsafe {
+                neon::part_right_neon(ranks, right, bm, thr)
+            },
+            _ => generic::part_right_generic(ranks, right, bm, thr),
         }
     }
 
@@ -325,10 +324,15 @@ impl Tier {
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
                 avx512::part_none(ranks, bm, thr)
             },
-            Tier::Avx512 => generic::part_none_generic(ranks, bm, thr),
-            Tier::Avx2 => avx2::part_none_avx2(ranks, bm, thr),
-            Tier::Neon => neon::part_none_neon(ranks, bm, thr),
-            Tier::Generic => generic::part_none_generic(ranks, bm, thr),
+            #[cfg(all(target_arch = "x86_64", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Avx2 if cpu::has(cpu::PIVCO_AVX2) => unsafe {
+                avx2::part_none_avx2(ranks, bm, thr)
+            },
+            #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Neon if cpu::has(cpu::NEON) => unsafe { neon::part_none_neon(ranks, bm, thr) },
+            _ => generic::part_none_generic(ranks, bm, thr),
         }
     }
 
@@ -342,10 +346,15 @@ impl Tier {
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
                 avx512::pack(dst, ranks, d, base)
             },
-            Tier::Avx512 => generic_pack::pack_generic(dst, ranks, d, base),
-            Tier::Avx2 => avx2::pack_avx2(dst, ranks, d, base),
-            Tier::Neon => neon::pack_neon(dst, ranks, d, base),
-            Tier::Generic => generic_pack::pack_generic(dst, ranks, d, base),
+            #[cfg(all(target_arch = "x86_64", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Avx2 if cpu::has(cpu::PIVCO_AVX2) => unsafe {
+                avx2::pack_avx2(dst, ranks, d, base)
+            },
+            #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Neon if cpu::has(cpu::NEON) => unsafe { neon::pack_neon(dst, ranks, d, base) },
+            _ => generic_pack::pack_generic(dst, ranks, d, base),
         }
     }
 
@@ -358,10 +367,13 @@ impl Tier {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             // SAFETY: the guard checked the CPU features.
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe { avx512::exec(p) },
-            Tier::Avx512 => generic_exec::exec_generic(p),
-            Tier::Avx2 => avx2::exec_avx2(p),
-            Tier::Neon => neon::exec_neon(p),
-            Tier::Generic => generic_exec::exec_generic(p),
+            #[cfg(all(target_arch = "x86_64", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Avx2 if cpu::has(cpu::PIVCO_AVX2) => unsafe { avx2::exec_avx2(p) },
+            #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+            // SAFETY: the guard checked the CPU features.
+            Tier::Neon if cpu::has(cpu::NEON) => unsafe { neon::exec_neon(p) },
+            _ => generic_exec::exec_generic(p),
         }
     }
 
@@ -377,10 +389,7 @@ impl Tier {
             Tier::Avx512 if scratch.len() >= HIST_SCRATCH && self.hist_uses_scratch() => unsafe {
                 avx512::histogram(h, src, scratch)
             },
-            Tier::Avx512 => generic::histogram_generic(h, src),
-            Tier::Avx2 => generic::histogram_generic(h, src),
-            Tier::Neon => generic::histogram_generic(h, src),
-            Tier::Generic => generic::histogram_generic(h, src),
+            _ => generic::histogram_generic(h, src),
         }
     }
 

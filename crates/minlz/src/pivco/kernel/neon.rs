@@ -15,13 +15,13 @@
 //! The NEON tier: Go's `neon_arm64.go`, `neon_arm64.s` and `neon_tables_arm64.go`, ports of
 //! upstream `src/pivco_huffman_primitives_neon.h`, `pivco_huffman_neon_flat.h` and
 //! `pivco_huffman_neon_pack.h`. ASIMD is part of ARMv8, so the tier is on unless
-//! [`cpu::NEON`] is disabled. The encoder kernels run whole vector steps and the generic
-//! kernels finish the tails; the decoder runs a whole [`Program`] in one call. Reads of src,
-//! ranks and bitmaps and stores to ranks[..n], outputs and packed regions are exact, the
-//! partitions store inside right[..n] and the natural unpack reads input windows that may
-//! pass its region but not the input. Merges load up to 15 bytes past the K bytes of a
-//! child, flats load 64 bytes of R2S from the first rank (128 for D=7, which the op checks
-//! bound). The histogram is generic, as upstream's.
+//! [`NEON`](crate::cpu::NEON) is disabled. The encoder kernels run whole vector steps and
+//! the generic kernels finish the tails; the decoder runs a whole [`Program`] in one call.
+//! Reads of src, ranks and bitmaps and stores to ranks[..n], outputs and packed regions are
+//! exact, the partitions store inside right[..n] and the natural unpack reads input windows
+//! that may pass its region but not the input. Merges load up to 15 bytes past the K bytes
+//! of a child, flats load 64 bytes of R2S from the first rank (128 for D=7, which the op
+//! checks bound). The histogram is generic, as upstream's.
 //!
 //! The `*_asm` functions port the Go assembly functions of the same name with intrinsics
 //! and its instruction choices; their helpers are named after its macros. Differences: the
@@ -33,25 +33,20 @@
 use core::arch::aarch64::*;
 
 use super::generic::{gather_generic, part_full_generic, part_none_generic, part_right_generic};
-use super::generic_exec::exec_generic;
 use super::generic_pack::{nat_pack, pack_generic};
 use super::{
     ARENA_SLACK, FLAG_DST, OP_CC, OP_COPY, OP_CV, OP_NAT, OP_V128, OP_V512, OP_VV, Op, Program,
     R2S_LEN, RANK_SLACK, vert_split,
 };
-use crate::cpu;
 
 // Merges load 15 bytes past a child; flats load 64 bytes of R2S at any first rank.
 const _: () = assert!(ARENA_SLACK >= 15 && R2S_LEN >= 255 + 64);
 
-fn has_neon() -> bool {
-    cpu::has(cpu::NEON)
-}
-
-pub(super) fn gather_neon(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
-    if !has_neon() {
-        return gather_generic(ranks, src, s2r);
-    }
+/// Sets `ranks[i] = s2r[src[i]]` and returns the largest rank written.
+///
+/// # Safety
+/// The CPU has [`NEON`](crate::cpu::NEON).
+pub(super) unsafe fn gather_neon(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
     let n = src.len();
     let ranks = &mut ranks[..n];
     let (k, mut mx) = (n & !15, 0);
@@ -62,9 +57,18 @@ pub(super) fn gather_neon(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
     mx.max(gather_generic(&mut ranks[k..], &src[k..], s2r))
 }
 
-pub(super) fn part_full_neon(ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
+/// Partitions `ranks` by rank > thr; see [`super::Tier::part_full`].
+///
+/// # Safety
+/// The CPU has [`NEON`](crate::cpu::NEON).
+pub(super) unsafe fn part_full_neon(
+    ranks: &mut [u8],
+    right: &mut [u8],
+    bm: &mut [u8],
+    thr: u8,
+) -> usize {
     let n = ranks.len();
-    if n == 0 || !has_neon() {
+    if n == 0 {
         return part_full_generic(ranks, right, bm, thr);
     }
     let (right, bm) = (
@@ -90,9 +94,18 @@ pub(super) fn part_full_neon(ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], 
     nr + tr
 }
 
-pub(super) fn part_right_neon(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
+/// Partitions `ranks` like [`part_full_neon`] without compacting the left ranks.
+///
+/// # Safety
+/// The CPU has [`NEON`](crate::cpu::NEON).
+pub(super) unsafe fn part_right_neon(
+    ranks: &[u8],
+    right: &mut [u8],
+    bm: &mut [u8],
+    thr: u8,
+) -> usize {
     let n = ranks.len();
-    if n == 0 || !has_neon() {
+    if n == 0 {
         return part_right_generic(ranks, right, bm, thr);
     }
     let (right, bm) = (
@@ -109,9 +122,13 @@ pub(super) fn part_right_neon(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr
     nr + part_right_generic(&ranks[j..], &mut right[nr..], &mut bm[j / 8..], thr)
 }
 
-pub(super) fn part_none_neon(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
+/// Writes only the bitmap of `ranks` and returns the number of set bits.
+///
+/// # Safety
+/// The CPU has [`NEON`](crate::cpu::NEON).
+pub(super) unsafe fn part_none_neon(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
     let n = ranks.len();
-    if n == 0 || !has_neon() {
+    if n == 0 {
         return part_none_generic(ranks, bm, thr);
     }
     let bm = &mut bm[..n.div_ceil(8) + RANK_SLACK];
@@ -123,9 +140,13 @@ pub(super) fn part_none_neon(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
     nr + part_none_generic(&ranks[j..], &mut bm[j / 8..], thr)
 }
 
-pub(super) fn pack_neon(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
+/// Packs the codes of a flat region; see [`super::Tier::pack`].
+///
+/// # Safety
+/// The CPU has [`NEON`](crate::cpu::NEON).
+pub(super) unsafe fn pack_neon(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
     let n = ranks.len();
-    if n == 0 || !(2..=8).contains(&d) || !has_neon() {
+    if n == 0 || !(2..=8).contains(&d) {
         return pack_generic(dst, ranks, d, base);
     }
     let du = usize::from(d);
@@ -162,10 +183,10 @@ pub(super) fn pack_neon(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
 
 /// Runs the ops in one call. Like exec_generic it checks each op before running it, so a
 /// malformed op fails closed.
-pub(super) fn exec_neon(p: &mut Program<'_>) -> Result<(), usize> {
-    if !has_neon() {
-        return exec_generic(p);
-    }
+///
+/// # Safety
+/// The CPU has [`NEON`](crate::cpu::NEON).
+pub(super) unsafe fn exec_neon(p: &mut Program<'_>) -> Result<(), usize> {
     if p.ops.is_empty() {
         return Ok(());
     }

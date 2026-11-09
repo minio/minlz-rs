@@ -19,8 +19,8 @@
 //! `pivco_huffman_avx2_pack.h`). The `*_asm` functions port the generated functions of the
 //! same Go names; the histogram is generic, as upstream's.
 //!
-//! Requirements: AVX2, BMI2, POPCNT ([`cpu::PIVCO_AVX2`]); without them every entry point
-//! runs the generic kernel. No AVX-512 instructions.
+//! Requirements: AVX2, BMI2, POPCNT ([`PIVCO_AVX2`](crate::cpu::PIVCO_AVX2)); every entry
+//! point is an `unsafe fn` whose caller has checked them. No AVX-512 instructions.
 //!
 //! The entry points assert the lengths the kernels rely on: reads of src and ranks and
 //! stores to ranks[..n] and the packed region are exact; right-side and bitmap stores use
@@ -59,28 +59,21 @@
 use core::arch::x86_64::*;
 use core::mem::transmute;
 
-use super::generic::{gather_generic, part_full_generic, part_none_generic, part_right_generic};
-use super::generic_exec::exec_generic;
 use super::generic_pack::pack_generic;
 use super::{
     ARENA_SLACK, FLAG_DST, OP_CC, OP_COPY, OP_CV, OP_NAT, OP_V128, OP_V512, OP_VV, Op, Program,
     R2S_LEN, RANK_SLACK, vert_split,
 };
-use crate::cpu;
 
 // The partitions store 16 bytes at right+nr and 2 bitmap bytes at the tail's offset.
 const _: () = assert!(RANK_SLACK >= 16);
 
-#[inline]
-fn has_avx2() -> bool {
-    cpu::has(cpu::PIVCO_AVX2)
-}
-
-pub(super) fn gather_avx2(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
+/// Sets `ranks[i] = s2r[src[i]]` and returns the largest rank written.
+///
+/// # Safety
+/// The CPU has [`PIVCO_AVX2`](crate::cpu::PIVCO_AVX2).
+pub(super) unsafe fn gather_avx2(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
     let n = src.len();
-    if !has_avx2() {
-        return gather_generic(ranks, src, s2r);
-    }
     if n == 0 {
         return 0;
     }
@@ -89,10 +82,16 @@ pub(super) fn gather_avx2(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
     unsafe { gather_avx2_asm(ranks.as_mut_ptr(), src.as_ptr(), n, s2r) }
 }
 
-pub(super) fn part_full_avx2(ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
-    if !has_avx2() {
-        return part_full_generic(ranks, right, bm, thr);
-    }
+/// Partitions `ranks` by rank > thr; see [`super::Tier::part_full`].
+///
+/// # Safety
+/// The CPU has [`PIVCO_AVX2`](crate::cpu::PIVCO_AVX2).
+pub(super) unsafe fn part_full_avx2(
+    ranks: &mut [u8],
+    right: &mut [u8],
+    bm: &mut [u8],
+    thr: u8,
+) -> usize {
     let n = ranks.len();
     if n == 0 {
         return 0;
@@ -106,10 +105,16 @@ pub(super) fn part_full_avx2(ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], 
     unsafe { part_avx2_asm::<PART_FULL>(r, right.as_mut_ptr(), r, bm.as_mut_ptr(), n, thr) }
 }
 
-pub(super) fn part_right_avx2(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
-    if !has_avx2() {
-        return part_right_generic(ranks, right, bm, thr);
-    }
+/// Partitions `ranks` like [`part_full_avx2`] without compacting the left ranks.
+///
+/// # Safety
+/// The CPU has [`PIVCO_AVX2`](crate::cpu::PIVCO_AVX2).
+pub(super) unsafe fn part_right_avx2(
+    ranks: &[u8],
+    right: &mut [u8],
+    bm: &mut [u8],
+    thr: u8,
+) -> usize {
     let n = ranks.len();
     if n == 0 {
         return 0;
@@ -124,10 +129,11 @@ pub(super) fn part_right_avx2(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr
     unsafe { part_avx2_asm::<PART_RIGHT>(ranks.as_ptr(), r, core::ptr::null_mut(), b, n, thr) }
 }
 
-pub(super) fn part_none_avx2(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
-    if !has_avx2() {
-        return part_none_generic(ranks, bm, thr);
-    }
+/// Writes only the bitmap of `ranks` and returns the number of set bits.
+///
+/// # Safety
+/// The CPU has [`PIVCO_AVX2`](crate::cpu::PIVCO_AVX2).
+pub(super) unsafe fn part_none_avx2(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
     let n = ranks.len();
     if n == 0 {
         return 0;
@@ -139,9 +145,13 @@ pub(super) fn part_none_avx2(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
     unsafe { part_avx2_asm::<PART_NONE>(ranks.as_ptr(), null, null, bm.as_mut_ptr(), n, thr) }
 }
 
-pub(super) fn pack_avx2(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
+/// Packs the codes of a flat region; see [`super::Tier::pack`].
+///
+/// # Safety
+/// The CPU has [`PIVCO_AVX2`](crate::cpu::PIVCO_AVX2).
+pub(super) unsafe fn pack_avx2(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
     let n = ranks.len();
-    if !has_avx2() || n == 0 || !(2..=8).contains(&d) {
+    if n == 0 || !(2..=8).contains(&d) {
         pack_generic(dst, ranks, d, base);
         return;
     }
@@ -153,10 +163,10 @@ pub(super) fn pack_avx2(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
 
 /// Runs the ops in one call. Like exec_generic it checks each op before running it, so a
 /// malformed op fails closed.
-pub(super) fn exec_avx2(p: &mut Program<'_>) -> Result<(), usize> {
-    if !has_avx2() {
-        return exec_generic(p);
-    }
+///
+/// # Safety
+/// The CPU has [`PIVCO_AVX2`](crate::cpu::PIVCO_AVX2).
+pub(super) unsafe fn exec_avx2(p: &mut Program<'_>) -> Result<(), usize> {
     // SAFETY: the CPU has the features.
     unsafe { exec_avx2_asm(p) }
 }
