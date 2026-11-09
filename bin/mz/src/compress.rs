@@ -23,8 +23,8 @@ use minlz::stream::{MAX_BLOCK_SIZE, MtWriterBuilder, WriterBuilder};
 
 use crate::args::Options;
 use crate::io_util::{
-    CountingReader, CountingWriter, mb_per_sec, open_input, open_output, open_output_send,
-    resolve_threads,
+    CountingReader, CountingWriter, check_not_input, mb_per_sec, open_input, open_output,
+    open_output_send, resolve_threads,
 };
 
 const EXT_STREAM: &str = "mz";
@@ -61,7 +61,7 @@ fn compress_stream(input: &Path, opts: &Options) -> io::Result<()> {
 
 fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let (mut src, _src_size) = open_input(input)?;
-    let dst_path = dest_path(input, opts, EXT_STREAM);
+    let dst_path = dest_path(input, opts, EXT_STREAM)?;
     let dst = open_output(&dst_path)?;
 
     let mut counted_src = CountingReader::new(&mut src);
@@ -105,7 +105,7 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
 
 fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Result<()> {
     let (mut src, _src_size) = open_input(input)?;
-    let dst_path = dest_path(input, opts, EXT_STREAM);
+    let dst_path = dest_path(input, opts, EXT_STREAM)?;
     let dst = open_output_send(&dst_path)?;
 
     let mut builder = MtWriterBuilder::new();
@@ -168,7 +168,7 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
     if buf.len() > MAX_BLOCK_SIZE {
         return Err(io::Error::other("maximum block size of 8 MiB exceeded"));
     }
-    let dst_path = dest_path(input, opts, EXT_BLOCK);
+    let dst_path = dest_path(input, opts, EXT_BLOCK)?;
     let mut dst = open_output(&dst_path)?;
     let level = if opts.uncompressed {
         Level::Fastest // block::encode has no uncompressed mode; the encoder
@@ -208,20 +208,21 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
 
 /// Decide the destination path given `input`, `--output`, `--stdout` and the
 /// target extension.
-pub fn dest_path(input: &Path, opts: &Options, ext: &str) -> PathBuf {
+pub fn dest_path(input: &Path, opts: &Options, ext: &str) -> io::Result<PathBuf> {
     if opts.stdout {
-        return PathBuf::from("-");
+        return Ok(PathBuf::from("-"));
     }
     if let Some(out) = opts.output.as_ref() {
-        return out.clone();
+        check_not_input(input, out)?;
+        return Ok(out.clone());
     }
     if input == Path::new("-") {
-        return PathBuf::from("-");
+        return Ok(PathBuf::from("-"));
     }
     let mut p = input.as_os_str().to_owned();
     p.push(".");
     p.push(ext);
-    PathBuf::from(p)
+    Ok(PathBuf::from(p))
 }
 
 fn print_compress_summary(opts: &Options, input: u64, output: u64, elapsed: std::time::Duration) {

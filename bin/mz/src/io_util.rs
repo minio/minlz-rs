@@ -51,6 +51,20 @@ pub fn open_output(path: &Path) -> io::Result<Box<dyn Write>> {
     Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, file)))
 }
 
+/// Rejects an output that names the input file: [`open_output`] would
+/// truncate it before the first read.
+pub fn check_not_input(input: &Path, output: &Path) -> io::Result<()> {
+    let stdio = Path::new("-");
+    if input != stdio
+        && output != stdio
+        && let (Ok(a), Ok(b)) = (std::fs::canonicalize(input), std::fs::canonicalize(output))
+        && a == b
+    {
+        return Err(io::Error::other("input and output are the same file"));
+    }
+    Ok(())
+}
+
 /// Like [`open_output`], but `Send + 'static` so the value can be moved
 /// into the MT writer thread.
 pub fn open_output_send(path: &Path) -> io::Result<Box<dyn Write + Send + 'static>> {

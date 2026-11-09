@@ -438,3 +438,29 @@ fn go_mz_cross() {
         }
     }
 }
+
+#[test]
+fn output_same_as_input_is_rejected() {
+    let dir = tmp_dir();
+    let payload = sample_payload(11, 64 * 1024);
+    for args in [
+        &["c", "-q", "--cpu", "1"][..],
+        &["c", "-q", "--cpu", "2"],
+        &["c", "-q", "--block", "--rm"],
+        &["d", "-q", "--cpu", "1"],
+        &["d", "-q", "--cpu", "2"],
+    ] {
+        let src = dir.join("same.txt");
+        fs::write(&src, &payload).unwrap();
+        let alias = dir.join(".").join("same.txt");
+        let out = Command::new(mz_bin())
+            .args(args)
+            .arg("-o")
+            .arg(&alias)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}: accepted -o == input");
+        assert_eq!(fs::read(&src).unwrap(), payload, "{args:?}: input modified");
+    }
+}

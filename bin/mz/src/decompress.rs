@@ -23,8 +23,8 @@ use minlz::stream::{ConcurrentDecode, ReadSeeker, Reader};
 
 use crate::args::Options;
 use crate::io_util::{
-    CountingReader, CountingWriter, mb_per_sec, open_input, open_output, open_output_send,
-    resolve_threads,
+    CountingReader, CountingWriter, check_not_input, mb_per_sec, open_input, open_output,
+    open_output_send, resolve_threads,
 };
 
 pub fn run(opts: Options, input: Option<PathBuf>) -> io::Result<()> {
@@ -66,7 +66,7 @@ fn decompress_stream(input: &Path, opts: &Options) -> io::Result<()> {
 /// `--offset` is supported (seek before following); `--tail` is
 /// rejected at parse time.
 fn decompress_stream_follow(input: &Path, opts: &Options) -> io::Result<()> {
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     if !opts.quiet {
         eprintln!("Following {} -> {}", input.display(), dst_path.display());
     }
@@ -106,7 +106,7 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
         ))
     })?;
 
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     if !opts.quiet {
         eprint!(
             "Decompressing {} -> {}",
@@ -159,7 +159,7 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
 
 fn decompress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let (src, _) = open_input(input)?;
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     let mut counted_src = CountingReader::new(src);
 
     if !opts.quiet {
@@ -199,7 +199,7 @@ fn decompress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
 
 fn decompress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Result<()> {
     let (src, _) = open_input(input)?;
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     let mut counted_src = CountingReader::new(src);
     let dst = open_output_send(&dst_path)?;
 
@@ -231,7 +231,7 @@ fn decompress_block(input: &Path, opts: &Options) -> io::Result<()> {
     let (mut src, _) = open_input(input)?;
     let mut buf = Vec::new();
     src.read_to_end(&mut buf)?;
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     if !opts.quiet {
         eprint!(
             "Decompressing {} -> {}",
@@ -265,29 +265,30 @@ fn extension_matches(p: &Path, ext: &str) -> bool {
     p.extension().and_then(|s| s.to_str()) == Some(ext)
 }
 
-fn dest_path(input: &Path, opts: &Options) -> PathBuf {
+fn dest_path(input: &Path, opts: &Options) -> io::Result<PathBuf> {
     if opts.verify {
-        return PathBuf::from("(verify)");
+        return Ok(PathBuf::from("(verify)"));
     }
     if opts.stdout {
-        return PathBuf::from("-");
+        return Ok(PathBuf::from("-"));
     }
     if let Some(out) = opts.output.as_ref() {
-        return out.clone();
+        check_not_input(input, out)?;
+        return Ok(out.clone());
     }
     if input == Path::new("-") {
-        return PathBuf::from("-");
+        return Ok(PathBuf::from("-"));
     }
     // Strip a recognized compression extension to get the destination name.
     let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
-    if matches!(ext, "mz" | "mzb") {
+    Ok(if matches!(ext, "mz" | "mzb") {
         input.with_extension("")
     } else {
         // Unrecognised extension — write to `<input>.out` to avoid clobbering.
         let mut p = input.as_os_str().to_owned();
         p.push(".out");
         PathBuf::from(p)
-    }
+    })
 }
 
 /// Consume bytes from `r` until just past the next `\n`, so that
