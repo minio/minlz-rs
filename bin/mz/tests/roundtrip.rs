@@ -119,6 +119,51 @@ fn block_round_trip() {
     assert_eq!(got, payload);
 }
 
+/// `--offset` and `--tail` select the same bytes from a block as from a stream. `--rm` keeps
+/// the input, as the output is only part of it.
+#[test]
+fn block_offset_tail() {
+    let dir = tmp_dir();
+    let src = dir.join("in.txt");
+    let payload = sample_payload(31, 64 * 1024);
+    fs::write(&src, &payload).unwrap();
+    run_ok(Command::new(mz_bin()).args(["c", "-q"]).arg(&src));
+    run_ok(
+        Command::new(mz_bin())
+            .args(["c", "-q", "--block"])
+            .arg(&src),
+    );
+    let n = payload.len();
+    let nl = |i: usize| i + payload[i..].iter().position(|&b| b == b'\n').unwrap() + 1;
+    for (args, want) in [
+        (&["d", "-c", "--offset=1000"][..], &payload[1000..]),
+        (&["d", "-c", "--offset=1000+nl"], &payload[nl(1000)..]),
+        (&["d", "-c", "--tail=1000"], &payload[n - 1000..]),
+        (
+            &["d", "-c", "--offset=1000", "--tail=500"],
+            &payload[1000..1500],
+        ),
+        (&["tail"], &payload[nl(n - 1024)..]),
+    ] {
+        for ext in ["mz", "mzb"] {
+            let input = dir.join(format!("in.txt.{ext}"));
+            let out = Command::new(mz_bin())
+                .args(args)
+                .arg("--rm")
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?} {ext}");
+            assert!(
+                out.stdout == want,
+                "{args:?} {ext}: {} bytes",
+                out.stdout.len()
+            );
+            assert!(input.exists(), "{args:?} {ext}: --rm removed the input");
+        }
+    }
+}
+
 #[test]
 fn verify_subcommand_succeeds_on_valid_mz() {
     let dir = tmp_dir();

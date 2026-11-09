@@ -69,7 +69,7 @@ pub struct Options {
     /// Requires the stream to carry an index.
     pub offset: Option<u64>,
     /// Decompress: only emit the last N uncompressed bytes (`-tail`).
-    /// Requires an index.
+    /// Stream input needs an index.
     pub tail: Option<u64>,
     /// After seeking via `--tail` or `--offset`, skip bytes until the
     /// next `\n` so output starts at a line boundary.  Toggled by the

@@ -64,8 +64,8 @@ Options (compress):
   --index, --no-index Toggle seek-index appending (default: on).
 
 Options (decompress):
-  --offset SIZE       Seek to uncompressed offset before reading.  Requires
-                      an index in the stream.  Append `+nl` to advance to
+  --offset SIZE       Seek to uncompressed offset before reading.  Stream
+                      input needs an index.  Append `+nl` to advance to
                       the next newline (e.g. `--offset=4K+nl`).
   --tail SIZE         Emit only the last SIZE uncompressed bytes.  Same
                       `+nl` suffix supported.

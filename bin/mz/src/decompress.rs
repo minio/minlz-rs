@@ -119,18 +119,7 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
     let total = rs.index().total_uncompressed().ok_or_else(|| {
         io::Error::other("--offset / --tail require an index with known total size")
     })?;
-    let (start, limit) = match (opts.offset, opts.tail) {
-        (Some(off), None) => (off, total.saturating_sub(off)),
-        (None, Some(t)) => {
-            let t = t.min(total);
-            (total - t, t)
-        }
-        (Some(off), Some(t)) => {
-            let end = off.saturating_add(t).min(total);
-            (off, end.saturating_sub(off))
-        }
-        (None, None) => unreachable!("decompress_stream_seek called without offset/tail"),
-    };
+    let (start, limit) = seek_range(opts, total);
     rs.seek(SeekFrom::Start(start))?;
     if opts.tail_next_nl {
         advance_past_newline(&mut rs)?;
@@ -155,6 +144,22 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
     let elapsed = start_t.elapsed();
     print_decompress_summary(opts, total, counted_dst.bytes, elapsed);
     Ok(())
+}
+
+/// The start and length that `--offset` and `--tail` select from `total` bytes.
+fn seek_range(opts: &Options, total: u64) -> (u64, u64) {
+    match (opts.offset, opts.tail) {
+        (Some(off), None) => (off, total.saturating_sub(off)),
+        (None, Some(t)) => {
+            let t = t.min(total);
+            (total - t, t)
+        }
+        (Some(off), Some(t)) => {
+            let end = off.saturating_add(t).min(total);
+            (off, end.saturating_sub(off))
+        }
+        (None, None) => (0, total),
+    }
 }
 
 fn decompress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
@@ -253,16 +258,28 @@ fn decompress_block(input: &Path, opts: &Options) -> io::Result<()> {
     let mut dec = Vec::with_capacity(buf.len() * 2);
     minlz::decode(&mut dec, &buf).map_err(io::Error::other)?;
     let elapsed = start.elapsed();
+    // Go clamps block offsets, so an offset past the end gives no output; streams fail there.
+    let (off, n) = seek_range(opts, dec.len() as u64);
+    let mut out = &dec[off.min(dec.len() as u64) as usize..];
+    if opts.tail_next_nl {
+        out = out
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(&[], |i| &out[i + 1..]);
+    }
+    let out = &out[..out.len().min(n as usize)];
     if !opts.verify {
         let mut dst = open_output(&dst_path)?;
-        dst.write_all(&dec)?;
+        dst.write_all(out)?;
         dst.flush()?;
     }
-    print_decompress_summary(opts, buf.len() as u64, dec.len() as u64, elapsed);
+    print_decompress_summary(opts, buf.len() as u64, out.len() as u64, elapsed);
     if opts.verify && !opts.quiet {
         eprintln!("... Verified ok.");
     }
-    if opts.remove && input != Path::new("-") && !opts.verify {
+    // A range leaves no full copy of the data, so keep the input, as the stream seek path does.
+    let partial = opts.offset.is_some() || opts.tail.is_some();
+    if opts.remove && input != Path::new("-") && !opts.verify && !partial {
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
