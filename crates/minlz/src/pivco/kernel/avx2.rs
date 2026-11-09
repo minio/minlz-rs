@@ -101,16 +101,9 @@ pub(super) fn part_full_avx2(ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], 
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
+    let r = ranks.as_mut_ptr();
     // SAFETY: the CPU has the features; the slices have the lengths part_avx2_asm needs.
-    unsafe {
-        part_avx2_asm::<PART_FULL>(
-            ranks.as_mut_ptr(),
-            right.as_mut_ptr(),
-            bm.as_mut_ptr(),
-            n,
-            thr,
-        )
-    }
+    unsafe { part_avx2_asm::<PART_FULL>(r, right.as_mut_ptr(), r, bm.as_mut_ptr(), n, thr) }
 }
 
 pub(super) fn part_right_avx2(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
@@ -125,17 +118,10 @@ pub(super) fn part_right_avx2(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
-    // SAFETY: the CPU has the features; the slices have the lengths part_avx2_asm needs,
-    // and PART_RIGHT never writes ranks.
-    unsafe {
-        part_avx2_asm::<PART_RIGHT>(
-            ranks.as_ptr().cast_mut(),
-            right.as_mut_ptr(),
-            bm.as_mut_ptr(),
-            n,
-            thr,
-        )
-    }
+    let (r, b) = (right.as_mut_ptr(), bm.as_mut_ptr());
+    // SAFETY: the CPU has the features; the slices have the lengths part_avx2_asm needs;
+    // left is not used.
+    unsafe { part_avx2_asm::<PART_RIGHT>(ranks.as_ptr(), r, core::ptr::null_mut(), b, n, thr) }
 }
 
 pub(super) fn part_none_avx2(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
@@ -147,17 +133,10 @@ pub(super) fn part_none_avx2(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
         return 0;
     }
     let bm = &mut bm[..n.div_ceil(8) + RANK_SLACK];
-    // SAFETY: the CPU has the features; the slices have the lengths part_avx2_asm needs,
-    // and PART_NONE never writes ranks or right.
-    unsafe {
-        part_avx2_asm::<PART_NONE>(
-            ranks.as_ptr().cast_mut(),
-            core::ptr::null_mut(),
-            bm.as_mut_ptr(),
-            n,
-            thr,
-        )
-    }
+    let null = core::ptr::null_mut();
+    // SAFETY: the CPU has the features; the slices have the lengths part_avx2_asm needs;
+    // right and left are not used.
+    unsafe { part_avx2_asm::<PART_NONE>(ranks.as_ptr(), null, null, bm.as_mut_ptr(), n, thr) }
 }
 
 pub(super) fn pack_avx2(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
@@ -577,16 +556,16 @@ fn pc16(v: __m128i, m: u32, sh: u32) -> __m128i {
 
 /// A partition by rank > thr, 32 ranks per step with a 16-rank step and a tail after it
 /// (part_full_x86 and part_core_x86, primitives_x86.h:997-1109). PART_FULL compacts the
-/// lefts in place, PART_RIGHT and PART_NONE never write ranks; PART_NONE never touches
-/// right.
+/// lefts in place to left == src; PART_NONE never touches right.
 ///
 /// # Safety
-/// The CPU has the features; n > 0; ranks holds n bytes, right n+RANK_SLACK and bm
-/// ceil(n/8)+RANK_SLACK.
+/// The CPU has the features; n > 0; src has n readable bytes (writable through left for
+/// PART_FULL), right n+RANK_SLACK writable (not PART_NONE) and bm ceil(n/8)+RANK_SLACK.
 #[target_feature(enable = "avx2,bmi2,popcnt")]
 unsafe fn part_avx2_asm<const KIND: u8>(
-    ranks: *mut u8,
+    src: *const u8,
     right: *mut u8,
+    left: *mut u8,
     mut bm: *mut u8,
     n: usize,
     thr: u8,
@@ -598,7 +577,7 @@ unsafe fn part_avx2_asm<const KIND: u8>(
     // The last 16 ranks, read before any in-place store; the tail shifts them down.
     let last = if n >= 16 {
         // SAFETY: n >= 16.
-        unsafe { ld128(ranks.add(n - 16)) }
+        unsafe { ld128(src.add(n - 16)) }
     } else {
         _mm_setzero_si128()
     };
@@ -607,19 +586,19 @@ unsafe fn part_avx2_asm<const KIND: u8>(
     for _ in 0..n >> 5 {
         // SAFETY: i+32 <= n; bm has 4 bytes per 32 ranks; see above for the stores.
         unsafe {
-            let src = ranks.add(i);
-            let v0 = ld256(src);
+            let s = src.add(i);
+            let v0 = ld256(s);
             let m = mask32(v0, thr);
             wr32(bm, m);
             if KIND != PART_NONE {
-                let v1 = ld128(src.add(16));
+                let v1 = ld128(s.add(16));
                 let lo = (m & 0xFFFF).count_ones() as usize;
                 if KIND == PART_FULL {
                     let c = p16(_mm256_castsi256_si128(v0), m, 0);
-                    st128(ranks.add(nl), c);
+                    st128(left.add(nl), c);
                     st128(right.add(nr), _mm_shuffle_epi8(c, rev));
                     let c = p16(v1, m, 16);
-                    st128(ranks.add(nl + 16 - lo), c);
+                    st128(left.add(nl + 16 - lo), c);
                     st128(right.add(nr + lo), _mm_shuffle_epi8(c, rev));
                 } else {
                     st128(right.add(nr), pc16(_mm256_castsi256_si128(v0), m, 0));
@@ -635,12 +614,12 @@ unsafe fn part_avx2_asm<const KIND: u8>(
     if n - i >= 16 {
         // SAFETY: as in the loop, for 16 ranks and 2 bitmap bytes.
         unsafe {
-            let v = ld128(ranks.add(i));
+            let v = ld128(src.add(i));
             let m = mask16(v, thr16);
             wr16(bm, m as u16);
             if KIND == PART_FULL {
                 let c = p16(v, m, 0);
-                st128(ranks.add(nl), c);
+                st128(left.add(nl), c);
                 st128(right.add(nr), _mm_shuffle_epi8(c, rev));
             } else if KIND == PART_RIGHT {
                 st128(right.add(nr), pc16(v, m, 0));
@@ -656,8 +635,8 @@ unsafe fn part_avx2_asm<const KIND: u8>(
         // t = 1..15 ranks remain at i; they become lanes 0..t-1 of v, the rest zero
         // (rank 0 is never right).
         let v = if i == 0 {
-            // SAFETY: ranks holds t = n bytes.
-            unsafe { load_exact(ranks, t) }
+            // SAFETY: src holds t = n bytes.
+            unsafe { load_exact(src, t) }
         } else {
             _mm_shuffle_epi8(last, shift_row(32 - t))
         };
@@ -669,7 +648,7 @@ unsafe fn part_avx2_asm<const KIND: u8>(
             if KIND == PART_FULL {
                 let c = p16(v, m, 0);
                 // Exact: the bytes after the lefts belong to the caller.
-                store_exact(ranks.add(nl), t - m.count_ones() as usize, c);
+                store_exact(left.add(nl), t - m.count_ones() as usize, c);
                 st128(right.add(nr), _mm_shuffle_epi8(c, rev));
             } else if KIND == PART_RIGHT {
                 st128(right.add(nr), pc16(v, m, 0));
