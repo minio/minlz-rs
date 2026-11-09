@@ -169,6 +169,11 @@ impl<R: Read + Seek> ReadSeeker<R> {
         // the chunk dispatch.
         if !self.reader.header_read {
             self.reader.r.seek(SeekFrom::Start(0))?;
+            // Offsets count from the first stream, so restart the count at its start.
+            self.reader.block_start = 0;
+            self.reader.stream_start = Some(0);
+            self.reader.decoded.clear();
+            self.reader.decoded_pos = 0;
             let _ = self.reader.fill_buf()?;
         }
 
@@ -190,7 +195,7 @@ impl<R: Read + Seek> ReadSeeker<R> {
         // read: accept what any identifier allows.  The hash still verifies SIMD chunks.
         self.reader.simd = true;
         self.reader.max_block = self.reader.max_block_user;
-        self.reader.stream_start_unknown = true;
+        self.reader.stream_start = None;
         // Hard-reset block state: clearing the decoded buffer makes the
         // next data chunk's `block_start += decoded.len()` a no-op, so
         // block_start at the new chunk equals u_off as desired.

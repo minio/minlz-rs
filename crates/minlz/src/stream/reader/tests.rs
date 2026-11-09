@@ -1648,6 +1648,104 @@ fn read_seeker_concat_jump_into_later_stream() {
     assert!(got == want[off..]);
 }
 
+/// Two concatenated 400 and 300 KiB streams, their decoded bytes and index.
+fn seek_test_concat() -> (Vec<u8>, Vec<u8>, usize, Vec<u8>) {
+    let (a, b) = (seek_test_data(400 << 10, 1), seek_test_data(300 << 10, 2));
+    let stream = [
+        seek_test_stream(block::Level::Balanced, &a),
+        seek_test_stream(block::Level::Balanced, &b),
+    ]
+    .concat();
+    let idx = crate::index::index_stream(&stream[..]).unwrap();
+    (stream, [&a[..], &b].concat(), a.len(), idx)
+}
+
+/// Seek offsets count from the start of the first stream, not of the stream being read: the
+/// in-buffer fast path and `SeekFrom::Current` must not mix up the two streams.
+#[test]
+#[cfg_attr(miri, ignore = "700 KiB streams too slow for miri")]
+fn read_seeker_concat_offsets_are_global() {
+    let (stream, want, a_len, idx) = seek_test_concat();
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+    let mut got = [0u8; 1000];
+    let cross = a_len - 500;
+    rs.read_exact_at(&mut got, cross as u64).unwrap();
+    assert!(got[..] == want[cross..cross + 1000], "ReadAt({cross})");
+    rs.read_exact_at(&mut got, 10).unwrap();
+    assert!(got[..] == want[10..1010], "ReadAt(10) after crossing");
+
+    rs.read_exact_at(&mut got, cross as u64).unwrap();
+    let end = (cross + 1000) as u64;
+    assert_eq!(rs.stream_position().unwrap(), end);
+    assert_eq!(rs.seek(SeekFrom::Current(-1000)).unwrap(), cross as u64);
+    rs.read_exact(&mut got).unwrap();
+    assert!(
+        got[..] == want[cross..cross + 1000],
+        "read after Current(-1000)"
+    );
+    assert_eq!(rs.seek(SeekFrom::Current(100)).unwrap(), end + 100);
+    rs.read_exact(&mut got).unwrap();
+    assert!(
+        got[..] == want[end as usize + 100..][..1000],
+        "read after Current(100)"
+    );
+}
+
+/// Reads through the second stream's EOF chunk, which is checked when its identifier was read
+/// and not after an index jump skipped it.
+#[test]
+#[cfg_attr(miri, ignore = "700 KiB streams too slow for miri")]
+fn read_seeker_concat_reads_through_eof() {
+    let (stream, want, a_len, idx) = seek_test_concat();
+    let mut bad = stream.clone();
+    let eof = find_chunk(&bad, 2, |t| t == CHUNK_TYPE_EOF);
+    bad[eof + CHUNK_HEADER_SIZE] ^= 1;
+    // A sequential crossing reads the second identifier, a jump past its first block doesn't.
+    for (off, checked) in [(a_len - 500, true), (a_len + (100 << 10), false)] {
+        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+        rs.seek(SeekFrom::Start(off as u64)).unwrap();
+        let mut got = Vec::new();
+        rs.read_to_end(&mut got).unwrap();
+        assert!(got == want[off..], "Seek({off})");
+        // Past the last EOF chunk a seek rereads the first identifier.
+        assert_eq!(rs.read_at(&mut [0; 10], want.len() as u64).unwrap(), 0);
+        let mut got = [0; 1000];
+        rs.read_exact_at(&mut got, 10).unwrap();
+        assert!(
+            got[..] == want[10..1010],
+            "Seek({off}): ReadAt(10) after EOF"
+        );
+
+        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&bad)), &idx).unwrap();
+        rs.seek(SeekFrom::Start(off as u64)).unwrap();
+        let res = rs.read_to_end(&mut Vec::new());
+        if checked {
+            let e = res.expect_err("bad EOF size");
+            assert!(is_corrupt(&e), "Seek({off}): {e}");
+        } else {
+            res.unwrap();
+        }
+    }
+    // After reading the second stream from a crossing, the fast path must find the first.
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+    rs.read_exact_at(&mut [0; 1000], (a_len - 500) as u64)
+        .unwrap();
+    rs.seek(SeekFrom::Start(10)).unwrap();
+    let mut got = Vec::new();
+    rs.read_to_end(&mut got).unwrap();
+    assert!(got == want[10..], "Seek(10) after crossing");
+
+    let e = decode_to_end(Reader::new(Cursor::new(&bad))).unwrap_err();
+    assert!(is_corrupt(&e), "Reader: {e}");
+    assert!(decode_to_end(Reader::new(Cursor::new(&stream))).unwrap() == want);
+    let skip = a_len + (64 << 10);
+    let mut r = Reader::new(Cursor::new(&stream));
+    r.skip(skip as u64).unwrap();
+    assert_eq!(r.current_offset(), skip as u64);
+    let got = r.decode_concurrent(Vec::new(), 2).unwrap().writer;
+    assert!(got == want[skip..], "skip then decode_concurrent");
+}
+
 /// Ports `TestReaderSIMDFlagStrict` (`seek_simd_test.go`): reads still require the flag of the
 /// last identifier they read.
 #[test]

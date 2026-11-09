@@ -159,7 +159,8 @@ pub struct Reader<R> {
     /// Scratch for skippable / user-chunk bodies (kept separate so user-chunk
     /// callbacks can see the raw bytes without disturbing `buf`).
     pub(super) cb_buf: Vec<u8>,
-    /// Uncompressed offset at the start of the *current* `decoded` block.
+    /// Uncompressed offset at the start of the *current* `decoded` block, counted from the
+    /// first stream, as index offsets are.
     pub(super) block_start: u64,
     /// Configured ceiling — chunks declaring more uncompressed bytes error.
     pub(super) max_block_user: usize,
@@ -169,9 +170,9 @@ pub struct Reader<R> {
     /// The stream identifier allows SIMD chunks.
     pub(super) simd: bool,
     pub(super) expect_eof: bool,
-    /// An index jump skipped the stream identifier, so the EOF chunk's size,
-    /// which counts from that identifier, cannot be checked.
-    pub(super) stream_start_unknown: bool,
+    /// Uncompressed offset where the current stream starts, which its EOF chunk's size counts
+    /// from.  `None` after an index jump skipped the stream identifier.
+    pub(super) stream_start: Option<u64>,
     pub(super) ignore_stream_id: bool,
     pub(super) ignore_crc: bool,
     /// Sticky error.  Once set, every subsequent read returns it.
@@ -200,7 +201,7 @@ impl<R: Read> Reader<R> {
             header_read: b.ignore_stream_id,
             simd: b.ignore_stream_id,
             expect_eof: false,
-            stream_start_unknown: false,
+            stream_start: Some(0),
             ignore_stream_id: b.ignore_stream_id,
             ignore_crc: b.ignore_crc,
             err: None,
@@ -220,11 +221,12 @@ impl<R: Read> Reader<R> {
         self.header_read = self.ignore_stream_id;
         self.simd = self.ignore_stream_id;
         self.expect_eof = false;
-        self.stream_start_unknown = false;
+        self.stream_start = Some(0);
         self.err = None;
     }
 
-    /// Uncompressed offset at the start of the block currently being drained.
+    /// Uncompressed offset at the start of the block currently being drained,
+    /// counted from the start of the first of any concatenated streams.
     pub fn block_start(&self) -> u64 {
         self.block_start
     }
@@ -642,25 +644,22 @@ impl<R: Read> Reader<R> {
                 if n != chunk_len {
                     return Err(Error::Corrupt);
                 }
-                if !self.stream_start_unknown && want_size != self.stream_size() {
+                if self.stream_size().is_some_and(|size| size != want_size) {
                     return Err(Error::Corrupt);
                 }
             }
         }
         self.expect_eof = false;
         self.header_read = false;
-        self.stream_start_unknown = false;
+        // An EOF chunk with no stream identifier since this one is an empty stream.
+        self.stream_start = Some(self.block_start + self.decoded.len() as u64);
         Ok(())
     }
 
-    /// The decoded size of the current stream, which an EOF chunk must match.
-    /// An EOF chunk with no stream identifier since the last one is an empty
-    /// stream.
-    fn stream_size(&self) -> u64 {
-        if !self.header_read {
-            return 0;
-        }
-        self.block_start + self.decoded.len() as u64
+    /// The decoded size of the current stream, which an EOF chunk must match, if its start is
+    /// known.
+    pub(super) fn stream_size(&self) -> Option<u64> {
+        Some(self.block_start + self.decoded.len() as u64 - self.stream_start?)
     }
 
     fn handle_stream_identifier(&mut self, chunk_len: usize) -> Result<()> {
@@ -684,7 +683,8 @@ impl<R: Read> Reader<R> {
             return Err(Error::TooLarge);
         }
         self.max_block = new_max;
-        self.block_start = 0;
+        self.block_start += self.decoded.len() as u64;
+        self.stream_start = Some(self.block_start);
         self.decoded.clear();
         self.decoded_pos = 0;
         self.expect_eof = true;
