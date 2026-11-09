@@ -16,7 +16,11 @@
 //! compress + decompress each level, assert byte-equality.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file as symlink;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -568,6 +572,91 @@ fn default_output_hard_link_to_input_is_rejected() {
         assert!(!out.status.success(), "{args:?}: accepted {dst:?}");
         assert!(fs::read(&src).unwrap() == *data, "{args:?}: input modified");
     }
+}
+
+/// A second name for the input of a [`same_file_output`] case.
+enum Alias {
+    No,
+    Hard(&'static str),
+    Sym(&'static str),
+    /// The input's name in another case: the same file only on case-insensitive file systems.
+    Case(&'static str),
+}
+
+/// Go's `TestSameFileOutput` (cmd/mz/mz_test.go): an output naming the input, in any
+/// spelling, is refused before anything is written. Go compresses in place through a temp
+/// file instead (its c-o-dot and c-hardlink cases). Rust has no --safe, --recomp, sidecars or
+/// --block-debug.
+#[test]
+fn same_file_output() {
+    let data = sample_payload(14, 64 * 1024);
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-"], &data);
+    // The last arg names the input.
+    for (alias, args) in [
+        (Alias::No, &["d", "-o", "x.mz", "x.mz"][..]),
+        (Alias::No, &["d", "-o", "./x.mz", "x.mz"]),
+        (Alias::No, &["d", "--rm", "-o", "./x.mz", "x.mz"]),
+        (Alias::Hard("y"), &["d", "-o", "y", "x.mz"]),
+        (Alias::Sym("y"), &["d", "-o", "y", "x.mz"]),
+        (Alias::Case("X.MZ"), &["d", "-o", "X.MZ", "x.mz"]),
+        (Alias::No, &["c", "--block", "--rm", "-o", "./x", "x"]),
+        (Alias::No, &["c", "--cpu", "1", "-o", "./x", "x"]),
+        (Alias::Hard("y"), &["c", "-o", "y", "x"]),
+        (Alias::Sym("x.mz"), &["c", "x"]),
+    ] {
+        let dir = tmp_dir();
+        let file = args[args.len() - 1];
+        let input = if file == "x" { &data } else { &stream };
+        fs::write(dir.join(file), input).unwrap();
+        let aliased = match alias {
+            Alias::No => Ok(()),
+            Alias::Hard(a) => fs::hard_link(dir.join(file), dir.join(a)),
+            Alias::Sym(a) => symlink(file, dir.join(a)),
+            Alias::Case(a) if dir.join(a).exists() => Ok(()),
+            Alias::Case(_) => Err(io::Error::other("case-sensitive file system")),
+        };
+        if let Err(e) = aliased {
+            eprintln!("{args:?}: skipped: {e}");
+            continue;
+        }
+        let names = || {
+            let mut v: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            v.sort();
+            v
+        };
+        let before = names();
+        let res = Command::new(mz_bin())
+            .arg("-q")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&res.stderr);
+        assert!(
+            stderr.contains("input and output are the same file"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            fs::read(dir.join(file)).unwrap() == *input,
+            "{args:?}: input changed"
+        );
+        assert_eq!(names(), before, "{args:?}");
+    }
+
+    // Go's default name for `d -block x.bin` is the input itself; Rust's is x.bin.out.
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &data);
+    let dir = tmp_dir();
+    fs::write(dir.join("x.bin"), &block).unwrap();
+    run_ok(
+        Command::new(mz_bin())
+            .args(["d", "-q", "--block", "x.bin"])
+            .current_dir(&dir),
+    );
+    assert!(fs::read(dir.join("x.bin")).unwrap() == block);
+    assert!(fs::read(dir.join("x.bin.out")).unwrap() == data);
 }
 
 /// `--rm` removes the input once the output is written and synced.
