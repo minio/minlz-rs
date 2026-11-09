@@ -90,3 +90,8 @@ pub use index::{
 
 /// A specialized [`Result`] type for MinLZ operations.
 pub type Result<T> = core::result::Result<T, Error>;
+
+// Compiles the README's Rust examples as doctests, so they cannot rot.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+pub struct ReadmeDoctests;

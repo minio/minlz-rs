@@ -5,11 +5,11 @@
 A fast LZ77-style block / streaming compressor — Rust port of
 [`github.com/minio/minlz`](https://github.com/minio/minlz).
 
-This implements the **MinLZ specification v1.0** (block + stream codec,
-including the optional stream index for random access), plus **SIMD
-blocks** from v1.1.  The format is specified in the Go repository's
-[SPEC.md] and [SPEC_SIMD.md].  Block search tables (`SPEC.md` §4.13)
-are **not** implemented.
+This implements the **MinLZ specification v1.1** (block + stream codec
+with SIMD blocks, including the optional stream index for random
+access).  The format is specified in the Go repository's [SPEC.md] and
+[SPEC_SIMD.md].  Block search tables (`SPEC.md` §4.13) are **not**
+implemented.
 
 [SPEC.md]: https://github.com/minio/minlz/blob/main/SPEC.md
 [SPEC_SIMD.md]: https://github.com/minio/minlz/blob/main/SPEC_SIMD.md
@@ -127,8 +127,8 @@ fn parallel_roundtrip(payload: &[u8]) -> std::io::Result<()> {
 
     let threads = std::thread::available_parallelism()?.get();
     let mut reader = Reader::new(&compressed[..]);
-    let (n, _sink) = reader.decode_concurrent(Vec::<u8>::new(), threads)?;
-    println!("decoded {n} bytes");
+    let decoded = reader.decode_concurrent(Vec::<u8>::new(), threads)?;
+    println!("decoded {} bytes", decoded.bytes_written);
     Ok(())
 }
 ```
@@ -143,7 +143,7 @@ fn random_read(payload: &[u8], offset: u64) -> std::io::Result<Vec<u8>> {
     let mut compressed: Vec<u8> = Vec::new();
     let mut w = WriterBuilder::new()
         .append_index()                  // index chunk after EOF
-        .build(&mut compressed);
+        .build(&mut compressed)?;
     w.write_all(payload)?;
     w.finish()?;
 
@@ -779,7 +779,7 @@ cargo install --path bin/mz            # installs to ~/.cargo/bin/mz
 cargo build --release -p minio-mz      # or just build; binary at target/release/mz
 ```
 
-```
+```sh
 mz c -2 input.json                     # compress to input.json.mz
 mz c --classic -2 input.json           # classic blocks, for v1.0 decoders
 mz d input.json.mz                     # decompress back to input.json
@@ -800,10 +800,10 @@ default block size is 8 MiB, as in Go.  `mz --help` lists every flag.
 
 ## Spec compliance
 
-This crate implements the **MinLZ specification v1.0**, plus SIMD
-blocks from v1.1: block type 1 ([SPEC_SIMD.md]), stream chunk type 0x10
-with its XXH3 check, and the SIMD stream flag.  Features not
-implemented (versus the Go reference):
+This crate implements the **MinLZ specification v1.1**, including SIMD
+blocks: block type 1 ([SPEC_SIMD.md]), stream chunk type 0x10 with its
+XXH3 check, and the SIMD stream flag.  Features not implemented (versus
+the Go reference):
 
 - Snappy / S2 fallback decoding for streams whose first byte indicates a
   legacy magic.
