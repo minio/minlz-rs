@@ -22,7 +22,8 @@ pub(crate) struct Buffer {
     len: usize,
     #[cfg_attr(not(any(windows, unix)), allow(dead_code))]
     map: (*mut u8, usize),
-    fallback: Vec<u8>,
+    // Owns the allocation `body` points into where pages are not guarded.
+    _fallback: Vec<u8>,
 }
 
 /// Reports whether [`Buffer`]s are guarded here.
@@ -42,7 +43,7 @@ impl Buffer {
                 body: fallback.as_mut_ptr(),
                 len: size,
                 map: (core::ptr::null_mut(), 0),
-                fallback,
+                _fallback: fallback,
             });
         }
         let pg = sys::page_size();
@@ -56,7 +57,7 @@ impl Buffer {
             body: unsafe { base.add(pg) },
             len: body,
             map: (base, total),
-            fallback: Vec::new(),
+            _fallback: Vec::new(),
         };
         ok.then_some(buf)
     }
@@ -64,11 +65,7 @@ impl Buffer {
     /// Returns `n` bytes flush against the inaccessible page after them if `at_end`,
     /// else against the one before them.
     pub(crate) fn slice(&mut self, n: usize, at_end: bool) -> &mut [u8] {
-        let len = if self.fallback.is_empty() {
-            self.len
-        } else {
-            n
-        };
+        let len = self.len;
         assert!(n <= len, "guard: {n} bytes do not fit {len}");
         let off = if at_end { len - n } else { 0 };
         // SAFETY: [off, off+n) lies inside the mapped (or allocated) body, which self owns.
@@ -236,6 +233,19 @@ mod tests {
         let s = g.slice(10, false);
         s.fill(1);
         assert!(s.iter().all(|&b| b == 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "do not fit")]
+    fn oversized_slice_panics() {
+        Buffer::new(16).unwrap().slice(1 << 20, true);
+    }
+
+    #[test]
+    fn at_end_is_flush_with_body() {
+        let mut g = Buffer::new(16).unwrap();
+        let end = g.body.wrapping_add(g.len);
+        assert_eq!(g.slice(4, true).as_mut_ptr_range().end, end);
     }
 
     /// Go's TestFault: the byte just outside a slice, at either end, faults. A fault ends the
