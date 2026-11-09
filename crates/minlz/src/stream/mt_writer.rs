@@ -57,6 +57,9 @@ enum OrderItem {
     Raw(Vec<u8>),
     /// Flush `W` and answer once everything queued before it is written.
     Flush(SyncSender<()>),
+    /// End of stream, sent by `finish` after the EOF chunk: write padding and
+    /// the index.  A close without it (a dropped writer) writes neither.
+    Finish,
 }
 
 /// What a worker sends back: (header, body) so the writer thread can
@@ -503,10 +506,9 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         tmp[1] = n as u8;
         self.submit_raw(tmp[..CHUNK_HEADER_SIZE + n].to_vec())?;
 
-        // Signal end of stream.  The writer thread emits padding (if
-        // configured) and the index chunk (if `append_index`) on
-        // channel close — see `writer_loop`.
-        drop(self.order_tx.take());
+        // A failed send means the writer thread already stopped on an error,
+        // which `finish_rx` reports.
+        let _ = self.order_tx.take().unwrap().send(OrderItem::Finish);
         let res = match self.finish_rx.recv() {
             Ok(res) => res,
             Err(_) => Err(io::Error::other("writer thread did not return W")),
@@ -712,7 +714,8 @@ impl<W: Write + Send + 'static> Drop for MtWriter<W> {
     fn drop(&mut self) {
         // Best-effort cleanup if the user forgot finish(): close the order
         // channel and wait for the writer thread, so `W` is dropped before we
-        // return.  Pending data is silently lost — matches Go.  The engine
+        // return.  Queued blocks are written; buffered input, the EOF chunk,
+        // padding and index are not, as in Go without Close.  The engine
         // drops after this and joins its threads.
         if let Some(tx) = self.order_tx.take() {
             drop(tx);
@@ -808,7 +811,11 @@ fn writer_loop<W: Write + Send + 'static>(
     let mut uncomp_written: u64 = 0;
 
     let res = (|| -> io::Result<()> {
-        while let Ok(item) = order_rx.recv() {
+        loop {
+            // Closed without `Finish`: the MtWriter was dropped.
+            let Ok(item) = order_rx.recv() else {
+                return Ok(());
+            };
             match item {
                 OrderItem::Raw(bytes) => {
                     w.write_all(&bytes).map_err(|e| record(&err_slot, e))?;
@@ -818,6 +825,7 @@ fn writer_loop<W: Write + Send + 'static>(
                     w.flush().map_err(|e| record(&err_slot, e))?;
                     let _ = done.send(());
                 }
+                OrderItem::Finish => break,
                 OrderItem::Block(rx) => match rx.recv() {
                     Ok(out) => {
                         if out.hdr.as_ref().is_some_and(is_error_marker) {
@@ -870,8 +878,7 @@ fn writer_loop<W: Write + Send + 'static>(
                 },
             }
         }
-        // Channel closed (MtWriter::finish dropped order_tx after queuing
-        // EOF).  Wire order from here matches Go's `writer.go:closeIndex`:
+        // Wire order from here matches Go's `writer.go:closeIndex`:
         // data → EOF → padding → index.  Padding is emitted *before*
         // the index but its size includes the index length, so the
         // total compressed size is aligned to `padding`.

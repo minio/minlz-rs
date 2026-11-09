@@ -195,6 +195,38 @@ fn drop_without_finish_does_not_block() {
     // If we got here without hanging, the test passes.
 }
 
+#[test]
+fn drop_without_finish_writes_no_trailer() {
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+    impl Write for Shared {
+        fn write(&mut self, p: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(p);
+            Ok(p.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let out = Shared::default();
+    let mut w = MtWriterBuilder::new()
+        .block_size(4 << 10)
+        .concurrency(2)
+        .append_index()
+        .padding(1 << 10)
+        .build(out.clone())
+        .unwrap();
+    w.write_all(&[b'x'; 10 << 10]).unwrap();
+    drop(w);
+    let out = out.0.lock().unwrap();
+    assert!(!out.ends_with(b"\x00xdi2s"), "dropped stream got an index");
+    assert!(
+        Index::default()
+            .load_stream(&mut Cursor::new(&out[..]))
+            .is_err()
+    );
+}
+
 /// Determinism / stress: random PRNG inputs at varied sizes + cross
 /// encode/decode concurrencies (1×16 = 16 combinations) for many
 /// iterations.  Surfaces scheduling-dependent bugs that single-iteration
