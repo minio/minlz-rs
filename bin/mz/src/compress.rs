@@ -16,9 +16,10 @@
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use minlz::stream::{MAX_BLOCK_SIZE, MtWriterBuilder, WriterBuilder};
+use minlz::stream::{MAX_BLOCK_SIZE, MtWriterBuilder, Reader, WriterBuilder};
 
 use crate::args::Options;
 use crate::io_util::{
@@ -61,7 +62,7 @@ fn compress_stream(input: &Path, opts: &Options) -> io::Result<()> {
 fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let (mut src, _src_size) = open_input(input)?;
     let dst_path = dest_path(input, opts, EXT_STREAM)?;
-    let dst = open_output(&dst_path)?;
+    let (dst, verifier) = verify_to(open_output(&dst_path)?, opts.verify)?;
 
     let mut counted_src = CountingReader::new(&mut src);
     let mut counted_dst = CountingWriter::new(dst);
@@ -91,6 +92,8 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     counted_dst.flush()?;
     let elapsed = start.elapsed();
     print_compress_summary(opts, counted_src.bytes, counted_dst.bytes, elapsed);
+    drop(counted_dst);
+    check_verify(verifier, opts)?;
     if opts.remove && input != Path::new("-") {
         drop(src);
         std::fs::remove_file(input)?;
@@ -104,7 +107,7 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
 fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Result<()> {
     let (mut src, _src_size) = open_input(input)?;
     let dst_path = dest_path(input, opts, EXT_STREAM)?;
-    let dst = open_output_send(&dst_path)?;
+    let (dst, verifier) = verify_to(open_output_send(&dst_path)?, opts.verify)?;
 
     let mut builder = MtWriterBuilder::new();
     builder = match opts.level {
@@ -134,6 +137,8 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
     out.flush()?;
     let elapsed = start.elapsed();
     print_compress_summary(opts, counted_src.bytes, out.bytes, elapsed);
+    drop(out);
+    check_verify(verifier, opts)?;
     if opts.remove && input != Path::new("-") {
         drop(src);
         std::fs::remove_file(input)?;
@@ -194,6 +199,58 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+type Verifier = Option<JoinHandle<io::Result<u64>>>;
+
+/// Go's `verifyTo`: decodes the output on another thread while it is written. Every chunk
+/// carries a checksum of its input, so a clean decode verifies it.
+fn verify_to<W: Write>(out: W, verify: bool) -> io::Result<(Tee<W>, Verifier)> {
+    if !verify {
+        return Ok((Tee { out, pipe: None }, None));
+    }
+    let (mut r, w) = io::pipe()?;
+    let h = thread::spawn(move || {
+        let res = io::copy(&mut Reader::new(&mut r), &mut io::sink());
+        // Keep draining so a decode error is reported by check_verify, not as a broken pipe
+        // in the writer.
+        io::copy(&mut r, &mut io::sink())?;
+        res
+    });
+    Ok((Tee { out, pipe: Some(w) }, Some(h)))
+}
+
+/// Waits for the decoder of [`verify_to`]. The output must be dropped first, to close the
+/// pipe.
+fn check_verify(verifier: Verifier, opts: &Options) -> io::Result<()> {
+    let Some(h) = verifier else { return Ok(()) };
+    h.join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+        .map_err(|e| io::Error::other(format!("verify: {e}")))?;
+    if !opts.quiet {
+        eprintln!("... Verified ok.");
+    }
+    Ok(())
+}
+
+/// Copies what is written to `out` into the verify pipe, if any.
+struct Tee<W> {
+    out: W,
+    pipe: Option<io::PipeWriter>,
+}
+
+impl<W: Write> Write for Tee<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.out.write(buf)?;
+        if let Some(p) = &mut self.pipe {
+            p.write_all(&buf[..n])?;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
 }
 
 /// Decide the destination path given `input`, `--output`, `--stdout` and the

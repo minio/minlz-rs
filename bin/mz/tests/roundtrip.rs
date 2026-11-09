@@ -525,3 +525,24 @@ fn block_stdin_oversize_fails_without_buffering_all() {
         "mz consumed {written} bytes before rejecting"
     );
 }
+
+#[test]
+fn compress_stream_verify() {
+    let dir = tmp_dir();
+    let src = dir.join("input.txt");
+    fs::write(&src, sample_payload(5, 64 * 1024)).unwrap();
+    for threads in ["1", "4"] {
+        let out = Command::new(mz_bin())
+            .args(["c", "--verify", "--threads", threads, "-o"])
+            .arg(dir.join("out.mz"))
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "threads={threads}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Verified ok"),
+            "threads={threads}: {stderr}"
+        );
+    }
+}
