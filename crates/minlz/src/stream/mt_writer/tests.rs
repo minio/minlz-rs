@@ -723,7 +723,9 @@ fn worker_error_drops_engine() {
     // Too large to encode: the worker reports an error.
     let obuf_pool = w.engine().obuf_pool.clone();
     inject(&mut w, vec![0; MAX_BLOCK_SIZE + 1], obuf_pool);
-    assert!(w.finish().is_err());
+    let err = w.finish().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert!(err.to_string().starts_with("encode: "), "{err}");
     assert_eq!(pool.strong_count(), 0, "engine still alive");
     assert!(!idle_ids().contains(&id));
 }
