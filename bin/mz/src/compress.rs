@@ -16,6 +16,7 @@
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -211,14 +212,20 @@ fn verify_to<W: Write>(out: W, verify: bool) -> io::Result<(Tee<W>, Verifier)> {
         return Ok((Tee { out, pipe: None }, None));
     }
     let (mut r, w) = io::pipe()?;
+    let failed = Arc::new(OnceLock::new());
+    let f = failed.clone();
     let h = thread::spawn(move || {
         let res = io::copy(&mut Reader::new(&mut r), &mut io::sink());
-        // Keep draining so a decode error is reported by check_verify, not as a broken pipe
-        // in the writer.
+        if let Err(e) = &res {
+            let _ = f.set(e.to_string());
+        }
+        // Keep draining so the writer fails with the decode error from `failed`, not with a
+        // broken pipe.
         io::copy(&mut r, &mut io::sink())?;
         res
     });
-    Ok((Tee { out, pipe: Some(w) }, Some(h)))
+    let pipe = Some((w, failed));
+    Ok((Tee { out, pipe }, Some(h)))
 }
 
 /// Waits for the decoder of [`verify_to`]. The output must be dropped first, to close the
@@ -234,16 +241,21 @@ fn check_verify(verifier: Verifier, opts: &Options) -> io::Result<()> {
     Ok(())
 }
 
-/// Copies what is written to `out` into the verify pipe, if any.
+/// Copies what is written to `out` into the verify pipe, if any. Once the decoder has
+/// failed, writes fail with its error, so compression stops early as with Go's
+/// `pr.CloseWithError`.
 struct Tee<W> {
     out: W,
-    pipe: Option<io::PipeWriter>,
+    pipe: Option<(io::PipeWriter, Arc<OnceLock<String>>)>,
 }
 
 impl<W: Write> Write for Tee<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(e) = self.pipe.as_ref().and_then(|(_, f)| f.get()) {
+            return Err(io::Error::other(format!("verify: {e}")));
+        }
         let n = self.out.write(buf)?;
-        if let Some(p) = &mut self.pipe {
+        if let Some((p, _)) = &mut self.pipe {
             p.write_all(&buf[..n])?;
         }
         Ok(n)
@@ -285,4 +297,22 @@ fn print_compress_summary(opts: &Options, input: u64, output: u64, elapsed: std:
     let ratio = input as f64 / output as f64;
     let mbps = mb_per_sec(input, elapsed);
     eprintln!(" {input} -> {output} [{pct:.02}% {ratio:.03}:1]; {mbps:.01}MB/s");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_error_stops_writes() {
+        let (mut tee, verifier) = verify_to(io::sink(), true).unwrap();
+        // Not a MinLZ stream, so the decoder fails on the first chunk.
+        let junk = [0u8; 64 << 10];
+        let err = (0..1024)
+            .find_map(|_| tee.write_all(&junk).err())
+            .expect("writes kept succeeding after the decoder failed");
+        assert!(err.to_string().starts_with("verify: "), "{err}");
+        drop(tee);
+        assert!(verifier.unwrap().join().unwrap().is_err());
+    }
 }
