@@ -59,7 +59,9 @@ enum OrderItem {
     Flush(SyncSender<()>),
     /// End of stream, sent by `finish` after the EOF chunk: write padding and
     /// the index.  A close without it (a dropped writer) writes neither.
-    Finish,
+    /// `true` serializes the index even without `append_index`, for
+    /// `close_index`.
+    Finish(bool),
 }
 
 /// What a worker sends back: (header, body) so the writer thread can
@@ -313,8 +315,9 @@ impl MtWriterBuilder {
         self
     }
 
-    /// Toggle in-memory index generation.  Default `true`.  Set to
-    /// `false` for streaming output where no index is ever needed.
+    /// Toggle in-memory index generation.  Default `true` so that
+    /// [`MtWriter::close_index`] can return an index.  Set to `false` for
+    /// streaming output where no index is ever needed.
     /// Matches [`super::WriterBuilder::generate_index`]. If
     /// [`append_index`](Self::append_index) is also requested, the index is
     /// generated regardless of this flag.
@@ -359,13 +362,15 @@ impl MtWriterBuilder {
 /// Workers compress blocks in parallel.  A single writer thread drains
 /// per-block result channels in submission order and writes to `W`.
 /// `W` is moved into the writer thread on construction and returned via
-/// [`finish`].  See module-level docs for the rationale.
+/// [`finish`] or [`close_index`].  See module-level docs for the rationale.
 ///
-/// After a successful [`finish`] the worker threads, the writer thread and the
-/// block buffers stay alive for about 10 seconds, for the next `MtWriter` with
-/// the same concurrency and block size to reuse; unused, they exit.
+/// After a successful [`finish`] or [`close_index`] the worker threads, the
+/// writer thread and the block buffers stay alive for about 10 seconds, for the
+/// next `MtWriter` with the same concurrency and block size to reuse; unused,
+/// they exit.
 ///
 /// [`finish`]: MtWriter::finish
+/// [`close_index`]: MtWriter::close_index
 pub struct MtWriter<W: Write + Send + 'static> {
     block_size: usize,
     level: block::Level,
@@ -378,7 +383,9 @@ pub struct MtWriter<W: Write + Send + 'static> {
     /// Round-robin cursor for the engine's `submit_txs`.
     next_worker: usize,
     order_tx: Option<SyncSender<OrderItem>>,
-    finish_rx: Receiver<io::Result<W>>,
+    /// `W` and the serialized index (empty unless requested).
+    finish_rx: Receiver<io::Result<(W, Vec<u8>)>>,
+    has_index: bool,
     /// `Some` until a successful [`finish`] parks it; otherwise dropped with
     /// the writer.
     engine: Option<Engine>,
@@ -401,7 +408,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
     fn with_builder(w: W, b: MtWriterBuilder, concurrency: usize) -> Self {
         let engine = Engine::take(concurrency, b.block_size);
         let (order_tx, order_rx) = mpsc::sync_channel::<OrderItem>(concurrency + 1);
-        let (finish_tx, finish_rx) = mpsc::sync_channel::<io::Result<W>>(1);
+        let (finish_tx, finish_rx) = mpsc::sync_channel::<io::Result<(W, Vec<u8>)>>(1);
         let err: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
 
         let err_writer = err.clone();
@@ -443,6 +450,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
             next_worker: 0,
             order_tx: Some(order_tx),
             finish_rx,
+            has_index: b.generate_index || b.append_index,
             engine: Some(engine),
             err,
             uncomp_written: 0,
@@ -456,10 +464,9 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         self.uncomp_written
     }
 
-    /// Encode a buffer in one shot.  Takes ownership so the worker
-    /// thread can borrow it for the whole encode without copies.
-    /// Equivalent to Go's `Writer.EncodeBuffer` but always copies into
-    /// per-block jobs (the worker owns each block's input).
+    /// Flush pending input, then encode `buf` as whole blocks.  Like Go's
+    /// `Writer.EncodeBuffer`, but each block is copied for its worker, so
+    /// `buf` may be reused as soon as this returns.
     pub fn encode_buffer(&mut self, buf: &[u8]) -> io::Result<()> {
         self.flush_ibuf()?;
         self.write_blocks(buf)?;
@@ -497,6 +504,23 @@ impl<W: Write + Send + 'static> MtWriter<W> {
     /// Flush pending input, emit the EOF chunk + any padding, wait for the
     /// writer thread, and return the underlying writer.
     pub fn finish(mut self) -> io::Result<W> {
+        self.close(false).map(|(w, _)| w)
+    }
+
+    /// Like [`Self::finish`] but also returns the encoded index, as
+    /// [`Writer::close_index`](super::Writer::close_index) does.
+    /// Requires `generate_index` (the default) to have been left enabled.
+    pub fn close_index(mut self) -> io::Result<(W, Vec<u8>)> {
+        if !self.has_index {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "minlz: close_index called but generate_index is false",
+            ));
+        }
+        self.close(true)
+    }
+
+    fn close(&mut self, build_index: bool) -> io::Result<(W, Vec<u8>)> {
         self.check_err()?;
         self.flush_ibuf()?;
         // EOF chunk; an empty stream is this chunk alone, as Go writes it.
@@ -508,7 +532,11 @@ impl<W: Write + Send + 'static> MtWriter<W> {
 
         // A failed send means the writer thread already stopped on an error,
         // which `finish_rx` reports.
-        let _ = self.order_tx.take().unwrap().send(OrderItem::Finish);
+        let _ = self
+            .order_tx
+            .take()
+            .unwrap()
+            .send(OrderItem::Finish(build_index));
         let res = match self.finish_rx.recv() {
             Ok(res) => res,
             Err(_) => Err(io::Error::other("writer thread did not return W")),
@@ -798,7 +826,7 @@ fn is_error_marker(hdr: &[u8; CHUNK_HEADER_SIZE + CHECKSUM_SIZE]) -> bool {
 fn writer_loop<W: Write + Send + 'static>(
     mut w: W,
     order_rx: Receiver<OrderItem>,
-    finish_tx: SyncSender<io::Result<W>>,
+    finish_tx: SyncSender<io::Result<(W, Vec<u8>)>>,
     err_slot: Arc<Mutex<Option<io::Error>>>,
     input_pool: Arc<BufferPool>,
     obuf_pool: Arc<BufferPool>,
@@ -810,11 +838,11 @@ fn writer_loop<W: Write + Send + 'static>(
     let mut comp_written: u64 = 0;
     let mut uncomp_written: u64 = 0;
 
-    let res = (|| -> io::Result<()> {
-        loop {
+    let res = (|| -> io::Result<Vec<u8>> {
+        let build_index = loop {
             // Closed without `Finish`: the MtWriter was dropped.
             let Ok(item) = order_rx.recv() else {
-                return Ok(());
+                return Ok(Vec::new());
             };
             match item {
                 OrderItem::Raw(bytes) => {
@@ -825,7 +853,7 @@ fn writer_loop<W: Write + Send + 'static>(
                     w.flush().map_err(|e| record(&err_slot, e))?;
                     let _ = done.send(());
                 }
-                OrderItem::Finish => break,
+                OrderItem::Finish(build_index) => break build_index,
                 OrderItem::Block(rx) => match rx.recv() {
                     Ok(out) => {
                         if out.hdr.as_ref().is_some_and(is_error_marker) {
@@ -877,13 +905,15 @@ fn writer_loop<W: Write + Send + 'static>(
                     }
                 },
             }
-        }
+        };
         // Wire order from here matches Go's `writer.go:closeIndex`:
         // data → EOF → padding → index.  Padding is emitted *before*
         // the index but its size includes the index length, so the
         // total compressed size is aligned to `padding`.
         let mut idx_bytes = Vec::new();
-        if let Some(idx) = index.as_mut() {
+        if (build_index || append_index)
+            && let Some(idx) = index.as_mut()
+        {
             // `total_compressed` is bytes-before-index; if padding will
             // be added, store -1 (unknown) so seekers don't rely on it.
             let comp_total = if padding <= 1 {
@@ -895,8 +925,6 @@ fn writer_loop<W: Write + Send + 'static>(
                 .map_err(|e| record(&err_slot, e.into()))?;
             if append_index {
                 comp_written += idx_bytes.len() as u64;
-            } else {
-                idx_bytes.clear();
             }
         }
 
@@ -904,13 +932,13 @@ fn writer_loop<W: Write + Send + 'static>(
             emit_mt_padding(&mut w, &mut comp_written, padding, &err_slot)?;
         }
 
-        if !idx_bytes.is_empty() {
+        if append_index {
             w.write_all(&idx_bytes).map_err(|e| record(&err_slot, e))?;
         }
         w.flush().map_err(|e| record(&err_slot, e))?;
-        Ok(())
+        Ok(idx_bytes)
     })();
-    let payload = res.map(|_| w);
+    let payload = res.map(|idx_bytes| (w, idx_bytes));
     let _ = finish_tx.send(payload);
 }
 

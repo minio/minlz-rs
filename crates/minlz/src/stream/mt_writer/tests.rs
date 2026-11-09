@@ -552,6 +552,48 @@ fn mt_index_offsets_match_st_index_offsets() {
     }
 }
 
+#[test]
+#[cfg_attr(miri, ignore = "1 MiB stream is impractical under miri")]
+fn mt_close_index_matches_st_close_index() {
+    let payload: Vec<u8> = (0..(1 << 20))
+        .map(|i| ((i * 17) ^ (i >> 4)) as u8)
+        .collect();
+    let mut st = crate::stream::WriterBuilder::new()
+        .block_size(64 << 10)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    st.write_all(&payload).unwrap();
+    let st_idx = st.close_index().unwrap();
+    let build = || {
+        MtWriterBuilder::new()
+            .block_size(64 << 10)
+            .concurrency(4)
+            .build(Vec::<u8>::new())
+            .unwrap()
+    };
+    let mut mt = build();
+    mt.write_all(&payload).unwrap();
+    let (stream, mt_idx) = mt.close_index().unwrap();
+    assert_eq!(mt_idx, st_idx);
+    let mut plain = build();
+    plain.write_all(&payload).unwrap();
+    assert_eq!(
+        plain.finish().unwrap(),
+        stream,
+        "close_index changed the stream"
+    );
+
+    let off = MtWriterBuilder::new()
+        .concurrency(1)
+        .generate_index(false)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    assert_eq!(
+        off.close_index().unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
 // -------------------- engine reuse --------------------
 // Each test uses its own block size, so parallel tests never share an engine.
 
