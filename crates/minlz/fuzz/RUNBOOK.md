@@ -1,11 +1,13 @@
 # Fuzzing runbook
 
-The corpus-smoke unit tests under `cargo test --lib` already feed
-~3500 seeds from the Go repo through the decoder (SIMD blocks against
-the reference decoder) and the round-trip path in deterministic order,
-and the `*_seeded` tests run the SIMD and pivco targets' checks over
-their seeds and mutations of them.  This document is for actual
-fuzzing — i.e. coverage-guided random mutation on top of those seeds.
+Once the corpus is extracted (§1), the corpus-smoke unit tests under
+`cargo test --lib` feed ~3500 seeds from the Go repo through the
+decoder (SIMD blocks against the reference decoder) and the round-trip
+path in deterministic order; without it they print `skip:` and pass,
+as in CI's test job.  The `*_seeded` tests run the SIMD and pivco
+targets' checks over their seeds and mutations of them.  This document
+is for actual fuzzing — i.e. coverage-guided random mutation on top of
+those seeds.
 
 ## 0. One-time setup
 
@@ -185,9 +187,12 @@ cargo +nightly fuzz run decode_arbitrary fuzz/artifacts/decode_arbitrary/crash-d
 cargo +nightly fuzz tmin decode_arbitrary fuzz/artifacts/decode_arbitrary/crash-deadbeef
 ```
 
-Once minimised, add the bytes as a permanent regression seed under
-`corpus/decode_arbitrary/` and commit them — the next CI run will replay
-the case as part of the corpus-smoke unit tests, so the bug stays fixed.
+Once minimised, keep the bytes as a permanent regression: preferably a
+named unit test with the bytes inlined, like the other block
+regressions.  A seed under `corpus/decode_arbitrary/` also works, but
+`corpus/` is gitignored, so commit it with `git add -f`; CI's test job
+then replays it in the corpus-smoke unit tests, and the fuzz job at
+startup.
 
 ## 4. Coverage report (optional)
 

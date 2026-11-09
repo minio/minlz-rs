@@ -740,49 +740,6 @@ fn roundtrip_corpus_smoke() {
     );
 }
 
-/// Smoke test: encoder output must never exceed `max_encoded_len` for any
-/// seed.  This is the unit-test equivalent of the `max_encoded_len` fuzz.
-#[test]
-#[cfg_attr(
-    miri,
-    ignore = "thousands of seeds — fuzz the focused miri_decoder test instead"
-)]
-fn max_encoded_len_corpus_smoke() {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = manifest.join("fuzz/corpus/max_encoded_len");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        eprintln!("skip: corpus not extracted at {}", dir.display());
-        return;
-    };
-    let mut enc = Vec::new();
-    let mut count = 0usize;
-    for ent in entries.flatten() {
-        let Ok(bytes) = std::fs::read(ent.path()) else {
-            continue;
-        };
-        let Some(mel) = max_encoded_len(bytes.len()) else {
-            continue;
-        };
-        for &level in &[
-            Level::SuperFast,
-            Level::Fastest,
-            Level::Balanced,
-            Level::Smallest,
-        ] {
-            enc.clear();
-            encode(&mut enc, &bytes, level).expect("encode");
-            assert!(
-                enc.len() <= mel,
-                "level {level:?}: enc.len()={} mel={mel} input_len={}",
-                enc.len(),
-                bytes.len()
-            );
-        }
-        count += 1;
-    }
-    eprintln!("max_encoded_len_corpus_smoke: scanned {count} seeds");
-}
-
 /// Focused miri target: exercise the decoder's unsafe paths on a small,
 /// curated set of inputs that hits each tag class (literal, repeat,
 /// copy1, copy2, copy2-fused, copy3) at least once.  Designed to run
