@@ -168,7 +168,8 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }
     let start = Instant::now();
-    let mut enc = Vec::with_capacity(minlz::max_encoded_len(buf.len()).unwrap_or(buf.len() + 16));
+    // `encode` sizes `enc` with room past `max_encoded_len`, so pre-sizing to it reallocates.
+    let mut enc = Vec::new();
     match opts.level {
         Some(level) => minlz::encode(&mut enc, &buf, level).map_err(io::Error::other)?,
         // Go's encodeUncompressed; `Level` has no uncompressed variant.

@@ -58,7 +58,7 @@ fn run(name: &str, src: &[u8]) {
 
 fn run_at(name: &str, src: &[u8], level: Level) {
     let iters = pick_iters(src.len());
-    let mut enc = Vec::with_capacity(src.len() + 16);
+    let mut enc = Vec::new();
     let mut dec = Vec::with_capacity(src.len());
 
     // Warm-up.

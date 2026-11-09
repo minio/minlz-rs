@@ -268,7 +268,7 @@ fn bench_encode(c: &mut Criterion) {
         for &level in &levels {
             let id = BenchmarkId::new(*label, level_label(level));
             g.bench_with_input(id, &src, |b, src| {
-                let mut buf = Vec::with_capacity(src.len() + 16);
+                let mut buf = Vec::new();
                 b.iter(|| {
                     encode(&mut buf, src, level).expect("encode");
                 });
@@ -325,7 +325,7 @@ fn bench_snappy_encode(c: &mut Criterion) {
         for level in ENCODE_LEVELS {
             let id = BenchmarkId::new(tf.label, level_label(level));
             g.bench_with_input(id, &data, |b, data| {
-                let mut buf = Vec::with_capacity(data.len() + 16);
+                let mut buf = Vec::new();
                 b.iter(|| {
                     encode(&mut buf, data, level).expect("encode");
                 });

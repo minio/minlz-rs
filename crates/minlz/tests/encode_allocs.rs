@@ -19,7 +19,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use minlz::{Level, encode, max_encoded_len};
+use minlz::{Level, encode};
 
 thread_local! {
     static ALLOCS: Cell<usize> = const { Cell::new(0) };
@@ -115,7 +115,7 @@ fn counter_counts() {
 #[test]
 fn simd_encode_allocs() {
     let src = text();
-    let mut dst = Vec::with_capacity(max_encoded_len(src.len()).unwrap());
+    let mut dst = Vec::new();
     for n in [64 << 10, src.len()] {
         for l in [4, 5, 6, 7, 260, 261, 262] {
             let level = Level::try_from(l).unwrap();
@@ -130,7 +130,7 @@ fn simd_encode_allocs() {
 #[test]
 fn encode_allocs() {
     let src = text();
-    let mut dst = Vec::with_capacity(max_encoded_len(src.len()).unwrap());
+    let mut dst = Vec::new();
     for n in [1 << 10, 64 << 10, src.len()] {
         for level in [
             Level::SuperFast,
