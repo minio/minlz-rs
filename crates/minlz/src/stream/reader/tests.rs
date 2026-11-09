@@ -249,6 +249,109 @@ fn user_non_skippable_without_callback_errors() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 }
 
+/// Fails once with `kind` when it reaches `fail_at`, then serves the rest.
+struct FailOnce<'a> {
+    data: &'a [u8],
+    pos: usize,
+    fail_at: usize,
+    kind: io::ErrorKind,
+    failed: bool,
+}
+
+impl Read for FailOnce<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.failed && self.pos == self.fail_at {
+            self.failed = true;
+            return Err(io::Error::new(self.kind, std::fmt::Error));
+        }
+        let end = if self.failed {
+            self.data.len()
+        } else {
+            self.fail_at
+        };
+        let n = buf.len().min(end - self.pos);
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+impl Seek for FailOnce<'_> {
+    fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+        unreachable!("seeks within the decoded block do no source I/O")
+    }
+}
+
+/// A chunk header read that fails part-way must keep failing: a retry would
+/// parse the next header from the wrong offset.
+#[test]
+fn header_read_errors_are_sticky() {
+    let payload: Vec<u8> = (0..10_000u32).map(|i| (i * 7) as u8).collect();
+    let s = build_multi_block_stream(&payload, 4 << 10);
+    // Stream identifier (10 bytes), then the first chunk's header and body.
+    let first_len = s[11] as usize | (s[12] as usize) << 8 | (s[13] as usize) << 16;
+    let fail_at = 10 + 4 + first_len + 2;
+    for skip in [false, true] {
+        let inner = FailOnce {
+            data: &s,
+            pos: 0,
+            fail_at,
+            kind: io::ErrorKind::TimedOut,
+            failed: false,
+        };
+        let mut r = Reader::new(inner);
+        let mut buf = vec![0u8; 4096];
+        let err = if skip {
+            r.skip(4096 + 10).unwrap_err()
+        } else {
+            r.read_exact(&mut buf).unwrap();
+            r.read(&mut buf).unwrap_err()
+        };
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "skip={skip}");
+        assert!(
+            err.get_ref().is_some_and(|e| e.is::<std::fmt::Error>()),
+            "skip={skip}: first error keeps its payload"
+        );
+        let err = r.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "skip={skip}: retry");
+    }
+
+    // An `UnexpectedEof` from the source is corruption, as in a chunk body.
+    // Seeking clears a sticky `UnexpectedEof` without moving the source, so
+    // a read after a seek within the block would resume mid-header.
+    let idx = crate::index::index_stream(&s[..]).unwrap();
+    let inner = FailOnce {
+        data: &s,
+        pos: 0,
+        fail_at,
+        kind: io::ErrorKind::UnexpectedEof,
+        failed: false,
+    };
+    let mut rs = ReadSeeker::new(Reader::new(inner), &idx).unwrap();
+    let mut buf = vec![0u8; 4096];
+    rs.read_exact(&mut buf).unwrap();
+    let err = rs.read(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let err = rs.seek(SeekFrom::Start(0)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "seek");
+    let err = rs.read(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "read after seek");
+
+    // A truncated header after a complete stream must not turn into a
+    // clean EOF on retry.
+    let t = [&s[..], &[0xff, 0x06]].concat();
+    let mut r = Reader::new(Cursor::new(&t));
+    let err = r.read_to_end(&mut Vec::new()).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let err = r.read(&mut [0u8; 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let mut r = Reader::new(Cursor::new(&t));
+    let err = r.skip(payload.len() as u64 + 1).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "skip");
+    let err = r.read(&mut [0u8; 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "read after skip");
+}
+
 // -------------------- skippables --------------------
 
 #[test]
@@ -1740,5 +1843,40 @@ fn fuzz_stream_decode_seeded() {
             let tail = decode_to_end(dec).unwrap();
             assert!(tail == read[skip..], "skip mismatch");
         }
+    }
+}
+// -------------------- chunk body validation --------------------
+
+/// A compressed chunk has no `dlen == 0` literal form (only standalone
+/// blocks do), and its compressed bytes never exceed `dlen`.  Every decode
+/// path must reject both, including a skip that drops the whole chunk.
+#[test]
+fn rejects_chunk_with_zero_or_short_dlen() {
+    for (dlen, rest) in [(0u64, &b"hello world"[..]), (1, &[0xaa; 10][..])] {
+        let mut varint = [0u8; 10];
+        let n = put_uvarint(&mut varint, dlen);
+        let mut body = masked_crc32c(rest).to_le_bytes().to_vec();
+        body.extend_from_slice(&varint[..n]);
+        body.extend_from_slice(rest);
+        let mut s = make_stream_header(DEFAULT_BLOCK_SIZE, false).to_vec();
+        push_chunk(&mut s, CHUNK_TYPE_MINLZ_COMPRESSED_DATA, &body);
+        push_eof(&mut s, rest.len() as u64);
+
+        let err = decode_to_end(Reader::new(Cursor::new(&s))).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "dlen={dlen}: read");
+        let err = Reader::new(Cursor::new(&s)).skip(1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "dlen={dlen}: skip");
+        let err = Reader::new(Cursor::new(s.clone()))
+            .decode_concurrent(Vec::new(), 2)
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "dlen={dlen}: concurrent"
+        );
+        assert!(
+            crate::index_stream(Cursor::new(&s)).is_err(),
+            "dlen={dlen}: index"
+        );
     }
 }
