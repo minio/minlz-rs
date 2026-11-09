@@ -191,19 +191,19 @@ pub const HIST_SCRATCH: usize = 4 * 16384 + 64;
 
 /// Loads a little-endian value from `b[i..]`.
 #[inline(always)]
-pub fn load16(b: &[u8], i: usize) -> u16 {
+pub(super) fn load16(b: &[u8], i: usize) -> u16 {
     u16::from_le_bytes(b[i..i + 2].try_into().unwrap())
 }
 
 /// Loads a little-endian value from `b[i..]`.
 #[inline(always)]
-pub fn load64(b: &[u8], i: usize) -> u64 {
+pub(super) fn load64(b: &[u8], i: usize) -> u64 {
     u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
 }
 
 /// Stores `v` little-endian to `b[i..]`.
 #[inline(always)]
-pub fn store64(b: &mut [u8], i: usize, v: u64) {
+pub(super) fn store64(b: &mut [u8], i: usize, v: u64) {
     b[i..i + 8].copy_from_slice(&v.to_le_bytes());
 }
 
