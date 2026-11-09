@@ -659,6 +659,69 @@ fn same_file_output() {
     assert!(fs::read(dir.join("x.bin.out")).unwrap() == data);
 }
 
+/// Stdin redirected from the output (`mz c -o x - < x`) is refused like an `-o` naming the
+/// input file, as the output is truncated before stdin is read. Stdin from another file, a
+/// pipe or null still works.
+#[test]
+fn stdin_from_output_is_rejected() {
+    let data = sample_payload(15, 64 * 1024);
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-"], &data);
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &data);
+    for (args, input) in [
+        (&["c", "--cpu=1"][..], &data),
+        (&["c", "--cpu=2"], &data),
+        (&["c", "--block"], &data),
+        (&["d", "--cpu=1"], &stream),
+        (&["d", "--cpu=2"], &stream),
+        (&["d", "--block"], &block),
+    ] {
+        let dir = tmp_dir();
+        let x = dir.join("x");
+        fs::write(&x, input).unwrap();
+        // Existing outputs, so they are compared with stdin.
+        for f in ["y", "z", "n"] {
+            fs::write(dir.join(f), "old").unwrap();
+        }
+        let mz = |out: &str, stdin: Stdio| {
+            Command::new(mz_bin())
+                .args(args)
+                .args(["-q", "-o", out, "-"])
+                .current_dir(&dir)
+                .stdin(stdin)
+                .output()
+                .unwrap()
+        };
+        let res = mz("x", fs::File::open(&x).unwrap().into());
+        let stderr = String::from_utf8_lossy(&res.stderr);
+        assert!(
+            stderr.contains("input and output are the same file"),
+            "{args:?}: {stderr}"
+        );
+        assert!(fs::read(&x).unwrap() == *input, "{args:?}: input changed");
+
+        let res = mz("y", fs::File::open(&x).unwrap().into());
+        assert!(res.status.success(), "{args:?}: {res:?}");
+        let z = dir.join("z");
+        let piped: Vec<_> = args
+            .iter()
+            .chain(&["-q", "-o", z.to_str().unwrap(), "-"])
+            .copied()
+            .collect();
+        mz_pipe(&mz_bin(), &piped, input);
+        assert!(
+            fs::read(&z).unwrap() == fs::read(dir.join("y")).unwrap(),
+            "{args:?}: pipe"
+        );
+        // An empty stream is valid, an empty block is not.
+        let res = mz("n", Stdio::null());
+        assert_eq!(
+            res.status.success(),
+            args != ["d", "--block"],
+            "{args:?}: {res:?}"
+        );
+    }
+}
+
 /// `--rm` removes the input once the output is written and synced.
 #[test]
 fn rm_removes_input_after_output() {

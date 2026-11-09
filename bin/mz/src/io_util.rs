@@ -53,10 +53,10 @@ pub fn open_output(path: &Path) -> io::Result<Box<dyn Write>> {
 
 /// Rejects an output that is the input file: [`open_output`] would
 /// truncate it before the first read. This compares file identity, so
-/// path aliases, symlinks and hard links are all caught.
+/// path aliases, symlinks, hard links and stdin redirected from the
+/// output are all caught.
 pub fn check_not_input(input: &Path, output: &Path) -> io::Result<()> {
-    let stdio = Path::new("-");
-    if input != stdio && output != stdio && is_same_file(input, output) {
+    if output != Path::new("-") && is_file(output) && is_input(input, output) {
         return Err(io::Error::other("input and output are the same file"));
     }
     Ok(())
@@ -64,8 +64,15 @@ pub fn check_not_input(input: &Path, output: &Path) -> io::Result<()> {
 
 // Only regular files are compared: `same_file` opens both paths, and opening a FIFO blocks
 // until the other end appears. An output it can't open for reading can't be the input.
-fn is_same_file(a: &Path, b: &Path) -> bool {
-    is_file(a) && is_file(b) && matches!(same_file::is_same_file(a, b), Ok(true))
+fn is_input(input: &Path, output: &Path) -> bool {
+    let same = if input == Path::new("-") {
+        same_file::Handle::stdin().and_then(|h| Ok(h == same_file::Handle::from_path(output)?))
+    } else if is_file(input) {
+        same_file::is_same_file(input, output)
+    } else {
+        return false;
+    };
+    matches!(same, Ok(true))
 }
 
 /// Syncs the output to disk before `--rm` deletes the input, so a crash can't lose both.
