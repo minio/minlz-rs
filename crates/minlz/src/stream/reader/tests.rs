@@ -1288,6 +1288,34 @@ fn skip_then_decode_concurrent() {
     }
 }
 
+/// Ports `TestReaderS2AfterMinLZ` (`seek_simd_test.go`) with a MinLZ stream for the S2 one: a
+/// stream with larger blocks than the one before, and smaller ones again after it.
+/// `decode_concurrent` reuses buffers sized for one stream for the next.
+#[test]
+#[cfg_attr(miri, ignore = "1 MiB streams too slow for miri")]
+fn concat_larger_blocks() {
+    let (a, mut b) = (seek_test_data(200 << 10, 4), seek_test_data(600 << 10, 5));
+    // Uncompressed chunks larger than the first stream allows.
+    b[256 << 10..].copy_from_slice(&rand_bytes(3, 344 << 10));
+    let sa = seek_test_stream(block::Level::Balanced, &a);
+    let sb = write_stream(
+        &b,
+        WriterBuilder::new().block_size(256 << 10).append_index(),
+    );
+    let stream = [&sa[..], &sb, &sa].concat();
+    let want = [&a[..], &b, &a].concat();
+    let got = decode_to_end(Reader::new(&stream[..])).unwrap();
+    assert!(got == want, "Read");
+    for threads in [1, 4, 16] {
+        let got = Reader::new(&stream[..]).decode_concurrent(Vec::new(), threads);
+        assert!(got.unwrap().writer == want, "{threads} threads");
+    }
+    let skip = a.len() + (300 << 10);
+    let mut r = Reader::new(&stream[..]);
+    r.skip(skip as u64).unwrap();
+    assert!(decode_to_end(r).unwrap() == want[skip..], "Read after Skip");
+}
+
 // -------------------- SIMD chunks (ports of minlz_test.go, seek_simd_test.go) --------------------
 
 /// Go's `ErrCorrupt`: the stream's, or that of a block decode the stream error wraps.
