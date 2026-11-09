@@ -52,9 +52,15 @@ fuzz_target!(|data: &[u8]| {
         b.build(payload).unwrap()
     };
 
-    // 1) Single-threaded decoder.
+    // 1) Single-threaded decoder. Stream output is unbounded (an 18-byte chunk can decode to
+    //    8 MiB), so skip inputs that decode to more than MAX_OUT: they only cost memory and time,
+    //    and would trip libFuzzer's malloc limit and the deadlock guard below.
+    const MAX_OUT: u64 = 64 << 20;
     let mut out = Vec::new();
-    let read = reader().read_to_end(&mut out);
+    let read = reader().take(MAX_OUT + 1).read_to_end(&mut out);
+    if out.len() as u64 > MAX_OUT {
+        return;
+    }
     // 2) Multi-threaded decoder, with a wall-clock guard to catch
     //    pipeline deadlocks (libfuzzer's own 25s timeout also fires).
     let start = Instant::now();
