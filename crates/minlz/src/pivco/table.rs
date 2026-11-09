@@ -70,8 +70,8 @@ struct Open {
 }
 
 impl Table {
-    /// Builds the table from code lengths, which must be 0..[`MAX_CODE_LEN`] and form a
-    /// complete prefix code. A lone used symbol may have any length 1..MAX_CODE_LEN.
+    /// Builds the table from code lengths, which must be 0..=[`MAX_CODE_LEN`] and form a
+    /// complete prefix code. A lone used symbol may have any length 1..=MAX_CODE_LEN.
     /// On error the table is invalid.
     pub fn set_lengths(&mut self, lens: &[u8; 256]) -> Result<(), Error> {
         self.nsched = 0;
@@ -121,7 +121,7 @@ impl Table {
     }
 
     /// Returns the encoded size of a block with `h`, the counts of symbols 0 to h.len()-1,
-    /// at most 256, which must sum to 1..[`MAX_BLOCK_SIZE`](super::MAX_BLOCK_SIZE).
+    /// at most 256, which must sum to 1..=[`MAX_BLOCK_SIZE`](super::MAX_BLOCK_SIZE).
     /// It returns `None` if the table is not built or a counted symbol has no code.
     pub fn block_size(&self, h: &[u64]) -> Option<usize> {
         if !self.valid() {

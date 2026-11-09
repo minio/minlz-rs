@@ -43,7 +43,7 @@ use crate::cpu;
 
 /// One pre-order schedule record (upstream `pivco_sched_rec_t`).
 ///
-/// * Kind = `op & 3`; flat depth D = `op >> 2` (2..8).
+/// * Kind = `op & 3`; flat depth D = `op >> 2` (2..=8).
 /// * `param`: FULL/LEAF_LEFT/BOTH: largest rank of the left subtree (ranks > `param` go
 ///   right); FLAT: first rank of the subtree.
 /// * `right`: offset to the right child's record (FULL), 1 (LEAF_LEFT), 0 otherwise.
@@ -155,13 +155,15 @@ pub struct Program<'a> {
     pub arena: &'a mut [u8],
     /// Final output; writes are exact.
     pub dst: &'a mut [u8],
-    /// Rank-to-symbol table; `None` fails every flat op.
+    /// Rank-to-symbol table; `None` fails the flats that map codes through it (V512, V128,
+    /// NAT), not [`OP_COPY`].
     pub r2s: Option<&'a [u8; R2S_LEN]>,
 }
 
-/// Rank, right-output and bitmap staging slices passed to the encoder kernels must have at
-/// least n+`RANK_SLACK` (bitmaps: ceil(n/8)+`RANK_SLACK`) bytes; kernels may store junk
-/// there. Rank inputs and the in-place left outputs of [`Tier::part_full`] are exact.
+/// The `right` and `bm` slices passed to the partitions of n ranks must hold at least
+/// n+`RANK_SLACK` and ceil(n/8)+`RANK_SLACK` bytes; kernels may store junk in the slack.
+/// Ranks (gather output, partition and pack input) and the in-place left outputs of
+/// [`Tier::part_full`] are accessed exactly.
 pub const RANK_SLACK: usize = 64;
 /// [`Program::arena`] must extend this far past the last byte any op can address.
 pub const ARENA_SLACK: usize = 128;
@@ -358,8 +360,9 @@ impl Tier {
     }
 
     /// Runs `p.ops`. It returns `Err` with the index of the first op that is malformed
-    /// (unknown kind, D out of range, K not a multiple of its layout block, no R2S), out of
-    /// range of the slices, or whose bitmap popcount does not match its KR.
+    /// (unknown kind, D out of range, K not a multiple of its layout block, a lookup flat
+    /// without R2S), out of range of the slices, or whose bitmap popcount does not match its
+    /// KR.
     #[inline]
     pub fn exec(self, p: &mut Program<'_>) -> Result<(), usize> {
         match self {

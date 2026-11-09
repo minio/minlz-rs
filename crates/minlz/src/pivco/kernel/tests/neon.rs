@@ -101,9 +101,10 @@ fn neon_merge_guard() {
                 let mut gmem = page(alim + 15);
                 let mem = gmem.slice(alim + 15, true);
                 rand_bytes(&mut rng, mem);
-                // SAFETY: the slice claims ARENA_SLACK-15 bytes of the inaccessible page after
-                // mem, as Go's test does; only the kernel may touch them, and it faults if it
-                // reads past the 15. mem is not used again.
+                // SAFETY: deliberately not upheld: the slice claims ARENA_SLACK-15 bytes of the
+                // inaccessible page after mem, as Go's test does, which from_raw_parts_mut
+                // forbids. Only the kernel may touch them, and it faults if it reads past the
+                // 15; mem is not used again.
                 let arena = unsafe {
                     core::slice::from_raw_parts_mut(mem.as_mut_ptr(), alim + ARENA_SLACK)
                 };

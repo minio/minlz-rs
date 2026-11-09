@@ -15,7 +15,7 @@
 use super::kernel::{HIST_SCRATCH, KIND_BOTH, KIND_FLAT, KIND_LEAF_LEFT, RANK_SLACK, Tier};
 use super::{Error, MAX_BLOCK_SIZE, MAX_CODE_LEN, Table};
 
-/// One bitmap staging slot per depth of internal nodes, 0..MAX_CODE_LEN-1.
+/// One bitmap staging slot per depth of internal nodes, 0..MAX_CODE_LEN.
 const STAGE_SLOTS: usize = MAX_CODE_LEN;
 
 /// The shortest input that [`Encoder::histogram`] counts with a kernel: a plain loop beats

@@ -28,8 +28,9 @@ pub(super) struct Leaf {
 /// hist.len()-1, at most 256, limited to [`MAX_CODE_LEN`].
 ///
 /// A lone used symbol gets length 1. It returns false, with `lens` all zero, if `hist` is
-/// all zero. The lengths are upstream's wherever upstream is defined; it overruns an array
-/// when the unlimited Huffman tree is deeper than 63.
+/// all zero. The lengths are upstream's wherever upstream is defined; upstream overruns an
+/// array when the unlimited Huffman tree is deeper than 63, where these are still a
+/// complete code.
 pub fn build_lengths(hist: &[u64], lens: &mut [u8; 256]) -> bool {
     *lens = [0; 256];
     let mut leaves = [Leaf::default(); 256];
