@@ -70,7 +70,8 @@ use super::{MAX_LEN, OFF_TAB};
 /// loops, and [`Tier::usable`] reports it unusable so tests don't run them twice.
 ///
 /// A vector tier's arms call `#[target_feature]` loops without checking the CPU again, so a
-/// vector variant may only come from [`Tier::best`] or [`Tier::tiers`], which check it.
+/// vector variant may only run on a CPU with its features, as [`Tier::best`] and [`Tier::tiers`]
+/// check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tier {
     /// The Go loops and the SWAR stats, on every CPU.
@@ -268,9 +269,10 @@ impl Tier {
     ///
     /// # Safety
     ///
-    /// The tier comes from [`Tier::best`] or [`Tier::tiers`], c's counts are what its first n
-    /// tokens read (as `tok_stats`, `ll_stats` and `off_stats` count them), and the operations
-    /// keep [memory rules](self) 1 and 2. The vector loops trust all three; the Go loops panic.
+    /// The CPU has the tier's features (as [`Tier::best`] and [`Tier::tiers`] ensure), c's counts
+    /// are at least what its first n tokens read (as `tok_stats`, `ll_stats` and `off_stats`
+    /// count them), and the operations keep [memory rules](self) 1 and 2. The vector loops trust
+    /// all three; the Go loops panic.
     pub(super) unsafe fn exec(
         self,
         dst: &mut [u8],
@@ -324,7 +326,8 @@ impl Tier {
     ///
     /// # Safety
     ///
-    /// As for [`Tier::exec`], for operations k0 to k and stream positions cur.
+    /// As for [`Tier::exec`] with operations 0 to k, and cur are the stream positions after
+    /// operations 0 to k0 (see [`Chunk::head`]). The vector loops read from cur unchecked.
     #[allow(clippy::too_many_arguments)]
     pub(super) unsafe fn exec_flat(
         self,
@@ -513,8 +516,8 @@ impl Chunk<'_> {
 /// The CPU has the features of f's tier, and the operations keep memory rules 1 and 2: they
 /// end at least `SLACK` bytes before the end of dst, and lits is readable `SLACK` bytes past
 /// their literals. [`Chunk::run`] splits chunks so, and the decoder's literal buffer is longer
-/// than dst. c's counts are what its operations read. Rule 3 is checked here against those
-/// counts; rule 4 is the loops' own.
+/// than dst. c's counts are at least what its operations read. Rule 3 is checked here against
+/// those counts; rule 4 is the loops' own.
 #[allow(dead_code, reason = "called by the vector tiers")]
 pub(super) unsafe fn exec_vec(
     f: ExecFn,
@@ -580,7 +583,8 @@ pub(super) unsafe fn exec_raw_vec(
 ///
 /// # Safety
 ///
-/// As for [`exec_vec`].
+/// As for [`exec_vec`] with operations 0 to k, and cur are the stream positions after
+/// operations 0 to k0 (see [`Chunk::head`]).
 #[allow(dead_code, reason = "called by the vector tiers")]
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn exec_flat_vec(
@@ -616,7 +620,7 @@ pub(super) unsafe fn exec_flat_vec(
 ///
 /// # Safety
 ///
-/// As for [`exec_vec`].
+/// As for [`exec_flat_vec`].
 #[allow(dead_code, reason = "called by the vector tiers")]
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn exec_flat_raw_vec(

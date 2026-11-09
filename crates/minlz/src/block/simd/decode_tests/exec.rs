@@ -340,6 +340,42 @@ fn simd_exec_random() {
     });
 }
 
+/// Chunk::run's split hands Tier::exec counts above what the first k tokens read; the loops
+/// only need them to be at least that.
+#[test]
+fn simd_exec_split_counts() {
+    const N: usize = 100;
+    let (tok, ll, raw) = (vec![3u8; N + 7], vec![1u8; N + 8], [0u8; 8]);
+    let c = Chunk {
+        tok: &tok,
+        ll: &ll,
+        offc: &raw,
+        esc: &[],
+        raw: &raw,
+        n_tok: N,
+        n_ll: N,
+        n_off: 0,
+        n_esc: 0,
+        bits: 0,
+        delta: false,
+        flat: false,
+    };
+    let (k, cur) = c.split(N, N);
+    assert!(k < N && cur[0] < c.n_ll);
+    let (mut gd, mut gl) = (Buffer::new(1 << 16).unwrap(), Buffer::new(1 << 16).unwrap());
+    let lits: Vec<u8> = (0..N as u8).collect();
+    simd_tiers(|tier| {
+        let lits = at(&mut gl, &lits, N + SLACK);
+        let dst = at(&mut gd, &[], N);
+        let mut want = vec![0u8; N + SLACK];
+        let (mut st, mut sw) = ([0, 0, 1, 0], [0, 0, 1, 0]);
+        exec_go(&mut want, lits, &c, N, &mut sw);
+        // SAFETY: tier from simd_tiers; counts and out are exact; lits has SLACK past the literals.
+        unsafe { c.run(tier, dst, lits, N, &mut st) };
+        assert!(st == sw && dst[..N] == want[..N], "{tier:?}");
+    });
+}
+
 #[test]
 fn simd_stats() {
     simd_tiers(|tier| {
