@@ -64,7 +64,7 @@ use super::exec_avx2::{
     off_stats_avx2, tok_stats_avx2,
 };
 use super::{MAX_LEN, OFF_TAB};
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 use crate::pivco::kernel::Tier as PivcoTier;
 
 /// The exec loops and stats of a CPU tier: Go's `cpu` flags that `simdExec`, `simdExecFlat`
@@ -83,13 +83,13 @@ pub(crate) enum Tier {
     /// AVX-512 on x86-64 (Go `cpu.AVX512`).
     Avx512,
     /// The per-operation NEON loops on aarch64 (Go `cpu.NEON` without `simdBatchNEON`).
-    #[allow(dead_code, reason = "only tests run it, as Go's simdTiers")]
+    #[allow(dead_code, reason = "only tests and fuzzing run it, as Go's simdTiers")]
     Neon,
     /// The batched NEON loops on aarch64 (Go `simdBatchNEON`).
     NeonBatch,
 }
 
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 thread_local! {
     static FORCED: core::cell::Cell<Option<(Tier, PivcoTier)>> =
         const { core::cell::Cell::new(None) };
@@ -102,16 +102,50 @@ thread_local! {
 pub(crate) fn simd_tiers(mut f: impl FnMut(Tier, PivcoTier)) {
     for t in Tier::tiers() {
         for p in PivcoTier::tiers() {
-            FORCED.set(Some((t, p)));
-            f(t, p);
+            forced(t, p, || f(t, p));
         }
     }
-    FORCED.set(None);
 }
 
-/// The pivco tier [`simd_tiers`] forces. Without it, a decoder keeps the pivco tier it took on
-/// first use, and the thread's decoder outlives the rounds of simd_tiers.
-#[cfg(test)]
+/// Runs f once per usable tier, with the decodes of this thread forced to it and to the pivco
+/// tier of its instruction set, as Go's `FuzzDecodeSIMD` pairs them. That runs every tier of
+/// both: the pivco tier only changes how the streams are decoded, not what the exec loops get,
+/// so the other pairs of [`simd_tiers`] would only slow the fuzz targets.
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_tiers(mut f: impl FnMut(Tier, PivcoTier)) {
+    for t in Tier::tiers() {
+        let p = match t {
+            Tier::Go => PivcoTier::Generic,
+            Tier::Avx2 => PivcoTier::Avx2,
+            Tier::Avx512 => PivcoTier::Avx512,
+            Tier::Neon | Tier::NeonBatch => PivcoTier::Neon,
+        };
+        // The kernels of a tier the CPU lacks run the generic ones. Tests can't check this:
+        // cpu::Disabled of another test may hide a tier while they run.
+        assert!(PivcoTier::tiers().contains(&p), "{t:?}: no pivco {p:?}");
+        forced(t, p, || f(t, p));
+    }
+}
+
+/// Runs f with the decodes of this thread forced to t and p. It panics unless the last pivco
+/// block f decoded was set to run p, as Go's `simdTier` checks the tier of its coders.
+#[cfg(any(test, fuzzing))]
+fn forced(t: Tier, p: PivcoTier, f: impl FnOnce()) {
+    use crate::pivco::RAN;
+    FORCED.set(Some((t, p)));
+    RAN.set(None);
+    f();
+    FORCED.set(None);
+    let ran = RAN.get();
+    assert!(
+        ran.is_none_or(|r| r == p),
+        "{t:?}: pivco {ran:?} ran, forced {p:?}"
+    );
+}
+
+/// The pivco tier [`simd_tiers`] or `fuzz_tiers` forces. Without it, a decoder keeps the pivco
+/// tier it took on first use, and the thread's decoder outlives their rounds.
+#[cfg(any(test, fuzzing))]
 pub(super) fn forced_pivco() -> Option<PivcoTier> {
     FORCED.get().map(|(_, p)| p)
 }
@@ -257,10 +291,10 @@ impl Tier {
             .unwrap_or(Tier::Go)
     }
 
-    /// The tier of the decodes of this thread: [`Tier::best`], or in tests the tier
-    /// [`simd_tiers`] forces.
+    /// The tier of the decodes of this thread: [`Tier::best`], or in tests and fuzz targets the
+    /// tier [`simd_tiers`] or `fuzz_tiers` forces.
     pub(crate) fn current() -> Tier {
-        #[cfg(test)]
+        #[cfg(any(test, fuzzing))]
         if let Some((t, _)) = FORCED.get() {
             return t;
         }

@@ -9,7 +9,7 @@ in Rust).
 |----------------------------|--------------------------|-------------------------------------------------------------------------------|
 | `decode_arbitrary`         | `FuzzDecodeBlock`        | Block decoder never panics or reads OOB; garbage in dst does not change the output; `decoded_len` agrees; SIMD blocks decode as the reference decoder does, and on every exec tier. |
 | `roundtrip`                | `FuzzEncodingBlocks`     | Block encode at every classic and SIMD level (≤ 8 MiB) stays within `max_encoded_len` and decodes back, SIMD blocks on every exec tier and with the strict reference decoder. |
-| `simd_decode`              | `FuzzDecodeSIMD`         | SIMD block bodies with a valid header decode on every exec tier as the reference decoder does. |
+| `simd_decode`              | `FuzzDecodeSIMD`         | SIMD block bodies with a valid header decode on every exec tier, each with the pivco tier of its instruction set, as the reference decoder does. |
 | `stream_decode_arbitrary`  | `FuzzStreamDecode`       | Single- and multi-threaded stream decoders never panic / OOB / deadlock, agree, and `skip` matches. |
 | `stream_roundtrip`         | `FuzzStreamEncode`       | Stream `Writer` / `MtWriter` round-trip across concurrency × level × block size × write method, with padding and index. |
 | `index_load`               | —                        | `Index::load` and `remove_index_headers` parse arbitrary bytes safely; `append_to` → `load` round-trips. |

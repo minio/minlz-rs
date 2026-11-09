@@ -28,6 +28,13 @@ const ARENA_SIZE: usize = 2 * MAX_BLOCK_SIZE + ARENA_SLACK;
 /// One op per record plus two for each of at most 64 flats split by layout.
 const MAX_OPS: usize = 384;
 
+#[cfg(any(test, fuzzing))]
+thread_local! {
+    /// The tier the last block decoded on this thread was set to run, so that code that forces a
+    /// tier can check it. The kernels of a tier the CPU lacks run the generic ones.
+    pub(crate) static RAN: core::cell::Cell<Option<Tier>> = const { core::cell::Cell::new(None) };
+}
+
 /// Decodes blocks. The default value is ready to use and allocates its scratch on first
 /// use.
 #[derive(Default)]
@@ -50,7 +57,7 @@ impl Decoder {
 
     /// Makes the decoder run the kernels of `tier` from now on, as [`Decoder::with_tier`] does
     /// for a new one.
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn set_tier(&mut self, tier: Tier) {
         self.setup();
         self.tier = tier;
@@ -104,6 +111,8 @@ impl Decoder {
             dst,
             r2s: Some(&t.r2s),
         };
+        #[cfg(any(test, fuzzing))]
+        RAN.set(Some(self.tier));
         self.tier.exec(&mut p).map_err(|_| ERR_MERGE)
     }
 }

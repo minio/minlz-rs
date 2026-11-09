@@ -46,7 +46,7 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 [lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"
 missing_docs = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(minlz_readme)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(minlz_readme)", "cfg(fuzzing)"] }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

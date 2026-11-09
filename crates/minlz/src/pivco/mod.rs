@@ -43,6 +43,8 @@ mod tests;
 mod testutil;
 
 pub use decode::Decoder;
+#[cfg(any(test, fuzzing))]
+pub(crate) use decode::RAN;
 pub use encode::Encoder;
 pub use huffman::build_lengths;
 pub use table::Table;

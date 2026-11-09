@@ -141,7 +141,7 @@ impl Decoder {
 
     /// Decodes block into dst, and adds dst to the hasher if hash.
     pub(super) fn decode(&mut self, dst: &mut [u8], block: &[u8], hash: bool) -> Option<()> {
-        #[cfg(test)]
+        #[cfg(any(test, fuzzing))]
         if let Some(t) = super::exec::forced_pivco() {
             self.t.pv.set_tier(t);
         }

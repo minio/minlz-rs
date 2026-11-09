@@ -29,6 +29,8 @@ mod exec_avx512;
 mod exec_neon;
 
 pub(crate) use decode::{decode_simd, decode_simd_hash};
+#[cfg(fuzzing)]
+pub(crate) use exec::fuzz_tiers;
 
 use super::format::get_uvarint;
 use crate::Error;

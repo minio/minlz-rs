@@ -22,9 +22,6 @@ use std::fmt::Debug;
 
 use minlz::cpu;
 
-/// The best exec tier, then the lower ones, as Go's `simdTiers`.
-const TIERS: [u32; 3] = [0, cpu::AVX512, cpu::AVX512 | cpu::AVX2 | cpu::NEON];
-
 /// Reports whether `b` has a SIMD block header: a zero byte, then a size varint of at least
 /// 1 << 24, as the decoder tells them apart.
 pub fn is_simd(b: &[u8]) -> bool {
@@ -46,8 +43,8 @@ pub fn garbage(dst: &mut Vec<u8>, fill: u8) {
     dst.resize(dst.capacity(), fill);
 }
 
-/// Decodes `block` into `dst` on every exec tier, which must all return `want`. `ctx` names
-/// the case in failures.
+/// Decodes `block` into `dst` on every exec tier, each with the pivco tier of its instruction
+/// set, which must all return `want`. `ctx` names the case in failures.
 pub fn decode_tiers(
     ctx: &dyn Debug,
     block: &[u8],
@@ -55,22 +52,17 @@ pub fn decode_tiers(
     dst: &mut Vec<u8>,
     fill: u8,
 ) {
-    for mask in TIERS {
+    cpu::fuzz_tiers(|tiers| {
         garbage(dst, fill);
-        cpu::disable(mask);
         let got = minlz::decode(dst, block);
-        cpu::enable_all();
         assert_eq!(
             got.is_ok(),
             want.is_ok(),
-            "{ctx:?}, tiers without {mask:#x}: err {got:?}, want err {:?}",
+            "{ctx:?}, tiers {tiers:?}: err {got:?}, want err {:?}",
             want.err()
         );
         if let Ok(w) = want {
-            assert!(
-                dst[..] == *w,
-                "{ctx:?}, tiers without {mask:#x}: output mismatch"
-            );
+            assert!(dst[..] == *w, "{ctx:?}, tiers {tiers:?}: output mismatch");
         }
-    }
+    });
 }

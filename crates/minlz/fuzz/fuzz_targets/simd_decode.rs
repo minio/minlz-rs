@@ -14,9 +14,9 @@
 
 //! Go's `FuzzDecodeSIMD`: data[..4] is a little-endian `extra`, data[4..] a SIMD block body
 //! from its flags byte. The block gets a valid header of `body.len() + 4 + 64 + extra` bytes, and
-//! every exec tier must decode it as the reference decoder does. dst has exactly the decoded
-//! size as capacity, so writes past it are heap overflows under ASan, and is filled with garbage
-//! that varies with `extra` first.
+//! every exec tier, each with the pivco tier of its instruction set, must decode it as the
+//! reference decoder does. dst has exactly the decoded size as capacity, so writes past it are
+//! heap overflows under ASan, and is filled with garbage that varies with `extra` first.
 //!
 //! Seeds: SIMD blocks as `extra` and body, see `RUNBOOK.md` §1.
 //!

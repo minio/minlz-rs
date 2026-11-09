@@ -51,6 +51,15 @@ pub fn has(mask: u32) -> bool {
     detected() & mask == mask && DISABLED.load(Ordering::Relaxed) & mask == 0
 }
 
+/// Runs f once per SIMD exec tier this CPU has, with the SIMD block decodes of this thread forced
+/// to it and to the pivco tier of the same instruction set, and passes their names. It panics if
+/// the last pivco block f decoded was set to another pivco tier. Only fuzz builds have it: a
+/// decoder keeps the pivco tier it took on first use, so disabling features can't select one.
+#[cfg(fuzzing)]
+pub fn fuzz_tiers(mut f: impl FnMut(&dyn core::fmt::Debug)) {
+    crate::block::simd::fuzz_tiers(|t, p| f(&(t, p)));
+}
+
 /// Disables features for a test until dropped. Holders run one at a time, so a test that
 /// checks tier selection is not re-enabled by another; tests that only use tiers may see
 /// fewer while one is held, which they tolerate.
