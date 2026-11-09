@@ -894,6 +894,16 @@ fn validation_cases() -> Vec<VCase> {
             ..Default::default()
         },
         VCase {
+            name: "over-subscribed code lengths",
+            modes: coded(),
+            change: same(|e| {
+                let s = chunk0(e, TOK);
+                s.table.fill(0);
+                s.table[..2].copy_from_slice(&[0x11, 0x01]);
+            }),
+            ..Default::default()
+        },
+        VCase {
             name: "single value of length 2",
             modes: coded(),
             change: same(|e| {
