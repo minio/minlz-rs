@@ -1702,10 +1702,12 @@ fn l1_repeated_fragment_compresses() {
     }
 }
 
-/// `k` segments of 400 random bytes and `[a; 4]`, then 400 random bytes and
-/// `t` bytes of `k + 1`. Each segment costs L3 a 3-byte literal header and a
-/// repeat for its 404 bytes, so the output overtakes the input.
-fn l3_overflow_input(k: usize, t: usize) -> Vec<u8> {
+/// `k` segments of random bytes and `[a; 4]`, then 400 random bytes and `t`
+/// bytes of `k + 1` (Go's `bestEndInput`). The first segment has `first`
+/// random bytes, the others 400. Each segment costs L3 a 3-byte literal header
+/// and a repeat, a byte more than the segment, so the output overtakes the
+/// input.
+fn l3_overflow_input(k: usize, t: usize, first: usize) -> Vec<u8> {
     let mut rng = Xor64::new(0);
     let mut rnd = |avoid: u8| loop {
         let b = (rng.next() >> 24) as u8;
@@ -1715,7 +1717,8 @@ fn l3_overflow_input(k: usize, t: usize) -> Vec<u8> {
     };
     let mut v = Vec::new();
     for a in 1..=k as u8 {
-        v.extend((0..400).map(|_| rnd(a)));
+        let n = if a == 1 { first } else { 400 };
+        v.extend((0..n).map(|_| rnd(a)));
         v.extend_from_slice(&[a; 4]);
     }
     let last = k as u8 + 1;
@@ -1724,16 +1727,18 @@ fn l3_overflow_input(k: usize, t: usize) -> Vec<u8> {
     v
 }
 
-/// Regression: L3 (like Go's `encodeBlockBest`) checks its size limit before
-/// it writes a literal header and a repeat, so its last emission ended up to
-/// 9 bytes past `max_encoded_len`: heap corruption, and a truncated block
-/// from `encode`.
+/// Ports `TestEncodeBestEnd` (Go 024f459) with its `-short` grid. Regression:
+/// L3 (like Go's `encodeBlockBest`) checks its size limit before it writes a
+/// literal header and a repeat, so its last emission ended up to 9 bytes past
+/// `max_encoded_len`: heap corruption, and a truncated block from `encode`.
 #[test]
-#[cfg_attr(miri, ignore = "300 L3 encodes of 18 KB are impractical under miri")]
+#[cfg_attr(miri, ignore = "450 L3 inputs of 12-25 KB are impractical under miri")]
 fn l3_last_emission_stays_in_bounds() {
-    for k in [40, 43, 44, 45, 46] {
-        for t in 40..60 {
-            let src = l3_overflow_input(k, t);
+    use crate::stream::Reader;
+    use std::io::Read;
+    for k in (30..=60).step_by(3) {
+        for t in 30..=70 {
+            let src = l3_overflow_input(k, t, 400);
             let max = max_encoded_len(src.len()).unwrap();
             let mut enc = Vec::new();
             encode(&mut enc, &src, Level::Smallest).unwrap();
@@ -1756,6 +1761,20 @@ fn l3_last_emission_stays_in_bounds() {
             assert_eq!(tail, [0xaa; 8], "chunk body overflow k={k} t={t}");
         }
     }
+    // Blocks of the stream block size, whose output ends past and just inside the Writer's dst.
+    // The streams are Go 6009986's.
+    for (k, t, first, want) in [
+        (161, 166, 326, (65561, 0x50e4_0c46_9cc2_5c79)),
+        (161, 167, 325, (65561, 0x93e4_bb14_4301_9a5b)),
+    ] {
+        let src = l3_overflow_input(k, t, first);
+        for s in smallest_streams(&src, src.len()) {
+            assert_eq!((s.len(), crate::xxh3::hash(&s)), want, "k={k} t={t}");
+            let mut dec = Vec::new();
+            Reader::new(&s[..]).read_to_end(&mut dec).unwrap();
+            assert!(dec == src, "k={k} t={t}: round trip");
+        }
+    }
 }
 
 /// Go 024f459 emits L3's last emission through a scratch buffer and stores a block that doesn't
@@ -1767,7 +1786,7 @@ fn l3_last_emission_stays_in_bounds() {
 #[cfg_attr(miri, ignore = "L3 fills 10 MiB of tables per block")]
 fn l3_overflow_matches_go() {
     let sum = |b: &[u8]| (b.len(), crate::xxh3::hash(b));
-    let src = l3_overflow_input(45, 50);
+    let src = l3_overflow_input(45, 50, 400);
     assert_eq!(sum(&src), (18630, 0x0c1d_0932_851f_0c50));
     let mut enc = Vec::new();
     encode(&mut enc, &src, Level::Smallest).unwrap();
