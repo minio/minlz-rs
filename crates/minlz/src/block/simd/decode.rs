@@ -409,8 +409,9 @@ impl Tables {
             }
             n
         };
-        // Lengths are at most 15, so adding 15 to a byte doesn't carry out of it,
-        // and the sum of 8 lengths fits a byte.
+        // Lengths are at most 22, a class length of 15 plus an in-class length of up to 7, so
+        // adding 15 to a byte doesn't carry out of it, and the sum of 8 lengths fits a byte.
+        // used misses lengths above 16, but set_lengths rejects any length above 11.
         let (mut used, mut sum) = (0, 0);
         for i in (0..2 * CODE_BYTES[k.min(LITS)]).step_by(8) {
             let x = load64(&lens, i);
