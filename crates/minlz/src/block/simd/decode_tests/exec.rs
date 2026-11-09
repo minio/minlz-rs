@@ -29,7 +29,9 @@ const TEST_EXECS: [(&str, bool, ExecFn); 6] = [
     ("go", false, |_, dst, lits, c, n, st| {
         exec_go(dst, lits, c, n, st)
     }),
-    ("dispatch", false, |t, dst, lits, c, n, st| {
+    // SAFETY: the tiers come from simd_tiers, and the tests build chunks whose counts are what
+    // their tokens read, in buffers that keep the memory rules.
+    ("dispatch", false, |t, dst, lits, c, n, st| unsafe {
         t.exec(dst, lits, c, n, st)
     }),
     ("exact", false, test_exact),
@@ -38,7 +40,8 @@ const TEST_EXECS: [(&str, bool, ExecFn); 6] = [
     }),
     ("flat-dispatch", true, |t, dst, lits, c, n, st| {
         test_flat(dst, lits, c, n, st, |dst, lits, c, k0, k, cur, st| {
-            t.exec_flat(dst, lits, c, k0, k, cur, st)
+            // SAFETY: as for dispatch.
+            unsafe { t.exec_flat(dst, lits, c, k0, k, cur, st) }
         })
     }),
     ("flat-exact", true, test_exact),
@@ -315,11 +318,16 @@ fn simd_exec_random() {
                     &c,
                     n,
                     &mut sg,
-                    |dst, lits, c, k0, k, cur, st| tier.exec_flat(dst, lits, c, k0, k, cur, st),
+                    // SAFETY: tier comes from simd_tiers, the counts above are what the tokens
+                    // read, and want, got and lits have room past the operations.
+                    |dst, lits, c, k0, k, cur, st| unsafe {
+                        tier.exec_flat(dst, lits, c, k0, k, cur, st)
+                    },
                 );
             } else {
                 exec_go(&mut want, &lits, &c, n, &mut sw);
-                tier.exec(&mut got, &lits, &c, n, &mut sg);
+                // SAFETY: as above.
+                unsafe { tier.exec(&mut got, &lits, &c, n, &mut sg) };
             }
             assert!(
                 sw == sg && want[d0..sw[0]] == got[d0..sw[0]],

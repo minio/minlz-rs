@@ -274,7 +274,10 @@ impl Decoder {
                 self.lits.fill(&mut self.t, lr, st[1], need, dst.len())?;
             }
             let d = st[0];
-            c.run(tier, dst, &self.lits.buf, out, st);
+            // SAFETY: the tier comes from Tier::current, the stats above counted c's streams and
+            // out, and the literal buffer has PAD bytes past dst.len(), which the literals used
+            // never pass.
+            unsafe { c.run(tier, dst, &self.lits.buf, out, st) };
             // Chunks only use more literals than are decoded once the literal blocks run out.
             if st[3] != 0 || st[1] > self.lits.n {
                 return None;
@@ -521,7 +524,13 @@ pub(super) fn off_stats(tier: Tier, offc: &[u8]) -> (usize, bool) {
 
 impl Chunk<'_> {
     /// Executes the operations of c, which output out bytes.
-    pub(super) fn run(
+    ///
+    /// # Safety
+    ///
+    /// tier comes from [`Tier::best`] or [`Tier::tiers`], c's counts and out are what its
+    /// tokens read and output (as `tok_stats`, `ll_stats` and `off_stats` count them), and lits
+    /// is readable [`SLACK`] bytes past the literals they use.
+    pub(super) unsafe fn run(
         &self,
         tier: Tier,
         dst: &mut [u8],
@@ -536,7 +545,8 @@ impl Chunk<'_> {
         }
         if !self.flat {
             if k > 0 {
-                tier.exec(dst, lits, self, k, st);
+                // SAFETY: the caller's (see # Safety); the split keeps rule 1.
+                unsafe { tier.exec(dst, lits, self, k, st) };
             }
         } else if k > 0 {
             // Before position MAX_LEN, clamping can still make a match overlap, or a delta
@@ -547,7 +557,8 @@ impl Chunk<'_> {
                 exec_exact(dst, lits, self, 0, k0, [0; 4], st);
             }
             if k > k0 {
-                tier.exec_flat(dst, lits, self, k0, k, cur0, st);
+                // SAFETY: as for tier.exec.
+                unsafe { tier.exec_flat(dst, lits, self, k0, k, cur0, st) };
             }
         }
         debug_assert!(k == 0 || st[0] + SLACK <= dst.len());

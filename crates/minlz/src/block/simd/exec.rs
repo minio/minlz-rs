@@ -265,7 +265,13 @@ impl Tier {
     }
 
     /// Runs the first n operations of c (Go `simdExec`). See [`exec_go`].
-    pub(super) fn exec(
+    ///
+    /// # Safety
+    ///
+    /// The tier comes from [`Tier::best`] or [`Tier::tiers`], c's counts are what its first n
+    /// tokens read (as `tok_stats`, `ll_stats` and `off_stats` count them), and the operations
+    /// keep [memory rules](self) 1 and 2. The vector loops trust all three; the Go loops panic.
+    pub(super) unsafe fn exec(
         self,
         dst: &mut [u8],
         lits: &[u8],
@@ -282,8 +288,7 @@ impl Tier {
                 } else {
                     exec_avx512
                 };
-                // SAFETY: the tier comes from Tier::best or Tier::tiers, which checked the
-                // CPU, and Chunk::run keeps memory rules 1 and 2.
+                // SAFETY: the caller keeps the CPU and memory rules (see # Safety).
                 unsafe { exec_raw_vec(f, dst, lits, c, n, st) }
             }
             #[cfg(not(all(target_arch = "x86_64", not(miri))))]
@@ -291,7 +296,7 @@ impl Tier {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             Tier::Avx2 => {
                 let f: ExecFn = if c.delta { exec_delta_avx2 } else { exec_avx2 };
-                // SAFETY: the tier is usable (see Tier), and Chunk::run keeps the memory rules.
+                // SAFETY: as for Avx512.
                 unsafe { exec_vec(f, dst, lits, c, n, st) }
             }
             #[cfg(not(all(target_arch = "x86_64", not(miri))))]
@@ -305,7 +310,7 @@ impl Tier {
                     (_, true) => exec_delta_neon,
                     (_, false) => exec_neon,
                 };
-                // SAFETY: the tier is usable (see Tier), and Chunk::run keeps rules 1 and 2.
+                // SAFETY: as for Avx512.
                 unsafe { exec_vec(f, dst, lits, c, n, st) }
             }
             #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
@@ -316,8 +321,12 @@ impl Tier {
 
     /// Runs operations k0 to k of c, which has the no-overlap flag, from stream positions cur
     /// (Go `simdExecFlat`). See [`exec_flat_go`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Tier::exec`], for operations k0 to k and stream positions cur.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn exec_flat(
+    pub(super) unsafe fn exec_flat(
         self,
         dst: &mut [u8],
         lits: &[u8],
@@ -336,7 +345,7 @@ impl Tier {
                 } else {
                     exec_flat_avx512
                 };
-                // SAFETY: as in Tier::exec.
+                // SAFETY: the caller keeps the CPU and memory rules (see # Safety).
                 unsafe { exec_flat_raw_vec(f, dst, lits, c, k0, k, cur, st) }
             }
             #[cfg(not(all(target_arch = "x86_64", not(miri))))]
@@ -504,7 +513,8 @@ impl Chunk<'_> {
 /// The CPU has the features of f's tier, and the operations keep memory rules 1 and 2: they
 /// end at least `SLACK` bytes before the end of dst, and lits is readable `SLACK` bytes past
 /// their literals. [`Chunk::run`] splits chunks so, and the decoder's literal buffer is longer
-/// than dst. Rule 3 is checked here; rule 4 is the loops' own.
+/// than dst. c's counts are what its operations read. Rule 3 is checked here against those
+/// counts; rule 4 is the loops' own.
 #[allow(dead_code, reason = "called by the vector tiers")]
 pub(super) unsafe fn exec_vec(
     f: ExecFn,
@@ -516,7 +526,8 @@ pub(super) unsafe fn exec_vec(
 ) {
     assert!(n <= c.n_tok && c.readable() && st[1] <= lits.len() && st[0] <= dst.len());
     // SAFETY: the pointers cover their slices, which keep the memory rules: the streams are
-    // checked above, and dst and lits by the caller (see # Safety).
+    // checked above against c's counts, and the counts, dst and lits are the caller's (see
+    // # Safety).
     unsafe {
         f(
             dst.as_mut_ptr(),
@@ -582,7 +593,7 @@ pub(super) unsafe fn exec_flat_vec(
     cur: [usize; 4],
     st: &mut [usize; 4],
 ) {
-    assert!(k0 <= k && k <= c.n_tok && c.readable() && st[1] <= lits.len());
+    assert!(k0 <= k && k <= c.n_tok && c.readable() && st[1] <= lits.len() && st[0] <= dst.len());
     assert!(cur[0] <= c.n_ll && cur[1] <= c.n_off && cur[2] <= c.n_esc && cur[3] <= c.bits);
     // SAFETY: as in exec_vec; the stream positions are inside the streams.
     unsafe {
@@ -618,7 +629,7 @@ pub(super) unsafe fn exec_flat_raw_vec(
     cur: [usize; 4],
     st: &mut [usize; 4],
 ) {
-    assert!(k0 <= k && k <= c.n_tok && c.readable() && st[1] <= lits.len());
+    assert!(k0 <= k && k <= c.n_tok && c.readable() && st[1] <= lits.len() && st[0] <= dst.len());
     assert!(cur[0] <= c.n_ll && cur[1] <= c.n_off && cur[2] <= c.n_esc && cur[3] <= c.bits);
     // SAFETY: as in exec_flat_vec.
     unsafe {

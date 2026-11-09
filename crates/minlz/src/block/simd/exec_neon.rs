@@ -875,9 +875,12 @@ mod tests {
             let mut st = [d0, l0, 1 + rng.intn(1 << 20), 0];
             let mut sg = st;
             if flat {
-                tier.exec_flat(dst, lits, &c, 0, n, [0; 4], &mut st);
+                // SAFETY: NEON is baseline on aarch64, the counts above are what the tokens
+                // read, and dst and lits end SLACK bytes past what exec_go uses.
+                unsafe { tier.exec_flat(dst, lits, &c, 0, n, [0; 4], &mut st) };
             } else {
-                tier.exec(dst, lits, &c, n, &mut st);
+                // SAFETY: as above.
+                unsafe { tier.exec(dst, lits, &c, n, &mut st) };
                 exec_go(dst, lits, &c, n, &mut sg);
             }
             assert!(
