@@ -172,3 +172,29 @@ fn go_mt_encoded_decodes_in_rust_mt() {
         assert_eq!(dec, payload, "cpu={cpu}");
     }
 }
+
+#[test]
+fn decode_concurrent_error_is_sticky() {
+    use std::io::{ErrorKind, Read};
+    let payload: Vec<u8> = (0..8u32 << 10)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
+    let mut stream = encode_mt(&payload, 2, Some(4 << 10));
+    // The CRC of the first data chunk, after the 10-byte stream identifier.
+    stream[14] ^= 0xff;
+    let mut reader = Reader::new(Cursor::new(stream));
+    let err = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap_err();
+    assert_eq!(err.to_string(), "minlz: CRC mismatch");
+    // The dispatcher read past the bad chunk, so later calls must not resume.
+    assert_eq!(
+        reader.read(&mut [0; 1]).unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(
+        reader
+            .decode_concurrent(Vec::<u8>::new(), 4)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidData
+    );
+}

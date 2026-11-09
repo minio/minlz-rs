@@ -410,6 +410,7 @@ impl<R: Read> Reader<R> {
     /// Must not be mixed with [`Read::read`] / [`std::io::BufRead::fill_buf`]
     /// on the same reader — calling this after consuming bytes via the
     /// single-threaded path returns [`io::ErrorKind::InvalidInput`].
+    /// An error from decoding or writing is sticky: later reads return it too.
     ///
     /// `threads >= 1` is required; `1` still spins up the MT pipeline (one
     /// worker) — use [`Read::read`] for the lowest-overhead single-threaded
@@ -439,7 +440,7 @@ impl<R: Read> Reader<R> {
         if let Some(err) = &self.err {
             return Err(clone_io_err(err));
         }
-        super::mt_reader::decode_concurrent_into(self, w, threads)
+        super::mt_reader::decode_concurrent_into(self, w, threads).or_else(|e| self.set_io_err(e))
     }
 }
 
