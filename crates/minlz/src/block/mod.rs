@@ -76,50 +76,51 @@ pub(crate) const ENCODE_SLACK: usize = 16;
 
 /// Compression level for [`encode`].
 ///
-/// The levels map to the Go API's int levels (`LevelFastest = 1`, …) with [`i32::from`] and
-/// [`Level::try_from`].
+/// The discriminants are the Go API's int levels (`LevelFastest = 1`, …), so `level as i32`
+/// and [`i32::from`] give Go's level, and [`Level::try_from`] converts back.
 ///
 /// The SIMD levels write SIMD blocks, which need a decoder for MinLZ format specification v1.1
 /// or later; streams store them as SIMD chunks (`SPEC.md` 4.5B). SIMD blocks typically compress
 /// better than classic ones, and decompress faster on platforms with SIMD when blocks are 64 KiB
 /// or more. See [SIMD blocks](crate::block#simd-blocks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
 pub enum Level {
     /// The fastest compression level. It takes significant shortcuts and usually compresses
     /// much worse; use it only if [`Level::Fastest`] is confirmed to be too slow.
     /// Maps to Go's `LevelSuperFast` (-1) / `encodeFastBlockGo`.
-    SuperFast,
+    SuperFast = -1,
     /// Single-pass with a 15-bit (or 13-bit for ≤64 KiB inputs) hash table.
     /// Maps to Go's `LevelFastest` / `encodeBlockGo`.
-    Fastest,
+    Fastest = 1,
     /// Two-table encoder.  Maps to Go's `LevelBalanced` / `encodeBlockBetterGo`.
-    Balanced,
+    Balanced = 2,
     /// Multi-candidate, size-scored encoder.  Maps to Go's
     /// `LevelSmallest` / `encodeBlockBest`.
-    Smallest,
+    Smallest = 3,
     /// The fastest SIMD compression level.
     /// It takes shortcuts that cost compression; use it only if [`Level::FastestSimd`] is
     /// confirmed to be too slow.
     /// Go's `LevelSuperFastSIMD` (4).
-    SuperFastSimd,
+    SuperFastSimd = 4,
     /// Fast SIMD compression with a good ratio, the SIMD counterpart of [`Level::Fastest`].
     /// Go's `LevelFastestSIMD` (5).
-    FastestSimd,
+    FastestSimd = 5,
     /// A balance between compression and speed, the SIMD counterpart of [`Level::Balanced`].
     /// This is targeted to be approximately half the speed of [`Level::FastestSimd`].
     /// Go's `LevelBalancedSIMD` (6).
-    BalancedSimd,
+    BalancedSimd = 6,
     /// Will attempt the best possible compression, the SIMD counterpart of [`Level::Smallest`].
     /// There is no speed target for this level. It always tries both plain and delta literals.
     /// Go's `LevelSmallestSIMD` (7).
-    SmallestSimd,
+    SmallestSimd = 7,
     /// [`Level::SuperFastSimd`] with delta literals, which are mainly useful for binary encoded
     /// data and have a small decode penalty. Go's `LevelSuperFastSIMD | LevelSIMDDelta` (260).
-    SuperFastSimdDelta,
+    SuperFastSimdDelta = 4 | 256,
     /// [`Level::FastestSimd`] with delta literals. Go's `LevelFastestSIMD | LevelSIMDDelta` (261).
-    FastestSimdDelta,
+    FastestSimdDelta = 5 | 256,
     /// [`Level::BalancedSimd`] with delta literals. Go's `LevelBalancedSIMD | LevelSIMDDelta` (262).
-    BalancedSimdDelta,
+    BalancedSimdDelta = 6 | 256,
 }
 
 impl TryFrom<i32> for Level {
@@ -147,19 +148,7 @@ impl TryFrom<i32> for Level {
 
 impl From<Level> for i32 {
     fn from(l: Level) -> i32 {
-        match l {
-            Level::SuperFast => -1,
-            Level::Fastest => 1,
-            Level::Balanced => 2,
-            Level::Smallest => 3,
-            Level::SuperFastSimd => 4,
-            Level::FastestSimd => 5,
-            Level::BalancedSimd => 6,
-            Level::SmallestSimd => 7,
-            Level::SuperFastSimdDelta => 4 | 256,
-            Level::FastestSimdDelta => 5 | 256,
-            Level::BalancedSimdDelta => 6 | 256,
-        }
+        l as i32
     }
 }
 
