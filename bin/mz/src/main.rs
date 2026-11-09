@@ -107,6 +107,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("\nERROR: {e}");
+            io_util::remove_output();
             ExitCode::from(2)
         }
     }

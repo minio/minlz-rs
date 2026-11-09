@@ -18,7 +18,8 @@
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Resolve the worker-thread count from `Options::threads`, falling
 /// back to `available_parallelism()` and finally to 1.
@@ -47,8 +48,27 @@ pub fn open_output(path: &Path) -> io::Result<Box<dyn Write>> {
     if path == Path::new("-") {
         return Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, io::stdout())));
     }
+    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, create(path)?)))
+}
+
+/// The output file being written, which [`remove_output`] removes when the run fails, so a
+/// failed run leaves no partial output.
+static OUTPUT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn create(path: &Path) -> io::Result<File> {
     let file = File::create(path)?;
-    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, file)))
+    // Only a regular file is removed, never a device or a symlink given as output.
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        *OUTPUT.lock().unwrap() = Some(path.to_owned());
+    }
+    Ok(file)
+}
+
+/// Removes the output file of a failed run, if [`open_output`] created one.
+pub fn remove_output() {
+    if let Some(p) = OUTPUT.lock().unwrap().take() {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 /// Rejects an output that is the input file: [`open_output`] would
@@ -84,6 +104,8 @@ pub fn sync_output(path: &Path) -> io::Result<()> {
         // write access.
         File::options().write(true).open(path)?.sync_all()?;
     }
+    // The output is complete, and will be the only copy once the input is removed.
+    OUTPUT.lock().unwrap().take();
     Ok(())
 }
 
@@ -97,8 +119,7 @@ pub fn open_output_send(path: &Path) -> io::Result<Box<dyn Write + Send + 'stati
     if path == Path::new("-") {
         return Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, io::stdout())));
     }
-    let file = File::create(path)?;
-    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, file)))
+    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, create(path)?)))
 }
 
 /// `Read` adapter that counts the bytes read for progress reporting.

@@ -21,7 +21,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::symlink;
 #[cfg(windows)]
 use std::os::windows::fs::symlink_file as symlink;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -751,6 +751,84 @@ fn rm_removes_input_after_output() {
         assert!(!mid.exists(), "{d:?}");
         assert!(fs::read(&src).unwrap() == payload, "{c:?} {d:?}");
     }
+}
+
+/// Go's `TestOutputSafety` (cmd/mz/mz_test.go) without -safe and sidecars, which Rust lacks: a
+/// failed run removes the output it opened and keeps its input, and a run that succeeds keeps
+/// its output.
+#[test]
+fn failed_run_removes_output() {
+    // The input file and its content, the arguments before the input, whether the run
+    // succeeds, and the names left in the directory. An input file x/f makes x the input.
+    type Case<'a> = (&'a str, &'a [u8], &'a [&'a str], bool, &'a [&'a str]);
+    let data = sample_payload(16, 256 * 1024);
+    // Several blocks, so the decoders fail after writing some.
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "--block-size=64K", "-"], &data);
+    let corrupt = &stream[..stream.len() / 2];
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &data);
+    let corrupt_block = &block[..block.len() / 2];
+    let mut cases: Vec<Case> = vec![
+        ("x.mz", corrupt, &["d", "--cpu=1"], false, &["x.mz"]),
+        ("x.mz", corrupt, &["d", "--cpu=2", "--rm"], false, &["x.mz"]),
+        ("x.mzb", corrupt_block, &["d"], false, &["x.mzb"]),
+        // Reading a directory fails after the output is opened, except on Windows.
+        ("x/f", b"", &["c", "--cpu=1", "-o", "y"], false, &["x"]),
+        ("x/f", b"", &["c", "--cpu=2", "-o", "y"], false, &["x"]),
+        ("x", &data, &["c", "--rm", "-o", "nodir/x"], false, &["x"]),
+        ("x.mz", &stream, &["d", "--rm"], true, &["x"]),
+        ("x", &data, &["c", "--rm"], true, &["x.mz"]),
+    ];
+    // Writes to /dev/full fail after the output is opened, and a device is never removed.
+    let full = Path::new("/dev/full").exists();
+    if full {
+        cases.push(("x", &data, &["c", "--rm", "-o", "/dev/full"], false, &["x"]));
+        cases.push(("x.mz", &stream, &["d", "-o", "/dev/full"], false, &["x.mz"]));
+    }
+    // Go's os.DevNull: a run to the null device succeeds, so --rm removes the input.
+    const NULL: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    cases.push(("x", &data, &["c", "--rm", "-o", NULL], true, &[]));
+    cases.push(("x.mz", &stream, &["d", "--rm", "-o", NULL], true, &[]));
+    for (file, content, args, ok, want) in cases {
+        let dir = tmp_dir();
+        let p = dir.join(file);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, content).unwrap();
+        let res = Command::new(mz_bin())
+            .arg("-q")
+            .args(args)
+            .arg(file.split('/').next().unwrap())
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(res.status.success(), ok, "{args:?}: {res:?}");
+        assert!(
+            ok || fs::read(&p).unwrap() == content,
+            "{args:?}: input changed"
+        );
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, want, "{args:?}");
+    }
+    assert!(!full || Path::new("/dev/full").exists());
+
+    // A symlink given as output is kept, with its target.
+    let dir = tmp_dir();
+    fs::write(dir.join("x.mz"), corrupt).unwrap();
+    fs::write(dir.join("t"), "old").unwrap();
+    if let Err(e) = symlink("t", dir.join("y")) {
+        eprintln!("symlink skipped: {e}");
+        return;
+    }
+    let res = Command::new(mz_bin())
+        .args(["d", "-q", "-o", "y", "x.mz"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!res.status.success());
+    assert!(fs::symlink_metadata(dir.join("y")).unwrap().is_symlink());
+    assert!(dir.join("t").exists());
 }
 
 /// `-0 --block` writes Go's uncompressed block (SPEC 1.1: size 0 means the rest is literals):
