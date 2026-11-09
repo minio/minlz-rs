@@ -185,28 +185,14 @@ pub fn append_encoded(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<(),
         return Ok(());
     }
 
-    // Layout: [tag=0][varint(len)][compressed body].
+    // Layout: [tag=0][varint(len)][compressed body], or [tag=0][SIMD block].
     dst.push(0);
-    format::put_uvarint(dst, src.len() as u64);
-    let mut body_start = dst.len();
     // Reserve worst-case body length so the encoder can write via index.
-    let end = start + max;
-    dst.resize(end + ENCODE_SLACK, 0);
+    dst.resize(start + max + ENCODE_SLACK, 0);
 
-    let n = match level {
-        Level::SuperFast => encode_l0::encode_block(&mut dst[body_start..], src),
-        Level::Fastest => encode_l1::encode_block(&mut dst[body_start..], src),
-        Level::Balanced => encode_l2::encode_block(&mut dst[body_start..], src),
-        Level::Smallest => encode_l3::encode_block(&mut dst[body_start..], src),
-        _ => {
-            // A SIMD block has its own header after the indicator byte.
-            body_start = start + 1;
-            simd::encode_block_simd(&mut dst[body_start..end], src, level.into())
-        }
-    };
-
-    if n > 0 && body_start + n <= end {
-        dst.truncate(body_start + n);
+    let n = encode_body(&mut dst[start + 1..], src, level);
+    if n > 0 {
+        dst.truncate(start + 1 + n);
         Ok(())
     } else {
         // Not compressible: fall back to an uncompressed block.
@@ -228,25 +214,12 @@ pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, E
     dst.reserve(max + ENCODE_SLACK);
     let start = dst.len();
     dst.push(0);
-    format::put_uvarint(dst, src.len() as u64);
-    let mut body_start = dst.len();
-    let end = start + max;
-    dst.resize(end + ENCODE_SLACK, 0);
+    dst.resize(start + max + ENCODE_SLACK, 0);
 
-    let n = match level {
-        Level::SuperFast => encode_l0::encode_block(&mut dst[body_start..], src),
-        Level::Fastest => encode_l1::encode_block(&mut dst[body_start..], src),
-        Level::Balanced => encode_l2::encode_block(&mut dst[body_start..], src),
-        Level::Smallest => encode_l3::encode_block(&mut dst[body_start..], src),
-        _ => {
-            body_start = start + 1;
-            simd::encode_block_simd(&mut dst[body_start..end], src, level.into())
-        }
-    };
-
+    let n = encode_body(&mut dst[start + 1..], src, level);
     // Go's TryEncode also rejects "compressed >= src.len()" (see encode.go).
-    if n > 0 && (body_start - start) + n < src.len() {
-        dst.truncate(body_start + n);
+    if n > 0 && 1 + n < src.len() {
+        dst.truncate(start + 1 + n);
         Ok(true)
     } else {
         dst.truncate(start);
@@ -426,20 +399,24 @@ pub(crate) fn encode_chunk_body(
     if dst.len() < end {
         dst.resize(end, 0);
     }
-    let dst = &mut dst[start..end];
+    let n = encode_body(&mut dst[start..end], src, level);
+    Ok(if n < src.len() { n } else { 0 })
+}
+
+/// Writes `src` to `dst` as `varint(len) + body` at the classic levels, or as a SIMD block, and
+/// returns its size, or 0 if it doesn't compress into `dst` less its last [`ENCODE_SLACK`] bytes.
+fn encode_body(dst: &mut [u8], src: &[u8], level: Level) -> usize {
+    let room = dst.len() - ENCODE_SLACK;
     let encode_block = match level {
         Level::SuperFast => encode_l0::encode_block,
         Level::Fastest => encode_l1::encode_block,
         Level::Balanced => encode_l2::encode_block,
         Level::Smallest => encode_l3::encode_block,
-        _ => return Ok(simd::encode_block_simd(&mut dst[..max], src, level.into())),
+        _ => return simd::encode_block_simd(&mut dst[..room], src, level.into()),
     };
-    if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {
-        return Ok(0);
-    }
     let h = format::put_uvarint_at(dst, src.len() as u64);
     let n = encode_block(&mut dst[h..], src);
-    Ok(if n > 0 && h + n < src.len() { h + n } else { 0 })
+    if n > 0 && h + n <= room { h + n } else { 0 }
 }
 
 /// Decode a MinLZ stream-chunk body (`varint(dlen) + body`).  `dst` is
