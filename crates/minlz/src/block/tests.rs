@@ -1697,8 +1697,10 @@ fn l3_last_emission_stays_in_bounds() {
     for k in [40, 43, 44, 45, 46] {
         for t in 40..60 {
             let src = l3_overflow_input(k, t);
+            let max = max_encoded_len(src.len()).unwrap();
             let mut enc = Vec::new();
             encode(&mut enc, &src, Level::Smallest).unwrap();
+            assert!(enc.len() <= max, "k={k} t={t}: {} > {max}", enc.len());
             let mut out = Vec::new();
             decode(&mut out, &enc).unwrap();
             assert!(out == src, "k={k} t={t}");
@@ -1707,7 +1709,6 @@ fn l3_last_emission_stays_in_bounds() {
                 decode(&mut out, &tried).unwrap();
                 assert!(out == src, "try_encode k={k} t={t}");
             }
-            let max = max_encoded_len(src.len()).unwrap();
             let mut body = vec![0xaa; max + 64];
             body.truncate(max);
             let n = encode_chunk_body(&mut body, 0, &src, Level::Smallest).unwrap();
