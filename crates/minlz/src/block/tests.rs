@@ -1705,3 +1705,13 @@ fn l3_last_emission_stays_in_bounds() {
         }
     }
 }
+
+/// The emitters write through unchecked stores; debug builds catch a store
+/// past `dst`, as they do for the loads.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "i + 4 <= b.len()")]
+fn emit_copy_short_dst_panics_in_debug() {
+    let mut buf = [0u8; 8];
+    emit::emit_copy(&mut buf[..1], 204_800, 4);
+}

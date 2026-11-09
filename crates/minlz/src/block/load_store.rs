@@ -74,6 +74,7 @@ pub(super) unsafe fn load64(b: &[u8], i: usize) -> u64 {
 /// `i < b.len()` must hold.
 #[inline(always)]
 pub(super) unsafe fn store8(b: &mut [u8], i: usize, v: u8) {
+    debug_assert!(i < b.len());
     // SAFETY: caller guarantees `i < b.len()`.
     unsafe { *b.as_mut_ptr().add(i) = v };
 }
@@ -84,6 +85,7 @@ pub(super) unsafe fn store8(b: &mut [u8], i: usize, v: u8) {
 /// `i + 2 <= b.len()` must hold.
 #[inline(always)]
 pub(super) unsafe fn store16(b: &mut [u8], i: usize, v: u16) {
+    debug_assert!(i + 2 <= b.len());
     // SAFETY: see `store8`.
     unsafe {
         core::ptr::write_unaligned(b.as_mut_ptr().add(i) as *mut u16, v.to_le());
@@ -96,6 +98,7 @@ pub(super) unsafe fn store16(b: &mut [u8], i: usize, v: u16) {
 /// `i + 4 <= b.len()` must hold.
 #[inline(always)]
 pub(super) unsafe fn store32(b: &mut [u8], i: usize, v: u32) {
+    debug_assert!(i + 4 <= b.len());
     // SAFETY: see `store8`.
     unsafe {
         core::ptr::write_unaligned(b.as_mut_ptr().add(i) as *mut u32, v.to_le());
