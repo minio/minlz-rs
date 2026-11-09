@@ -35,24 +35,13 @@ pub(super) const SCRATCH_ALIGN: usize = 64;
 
 /// Codes blocks. The default value is ready to use and allocates its scratch, sized for
 /// [`MAX_BLOCK_SIZE`], on first use.
+#[derive(Default)]
 pub struct Encoder {
     pub(super) tier: Tier,
     /// Gather output and root partition input, then the right-child ranks of the walk,
     /// then the bitmap staging slots; empty until first use.
     slab: Vec<u8>,
-    hcount: [u32; 256],
     pub(super) hscratch: Vec<u8>,
-}
-
-impl Default for Encoder {
-    fn default() -> Self {
-        Encoder {
-            tier: Tier::Generic,
-            slab: Vec::new(),
-            hcount: [0; 256],
-            hscratch: Vec::new(),
-        }
-    }
 }
 
 impl Encoder {
@@ -74,7 +63,6 @@ impl Encoder {
     }
 
     /// Adds the byte counts of `src` to `hist`.
-    /// `src` must be shorter than 4 GiB: the kernels count in u32.
     pub fn histogram(&mut self, hist: &mut [u64; 256], src: &[u8]) {
         if src.len() < HIST_DIRECT {
             for &b in src {
@@ -87,11 +75,13 @@ impl Encoder {
         if self.hscratch.is_empty() && self.tier.hist_uses_scratch() {
             self.hscratch = vec![0; HIST_SCRATCH];
         }
-        self.hcount = [0; 256];
-        self.tier
-            .histogram(&mut self.hcount, src, &mut self.hscratch);
-        for (h, &v) in hist.iter_mut().zip(&self.hcount) {
-            *h = h.wrapping_add(u64::from(v));
+        // The kernels count in u32.
+        for s in src.chunks(u32::MAX as usize) {
+            let mut c = [0u32; 256];
+            self.tier.histogram(&mut c, s, &mut self.hscratch);
+            for (h, &v) in hist.iter_mut().zip(&c) {
+                *h = h.wrapping_add(u64::from(v));
+            }
         }
     }
 
