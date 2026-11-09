@@ -973,7 +973,7 @@ fn exec_bounds() {
     }
 }
 
-/// Checks the Op layout and the constants the vector tiers rely on.
+/// Checks Op keeps Go's kernel.Op layout, and the constants the vector tiers rely on.
 #[test]
 fn exec_layout() {
     let got = [
@@ -1463,7 +1463,6 @@ fn exec_page_guard_malformed() {
                 out: place(&mut rng, k, lim),
                 l: place(&mut rng, k, arena),
                 r: place(&mut rng, k, arena),
-                ..Op::default()
             });
         }
         let mut g = GuardedProgram::new(&mut rng, &src, dst_len, arena, iter % 2 == 0);

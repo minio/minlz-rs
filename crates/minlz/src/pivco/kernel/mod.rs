@@ -16,7 +16,7 @@
 //! `src/pivco_huffman_primitives.h`), per CPU tier.
 //!
 //! The types in this module are the contract the tiers implement; the vector tiers rely on
-//! the [`Op`] layout and the slack constants.
+//! the slack constants.
 //!
 //! Dispatch is a `match` on [`Tier`] with direct calls: each vector tier's arm checks its
 //! CPU features in its guard, and every other case runs the generic kernel.
@@ -103,7 +103,8 @@ pub const OP_COPY: u8 = 6;
 /// Makes `out` index [`Program::dst`] instead of [`Program::arena`].
 pub const FLAG_DST: u8 = 1;
 
-/// One decoder step. It is pointer-free and 32 bytes, laid out as Go's `kernel.Op`.
+/// One decoder step. It is pointer-free and 32 bytes, with the field order of Go's
+/// `kernel.Op` (whose assembly reads it by offset; the Rust tiers read fields by name).
 ///
 /// `l` and `r` index [`Program::arena`]. For flats, `p` is the first rank into
 /// [`Program::r2s`] and `bm` the start of the packed region; codes are masked to D bits
@@ -121,8 +122,6 @@ pub struct Op {
     pub p: u8,
     /// Right constant (CC).
     pub q: u8,
-    /// Zero; keeps the 32 bytes free of uninitialized padding.
-    pub pad: [u8; 3],
     /// Number of output symbols.
     pub k: u32,
     /// Number of set bits required in bitmap[0:K) (VV, CV).
