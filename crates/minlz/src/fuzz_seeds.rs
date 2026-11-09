@@ -18,7 +18,7 @@
 //! `fuzz/corpus/<target>/`, named by content hash:
 //!
 //! ```text
-//! MINLZ_TESTDATA=<Go repo>/testdata cargo test -p minlz --release --lib write_fuzz_seeds -- --ignored
+//! MINLZ_TESTDATA=<Go repo>/testdata cargo test -p minio-minlz --release --lib write_fuzz_seeds -- --ignored
 //! ```
 //!
 //! The raw inputs are Tom Sawyer and the inputs of the SIMD fixtures, and with `MINLZ_TESTDATA`

@@ -9,7 +9,7 @@ name = "cross_codec"
 path = "src/main.rs"
 
 [dependencies]
-minlz = { path = "../../crates/minlz" }
+minlz = { package = "minio-minlz", path = "../../crates/minlz" }
 snap = "1"
 lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
 flate2 = "1"

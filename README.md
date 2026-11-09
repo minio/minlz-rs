@@ -54,11 +54,12 @@ are **not** implemented.
 
 ## Quick start
 
-Add the dependency:
+Add the dependency.  The package is `minio-minlz`; the library is
+imported as `minlz`:
 
 ```toml
 [dependencies]
-minlz = { git = "https://github.com/minio/minlz-rs" }
+minio-minlz = "1.3"
 ```
 
 ### Compress / decompress a block
@@ -775,7 +776,7 @@ Build or install from a checkout of this repo:
 
 ```sh
 cargo install --path bin/mz            # installs to ~/.cargo/bin/mz
-cargo build --release -p mz            # or just build; binary at target/release/mz
+cargo build --release -p minio-mz      # or just build; binary at target/release/mz
 ```
 
 ```
@@ -812,12 +813,12 @@ implemented (versus the Go reference):
 ## Development
 
 ```sh
-cargo test --workspace --features minlz/reference  # 370+ unit, integration and doc tests
-cargo doc --no-deps                  # rustdoc
-cargo bench -p minlz --bench block   # criterion: block codec, classic and SIMD
-cargo bench -p minlz --bench stream  # criterion: stream codec (incl. MT and seek)
-cargo bench -p minlz --bench pivco   # criterion: SIMD entropy-coding kernels
-cargo bench -p minlz --bench xxh3    # criterion: XXH3
+cargo test --workspace --features minio-minlz/reference  # 370+ unit, integration and doc tests
+cargo doc --no-deps                        # rustdoc
+cargo bench -p minio-minlz --bench block   # criterion: block codec, classic and SIMD
+cargo bench -p minio-minlz --bench stream  # criterion: stream codec (incl. MT and seek)
+cargo bench -p minio-minlz --bench pivco   # criterion: SIMD entropy-coding kernels
+cargo bench -p minio-minlz --bench xxh3    # criterion: XXH3
 ```
 
 The `reference` feature builds a clean-room reference decoder that the
@@ -829,13 +830,13 @@ and are skipped otherwise:
 
 - `MINLZ_SIMDGO` — the Go helper in [`_helpers/simdgo/`](_helpers/simdgo/)
   (`go build` there; it expects the Go repository next to this one, as
-  `../minlz`).  `cargo test --release -p minlz --test simd_fixtures`
+  `../minlz`).  `cargo test --release -p minio-minlz --test simd_fixtures`
   then also encodes fresh inputs with Go at every SIMD level and
   compares the blocks byte for byte.
 - `MINLZ_GO_CMD` — a Go `mz` binary (`go build ./cmd/mz` in the Go
   repository), for the stream cross checks in
-  `cargo test -p minlz --features reference --lib stream` and the CLI
-  ones in `cargo test -p mz`.
+  `cargo test -p minio-minlz --features reference --lib stream` and the CLI
+  ones in `cargo test -p minio-mz`.
 - `MINLZ_TESTDATA` — the Go repository's `testdata` directory: more
   inputs for the encoder tests, and Go's fuzz seeds.
 

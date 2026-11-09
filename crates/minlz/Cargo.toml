@@ -1,6 +1,6 @@
 [package]
-name = "minlz"
-version = "0.1.1"
+name = "minio-minlz"
+version = "1.3.0"
 description = "MinLZ compression"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
+name = "minlz"
 path = "src/lib.rs"
 
 [features]

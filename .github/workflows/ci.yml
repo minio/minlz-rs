@@ -54,7 +54,7 @@ jobs:
         # tests under `bin/mz/tests/`.  Cross-impl tests gated on
         # `MINLZ_GO_CMD` self-skip cleanly when it's unset. The `reference`
         # feature runs the SIMD fixtures through the reference decoder.
-        run: cargo test --workspace --tests --features minlz/reference --verbose
+        run: cargo test --workspace --tests --features minio-minlz/reference --verbose
       - name: cargo test (debug, doctests)
         # `--doc` cannot be combined with other target flags, so run
         # in its own step.

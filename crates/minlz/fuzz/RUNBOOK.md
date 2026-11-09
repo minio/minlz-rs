@@ -59,7 +59,7 @@ pivco and `simd_decode` targets have no other seeds.
 cd minlz-rs
 # Absolute: the tests run in crates/minlz.
 MINLZ_TESTDATA="$PWD/../minlz/testdata" \
-  cargo test -p minlz --release --lib write_fuzz_seeds -- --ignored
+  cargo test -p minio-minlz --release --lib write_fuzz_seeds -- --ignored
 ```
 
 After the build it takes seconds.  With Go's zips it writes about 12k

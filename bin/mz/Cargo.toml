@@ -1,6 +1,6 @@
 [package]
-name = "mz"
-version = "0.1.0"
+name = "minio-mz"
+version = "1.3.0"
 description = "MinLZ command-line tool (Rust port)"
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ name = "mz"
 path = "src/main.rs"
 
 [dependencies]
-minlz = { path = "../../crates/minlz" }
+minlz = { package = "minio-minlz", version = "1.3.0", path = "../../crates/minlz" }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"

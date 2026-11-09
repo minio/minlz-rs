@@ -51,7 +51,7 @@ jobs:
       - name: Generate seeds
         run: |
           set -eu
-          cargo test -p minlz --release --lib write_fuzz_seeds -- --ignored
+          cargo test -p minio-minlz --release --lib write_fuzz_seeds -- --ignored
           tar --zstd -cf fuzz-seeds-generated.tar.zst -C crates/minlz/fuzz corpus
 
       - name: Upload generated seeds

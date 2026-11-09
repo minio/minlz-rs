@@ -15,7 +15,7 @@
 //! Port of Go's `kernel/avx2_test.go`. Go's TestAVX2AsmISA scans the generated assembly;
 //! here the compiler emits only the enabled `avx2,bmi2,popcnt` features unless the crate is
 //! built for an AVX-512 target CPU. To check a default build, emit its assembly
-//! (`cargo rustc --release -p minlz --lib -- --emit asm`) and search the
+//! (`cargo rustc --release -p minio-minlz --lib -- --emit asm`) and search the
 //! `pivco::kernel::avx2` functions for `zmm`, `%k0`..`%k7`, `xmm16`..`ymm31` and `{`
 //! (EVEX masking and broadcast): there are none.
 
