@@ -24,7 +24,7 @@ use super::{
     BLOCK_TYPE, CLASS_LENS, CODE_BYTES, CODE_LENS, CURRENT, DELTA, DELTA_LENS, ESC, LAYOUTS, LITS,
     LL, MAX_CHUNKS, MAX_LEN, MIN_SAVING, OFFC, TOK,
 };
-use crate::block::format::put_uvarint;
+use crate::block::format::{put_uvarint, put_uvarint_at};
 use crate::block::load_store::{load8, load64};
 use crate::pivco;
 
@@ -222,27 +222,18 @@ impl Out<'_> {
     }
 
     fn append_uvarint(&mut self, v: u64) {
-        let (b, n) = uvarint(v);
+        let mut b = [0u8; 10];
+        let n = put_uvarint_at(&mut b, v);
         self.append(&b[..n]);
     }
 
     /// appendRvarint
     fn append_rvarint(&mut self, v: u64) {
-        let (mut b, n) = uvarint(v);
+        let mut b = [0u8; 10];
+        let n = put_uvarint_at(&mut b, v);
         b[..n].reverse();
         self.append(&b[..n]);
     }
-}
-
-fn uvarint(mut v: u64) -> ([u8; 10], usize) {
-    let (mut b, mut n) = ([0u8; 10], 0);
-    while v >= 0x80 {
-        b[n] = v as u8 | 0x80;
-        v >>= 7;
-        n += 1;
-    }
-    b[n] = v as u8;
-    (b, n + 1)
 }
 
 /// Builds SIMD blocks, Go's `simdEncoder`. Parsers emit operations, which are coded a chunk at a
