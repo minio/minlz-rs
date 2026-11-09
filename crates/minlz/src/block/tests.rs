@@ -1758,6 +1758,51 @@ fn l3_last_emission_stays_in_bounds() {
     }
 }
 
+/// Go 024f459 emits L3's last emission through a scratch buffer and stores a block that doesn't
+/// fit `dst`, and its Writer stores blocks that don't shrink; Rust writes into [`ENCODE_SLACK`]
+/// and drops a block past `max_encoded_len` instead. Pins the block and streams of an input whose
+/// last emission ends a byte past `max_encoded_len` to Go 6009986's (the same with `-tags
+/// noasm`). With 64 KiB blocks it is a stream's last, short block, whose Go `dst` has room.
+#[test]
+#[cfg_attr(miri, ignore = "L3 fills 10 MiB of tables per block")]
+fn l3_overflow_matches_go() {
+    let sum = |b: &[u8]| (b.len(), crate::xxh3::hash(b));
+    let src = l3_overflow_input(45, 50);
+    assert_eq!(sum(&src), (18630, 0x0c1d_0932_851f_0c50));
+    let mut enc = Vec::new();
+    encode(&mut enc, &src, Level::Smallest).unwrap();
+    assert_eq!(sum(&enc), (18632, 0x411e_e327_1309_d717));
+    for (bs, want) in [
+        (4 << 10, (18649, 0x49e3_5464_7d7e_7477)),
+        (64 << 10, (18655, 0x33d7_b941_668b_5be0)),
+    ] {
+        let [st, mt] = smallest_streams(&src, bs);
+        assert_eq!(sum(&st), want, "Writer, block size {bs}");
+        assert_eq!(sum(&mt), want, "MtWriter, block size {bs}");
+    }
+}
+
+/// `src` written at [`Level::Smallest`] in `bs`-byte blocks by the `Writer`, and by
+/// `MtWriter::encode_buffer` (Go's `EncodeBuffer`) with concurrency 2.
+fn smallest_streams(src: &[u8], bs: usize) -> [Vec<u8>; 2] {
+    use crate::stream::{MtWriterBuilder, WriterBuilder};
+    use std::io::Write;
+    let mut st = WriterBuilder::new()
+        .block_size(bs)
+        .level(Level::Smallest)
+        .build(Vec::new())
+        .unwrap();
+    st.write_all(src).unwrap();
+    let mut mt = MtWriterBuilder::new()
+        .block_size(bs)
+        .level(Level::Smallest)
+        .concurrency(2)
+        .build(Vec::new())
+        .unwrap();
+    mt.encode_buffer(src).unwrap();
+    [st.finish().unwrap(), mt.finish().unwrap()]
+}
+
 /// A dst sized with `max_encoded_len`, as in Go, grows by `ENCODE_SLACK` on the first encode
 /// instead of doubling, and appending many blocks keeps amortized growth.
 #[test]
