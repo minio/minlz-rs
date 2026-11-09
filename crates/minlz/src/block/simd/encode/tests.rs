@@ -1143,7 +1143,8 @@ impl Rng {
 }
 
 /// Parses src with the Balanced parser, or with the 64 KB one, as parse does but without the size
-/// limit, and returns the repeat offset and the literals.
+/// limit, and returns the repeat offset and the literals (Go's `simdParseRun` with a Balanced
+/// parser).
 fn better_parse_run(src: &[u8], big: bool) -> (usize, Vec<u8>) {
     let mut out = vec![0; 2 * src.len() + (1 << 16)];
     let mut e = Encoder::new(&mut out);
@@ -1162,7 +1163,7 @@ fn better_parse_run(src: &[u8], big: bool) -> (usize, Vec<u8>) {
 
 /// Returns n random bytes with a copy of length bytes at offset off, whose ends Balanced's search
 /// checks, so it finds the copy unless a random match comes first. For other lengths only the bytes
-/// after the copy differ.
+/// after the copy differ (Go's `simdShortInput`).
 fn short_input(n: usize, off: usize, length: usize) -> Vec<u8> {
     // Not Go's seed n+off: its bytes differ here, and with n+off a short table entry of the copy's
     // source is overwritten before the search reaches the copy.
@@ -1187,8 +1188,9 @@ fn short_input(n: usize, off: usize, length: usize) -> Vec<u8> {
 
 /// Returns a block where Balanced finds a copy of 4 bytes at offset far+210 that is the repeat
 /// offset, which it keeps, where it passes over those at other offsets over its bound, and the
-/// position of the copy. The repeat check finds such copies at the positions that the search checks
-/// one after another, so this one is at a position that it reaches with a step of 2.
+/// position of the copy (Go's `simdFarRepeatInput`). The repeat check finds such copies at the
+/// positions that the search checks one after another, so this one is at a position that it
+/// reaches with a step of 2.
 fn far_repeat_input(rng: &mut Rng, far: usize) -> (Vec<u8>, usize) {
     // Zeros end an operation at q, so the search checks q to q+128, then every other position.
     let mut b = rng.random(16);
