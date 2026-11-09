@@ -144,9 +144,9 @@ fn dispatch_loop<R: Read>(
     compressed_pool: &Arc<BufferPool>,
     decoded_pool: &Arc<BufferPool>,
 ) -> io::Result<()> {
-    // Go's streamSize: blocks a skip passed over count toward the EOF size.  Only a
-    // ReadSeeker, which never decodes concurrently, leaves the stream start unknown.
-    let mut uncomp_emitted = reader.stream_size().unwrap_or_default();
+    // Go's streamSize: blocks a skip passed over count toward the EOF size.  Only an index jump
+    // makes it a range, and a ReadSeeker never decodes concurrently.
+    let mut uncomp_emitted = *reader.stream_size().start();
     let mut next_worker: usize = 0;
     loop {
         // Lock poison only panics if a worker thread already panicked while

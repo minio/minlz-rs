@@ -21,6 +21,7 @@
 //! Snappy/S2 fallback decoder paths are out of scope.
 
 use std::io::{self, BufRead, Read};
+use std::ops::RangeInclusive;
 
 use crate::Error as BlockError;
 use crate::block::{self, simd};
@@ -171,11 +172,12 @@ pub struct Reader<R> {
     /// The stream identifier allows SIMD chunks.
     pub(super) simd: bool,
     pub(super) expect_eof: bool,
-    /// Uncompressed offset where the current stream starts, which its EOF chunk's size counts
-    /// from.  `None` after an index jump skipped the stream identifier: the EOF size is then
-    /// only checked not to exceed the global offset, which misses a duplicated chunk and a
-    /// chunk dropped from a later concatenated stream.
-    pub(super) stream_start: Option<u64>,
+    /// Uncompressed offsets where the current stream may start, which its EOF chunk's size counts
+    /// from.  One offset, except after an index jump skipped the stream identifier: the stream
+    /// then starts at or before the jump target, so the EOF size is only checked to fit that
+    /// range.  That misses extra data no longer than the distance from the stream start to the
+    /// target, and missing data no longer than the stream start offset, so none in the first.
+    pub(super) stream_start: RangeInclusive<u64>,
     pub(super) ignore_stream_id: bool,
     pub(super) ignore_crc: bool,
     /// Sticky error.  Once set, every subsequent read returns it.
@@ -204,7 +206,7 @@ impl<R: Read> Reader<R> {
             header_read: b.ignore_stream_id,
             simd: b.ignore_stream_id,
             expect_eof: false,
-            stream_start: Some(0),
+            stream_start: 0..=0,
             ignore_stream_id: b.ignore_stream_id,
             ignore_crc: b.ignore_crc,
             err: None,
@@ -224,7 +226,7 @@ impl<R: Read> Reader<R> {
         self.header_read = self.ignore_stream_id;
         self.simd = self.ignore_stream_id;
         self.expect_eof = false;
-        self.stream_start = Some(0);
+        self.stream_start = 0..=0;
         self.err = None;
     }
 
@@ -647,12 +649,7 @@ impl<R: Read> Reader<R> {
                 if n != chunk_len {
                     return Err(Error::Corrupt);
                 }
-                let bad = match self.stream_size() {
-                    Some(size) => size != want_size,
-                    // The stream starts at or after offset 0, so its size is at most the offset.
-                    None => want_size > self.block_start + self.decoded.len() as u64,
-                };
-                if bad {
+                if !self.stream_size().contains(&want_size) {
                     return Err(Error::Corrupt);
                 }
             }
@@ -660,14 +657,16 @@ impl<R: Read> Reader<R> {
         self.expect_eof = false;
         self.header_read = false;
         // An EOF chunk with no stream identifier since this one is an empty stream.
-        self.stream_start = Some(self.block_start + self.decoded.len() as u64);
+        let end = self.block_start + self.decoded.len() as u64;
+        self.stream_start = end..=end;
         Ok(())
     }
 
-    /// The decoded size of the current stream, which an EOF chunk must match, if its start is
-    /// known.
-    pub(super) fn stream_size(&self) -> Option<u64> {
-        Some(self.block_start + self.decoded.len() as u64 - self.stream_start?)
+    /// The decoded sizes of the current stream that an EOF chunk may declare: one, unless an
+    /// index jump left its start a range.
+    pub(super) fn stream_size(&self) -> RangeInclusive<u64> {
+        let end = self.block_start + self.decoded.len() as u64;
+        end - self.stream_start.end()..=end - self.stream_start.start()
     }
 
     fn handle_stream_identifier(&mut self, chunk_len: usize) -> Result<()> {
@@ -692,7 +691,7 @@ impl<R: Read> Reader<R> {
         }
         self.max_block = new_max;
         self.block_start += self.decoded.len() as u64;
-        self.stream_start = Some(self.block_start);
+        self.stream_start = self.block_start..=self.block_start;
         self.decoded.clear();
         self.decoded_pos = 0;
         self.expect_eof = true;

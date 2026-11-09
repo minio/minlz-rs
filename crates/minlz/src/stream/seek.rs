@@ -39,7 +39,8 @@ const INDEX_HEADER: &[u8; 6] = b"s2idx\x00";
 /// the next identifier SIMD chunks and blocks up to
 /// [`ReaderBuilder::max_block_size`](super::ReaderBuilder::max_block_size)
 /// are accepted, and the stream size in the next EOF chunk is only checked
-/// not to exceed the uncompressed offset there.
+/// to lie between the size decoded from the index entry to there and the
+/// uncompressed offset there.
 ///
 /// `ReadSeeker` implements [`Read`] (forwarded to the inner reader) and
 /// [`Seek`] (interpreted as uncompressed offsets, never compressed).  See
@@ -174,7 +175,7 @@ impl<R: Read + Seek> ReadSeeker<R> {
             self.reader.r.seek(SeekFrom::Start(0))?;
             // Offsets count from the first stream, so restart the count at its start.
             self.reader.block_start = 0;
-            self.reader.stream_start = Some(0);
+            self.reader.stream_start = 0..=0;
             self.reader.decoded.clear();
             self.reader.decoded_pos = 0;
             let _ = self.reader.fill_buf()?;
@@ -195,10 +196,11 @@ impl<R: Read + Seek> ReadSeeker<R> {
 
         self.reader.r.seek(SeekFrom::Start(c_off))?;
         // The jump skips the identifier of the target stream, which may differ from the last one
-        // read: accept what any identifier allows.  The hash still verifies SIMD chunks.
+        // read: accept what any identifier allows.  The hash still verifies SIMD chunks.  The
+        // stream starts somewhere up to the target.
         self.reader.simd = true;
         self.reader.max_block = self.reader.max_block_user;
-        self.reader.stream_start = None;
+        self.reader.stream_start = 0..=u_off;
         // Hard-reset block state: clearing the decoded buffer makes the
         // next data chunk's `block_start += decoded.len()` a no-op, so
         // block_start at the new chunk equals u_off as desired.

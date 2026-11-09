@@ -1806,6 +1806,29 @@ fn read_seeker_jump_detects_dropped_chunk() {
     }
 }
 
+/// After an index jump the stream starts at or before the target, so its EOF size is at least
+/// what follows the target: extra data longer than the distance from the stream start to the
+/// target fails as it does for a sequential read.
+#[test]
+#[cfg_attr(miri, ignore = "768 KiB streams too slow for miri")]
+fn read_seeker_jump_detects_extra_data() {
+    let data = seek_test_data(640 << 10, 7);
+    let stream = seek_test_stream(block::Level::Balanced, &data);
+    let idx = crate::index::index_stream(&stream[..]).unwrap();
+    let off = find_chunk(&stream, 4, |t| {
+        t == CHUNK_TYPE_MINLZ_COMPRESSED_DATA || t == CHUNK_TYPE_UNCOMPRESSED_DATA
+    });
+    let chunk = &stream[off..off + CHUNK_HEADER_SIZE + read_chunk_len(&stream[off + 1..])];
+    // Two copies of a 64 KiB block after the jump target at 64 KiB.
+    let dup = [&stream[..off], chunk, chunk, &stream[off..]].concat();
+    let e = decode_to_end(Reader::new(&dup[..])).unwrap_err();
+    assert!(is_corrupt(&e), "Reader: {e}");
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&dup)), &idx).unwrap();
+    rs.seek(SeekFrom::Start((1 << 16) + 5)).unwrap();
+    let e = rs.read_to_end(&mut Vec::new()).unwrap_err();
+    assert!(is_corrupt(&e), "ReadSeeker: {e}");
+}
+
 /// What an index jump leaves unknown about the stream start ends at the next stream identifier,
 /// not only at an EOF chunk: the next stream's EOF size is checked exactly even when the
 /// jumped-into stream has no EOF chunk.
