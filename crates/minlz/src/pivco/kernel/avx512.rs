@@ -1877,4 +1877,19 @@ mod tests {
             }
         }
     }
+
+    /// Without its scratch, the AVX-512 histogram falls back to the generic one (features may
+    /// be re-enabled between the caller's hist_uses_scratch check and the call).
+    #[test]
+    fn avx512_histogram_short_scratch() {
+        if !Tier::Avx512.hist_uses_scratch() {
+            return;
+        }
+        let mut src = vec![0u8; 100_000];
+        rand_bytes(&mut new_rng(), &mut src);
+        let (mut h, mut want) = ([0u32; 256], [0u32; 256]);
+        Tier::Generic.histogram(&mut want, &src, &mut []);
+        Tier::Avx512.histogram(&mut h, &src, &mut []);
+        assert!(h == want);
+    }
 }

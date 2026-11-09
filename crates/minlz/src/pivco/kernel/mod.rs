@@ -380,14 +380,15 @@ impl Tier {
     }
 
     /// Adds the byte counts of `src` to `h`. `scratch` must hold [`HIST_SCRATCH`] bytes if
-    /// [`Tier::hist_uses_scratch`], else it may be empty.
+    /// [`Tier::hist_uses_scratch`], else it may be empty. A shorter `scratch` runs the
+    /// generic histogram, as the features may be re-enabled after the caller checked.
     #[inline]
     pub fn histogram(self, h: &mut [u32; 256], src: &[u8], scratch: &mut [u8]) {
         let _ = scratch; // only the AVX-512 histogram uses it
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             // SAFETY: hist_uses_scratch checked the CPU features.
-            Tier::Avx512 if self.hist_uses_scratch() => unsafe {
+            Tier::Avx512 if scratch.len() >= HIST_SCRATCH && self.hist_uses_scratch() => unsafe {
                 avx512::histogram(h, src, scratch)
             },
             Tier::Avx512 => generic::histogram_generic(h, src),
