@@ -145,15 +145,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     let mut alias = SubcommandAlias::None;
     let mut opts = Options::default();
     let mut input: Option<PathBuf> = None;
-    let mut help_only = false;
 
     while let Some(arg) = it.next() {
         let s = arg.to_string_lossy().to_string();
-        if s == "--help" || s == "-h" {
-            help_only = true;
-            opts.help = true;
-            continue;
-        }
         if sub.is_none()
             && !s.starts_with('-')
             && let Some(parsed) = parse_subcommand(&s)
@@ -187,7 +181,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     }
 
     // Help — caller will print and exit 0; pass it through.
-    if help_only {
+    if opts.help {
         return Ok(Cli {
             subcommand: sub.unwrap_or(Subcommand::Compress),
             options: opts,
@@ -756,6 +750,19 @@ mod tests {
     fn follow_with_bench_errors() {
         let err = parse_argv(&["d", "--follow", "--bench=2", "file.mz"]).unwrap_err();
         assert!(matches!(err, ParseError::InvalidValue(ref s, _) if s == "--follow"));
+    }
+
+    #[test]
+    fn every_help_spelling_skips_validation() {
+        for h in ["-h", "--help", "-help"] {
+            for argv in [
+                &[h][..],
+                &["c", "--simd.delta", "-3", h],
+                &["c", "-0", "--level", "2", h],
+            ] {
+                assert!(parse_argv(argv).unwrap().options.help, "{argv:?}");
+            }
+        }
     }
 
     #[test]
