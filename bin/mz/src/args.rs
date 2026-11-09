@@ -168,6 +168,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
         }
         input = Some(PathBuf::from(s));
     }
+    opts.cpu_off = cpu_mask(opts.cpu_off);
 
     // Help — caller will print and exit 0; pass it through.
     if opts.help {
@@ -273,14 +274,25 @@ fn write_level(opts: &Options) -> Result<Level, ParseError> {
     })
 }
 
-/// The `minlz::cpu` features `--{name}=false` turns off. As in Go, AVX-512 needs AVX2, and
-/// the pivco kernels follow the exec tiers.
-fn cpu_mask(name: &str) -> u32 {
-    const AVX512: u32 = cpu::AVX512 | cpu::PIVCO_AVX512 | cpu::PIVCO_HIST_AVX512;
-    match name {
-        "avx2" => cpu::AVX2 | cpu::PIVCO_AVX2 | AVX512,
-        "avx512" => AVX512,
-        _ => cpu::NEON,
+/// Widens the features `--avx2/--avx512/--neon=false` turned off to all the `minlz::cpu`
+/// features they cover. As in Go, AVX-512 needs AVX2, and the pivco kernels follow the exec
+/// tiers.
+fn cpu_mask(mut off: u32) -> u32 {
+    if off & cpu::AVX2 != 0 {
+        off |= cpu::PIVCO_AVX2 | cpu::AVX512;
+    }
+    if off & cpu::AVX512 != 0 {
+        off |= cpu::PIVCO_AVX512 | cpu::PIVCO_HIST_AVX512;
+    }
+    off
+}
+
+/// Records a CPU toggle on its own bit, so the last value given wins, as in Go.
+fn set_cpu(opts: &mut Options, feature: u32, on: bool) {
+    if on {
+        opts.cpu_off &= !feature;
+    } else {
+        opts.cpu_off |= feature;
     }
 }
 
@@ -323,40 +335,49 @@ enum SubcommandAlias {
 }
 
 fn apply_long_flag<I: Iterator<Item = OsString>>(
-    name: &str,
+    flag: &str,
     it: &mut std::iter::Peekable<I>,
     opts: &mut Options,
 ) -> Result<(), ParseError> {
-    // `--name=value` form.
-    if let Some((k, v)) = name.split_once('=') {
-        return set_long_value(k, v, opts);
-    }
+    let (name, val) = match flag.split_once('=') {
+        Some((k, v)) => (k, Some(v)),
+        None => (flag, None),
+    };
+    // As in Go's flag package, a bool flag is `-name` or `-name=value`, never `-name value`.
+    let on = || val.map_or(Ok(true), |v| parse_bool(name, v));
     match name {
-        "0" => opts.uncompressed = true,
+        // Go's level flags are bools too; `=false` leaves the level alone.
+        "xfast" | "1" | "2" | "3" if !on()? => {}
+        "xfast" => opts.level = Some(Level::SuperFast),
         "1" => opts.level = Some(Level::Fastest),
         "2" => opts.level = Some(Level::Balanced),
         "3" => opts.level = Some(Level::Smallest),
-        "block" => opts.block = true,
-        "c" | "stdout" => opts.stdout = true,
-        "rm" => opts.remove = true,
-        "q" | "quiet" => opts.quiet = true,
-        "verify" => opts.verify = true,
-        "h" | "help" => opts.help = true,
-        "index" => opts.index = true,
-        "no-index" => opts.index = false,
-        "follow" => opts.follow = true,
-        "xfast" => opts.level = Some(Level::SuperFast),
-        "classic" => opts.classic = true,
-        "simd.delta" => opts.simd_delta = true,
-        // The CPU toggles may only turn features off.
-        "avx2" | "avx512" | "neon" => {}
+        "0" => opts.uncompressed = on()?,
+        "block" => opts.block = on()?,
+        "c" | "stdout" => opts.stdout = on()?,
+        "rm" => opts.remove = on()?,
+        "q" | "quiet" => opts.quiet = on()?,
+        "verify" => opts.verify = on()?,
+        "h" | "help" => opts.help = on()?,
+        "index" => opts.index = on()?,
+        "no-index" => opts.index = !on()?,
+        "follow" => opts.follow = on()?,
+        "classic" => opts.classic = on()?,
+        "simd.delta" => opts.simd_delta = on()?,
+        "avx2" => set_cpu(opts, cpu::AVX2, on()?),
+        "avx512" => set_cpu(opts, cpu::AVX512, on()?),
+        "neon" => set_cpu(opts, cpu::NEON, on()?),
         _ => {
-            // Long flags that take a separate argument.
-            let val = it
-                .next()
-                .ok_or_else(|| ParseError::MissingValue(format!("--{name}")))?
-                .into_string()
-                .map_err(|_| ParseError::InvalidValue(format!("--{name}"), "<non-utf8>".into()))?;
+            let val = match val {
+                Some(v) => v.to_owned(),
+                None => it
+                    .next()
+                    .ok_or_else(|| ParseError::MissingValue(format!("--{name}")))?
+                    .into_string()
+                    .map_err(|_| {
+                        ParseError::InvalidValue(format!("--{name}"), "<non-utf8>".into())
+                    })?,
+            };
             return set_long_value(name, &val, opts);
         }
     }
@@ -394,14 +415,6 @@ fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), Parse
             opts.threads = Some(NonZeroUsize::new(n).ok_or_else(|| {
                 ParseError::InvalidValue(format!("--{name}"), "must be ≥ 1".into())
             })?);
-        }
-        "index" => opts.index = parse_bool(name, val)?,
-        "classic" => opts.classic = parse_bool(name, val)?,
-        "simd.delta" => opts.simd_delta = parse_bool(name, val)?,
-        "avx2" | "avx512" | "neon" => {
-            if !parse_bool(name, val)? {
-                opts.cpu_off |= cpu_mask(name);
-            }
         }
         "offset" => {
             let (n, nl) = parse_size_with_nl(val)
@@ -562,6 +575,30 @@ mod tests {
             assert_eq!(cli.options.cpu_off, want, "{args:?}");
         }
         assert!(parse_argv(&["-avx2=maybe", "c", "x"]).is_err());
+    }
+
+    #[test]
+    fn bool_flag_values() {
+        for (args, want) in [
+            (&["-xfast=true"][..], Level::SuperFastSimd),
+            (&["-1", "-xfast=false"], Level::FastestSimd),
+            (&["-3=1"], Level::SmallestSimd),
+        ] {
+            let cli = parse_argv(&[&["c"], args, &["x"]].concat()).unwrap();
+            assert_eq!(cli.options.level, Some(want), "{args:?}");
+        }
+        let cli = parse_argv(&["c", "-c=true", "-block=1", "-rm=false", "-0=false", "x"]).unwrap();
+        let o = &cli.options;
+        assert!(o.stdout && o.block && !o.remove && !o.uncompressed);
+        for args in [
+            &["-avx2=false", "-avx2=true"][..],
+            &["-neon=false", "--neon"],
+            &["-avx512=false", "-avx512"],
+        ] {
+            let cli = parse_argv(&[args, &["c", "x"]].concat()).unwrap();
+            assert_eq!(cli.options.cpu_off, 0, "{args:?}");
+        }
+        assert!(parse_argv(&["c", "-q=maybe", "x"]).is_err());
     }
 
     #[test]
