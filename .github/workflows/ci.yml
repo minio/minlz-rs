@@ -71,6 +71,9 @@ jobs:
         run: cargo test --workspace --doc --verbose
       - name: cargo test (release, lib)
         run: cargo test --workspace --lib --release --verbose
+      - name: cargo test (release, stack)
+        # Release inlining changes the encoders' stack frames.
+        run: cargo test -p minio-minlz --release --test encode_stack --verbose
 
   # ---- Docs ---------------------------------------------------------------
   docs:
