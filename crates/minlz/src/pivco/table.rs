@@ -22,7 +22,7 @@ use super::{ERR_CODE_LEN, ERR_KRAFT, ERR_NO_SYMBOLS, Error, MAX_CODE_LEN};
 ///
 /// The default value is invalid. A built Table may be cloned and shared by many Encoders
 /// and Decoders.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Table {
     pub(super) lens: [u8; 256],
     /// Symbol to rank; 0xFF for unused symbols when nranks < 256.

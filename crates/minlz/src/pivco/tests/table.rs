@@ -222,18 +222,18 @@ fn table_reject() {
 
 #[test]
 fn table_rebuild() {
-    // Reusing a Table must not leak state from a larger previous table.
-    let all = [8u8; 256];
+    // Reusing a Table must not leak state from a previous table with more ranks or records.
     let small = lens_from(&[(97, 1), (98, 2), (99, 2)]);
-    let mut tb = Table::default();
-    assert!(
-        tb.set_lengths(&all).is_ok() && tb.set_lengths(&small).is_ok(),
-        "build"
-    );
-    assert!(
-        must_table(&small) == tb,
-        "rebuilt table differs from a fresh one"
-    );
+    let fresh = must_table(&small);
+    let state = |t: &Table| (*t.lens(), t.recs().to_vec(), *t.r2s(), *t.s2r(), t.nranks());
+    for prev in [[8u8; 256], lens_of(&dist_of("english"))] {
+        let mut tb = must_table(&prev);
+        assert!(tb.set_lengths(&small).is_ok(), "build");
+        assert!(
+            state(&tb) == state(&fresh),
+            "rebuilt table differs from a fresh one"
+        );
+    }
 }
 
 /// Go FuzzTable's seeds: 128 bytes of length nibbles, then a payload.
