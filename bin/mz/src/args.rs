@@ -599,13 +599,15 @@ mod tests {
             &["--simd.delta", "--classic"][..],
             &["--simd.delta", "-0"],
             &["--simd.delta", "-3"],
-            &["-xfast", "-0"],
         ] {
+            let err = parse_argv(&[&["c"], args, &["x"]].concat()).unwrap_err();
             assert!(
-                parse_argv(&[&["c"], args, &["x"]].concat()).is_err(),
-                "{args:?}"
+                matches!(err, ParseError::InvalidValue(ref s, _) if s == "--simd.delta"),
+                "{args:?}: {err:?}"
             );
         }
+        let err = parse_argv(&["c", "-xfast", "-0", "x"]).unwrap_err();
+        assert!(matches!(err, ParseError::ConflictingLevels), "{err:?}");
     }
 
     #[test]
@@ -676,13 +678,13 @@ mod tests {
     fn conflicting_levels_error() {
         // -0 + --level should conflict.
         let err = parse_argv(&["-0", "--level", "2", "x"]).unwrap_err();
-        matches!(err, ParseError::ConflictingLevels);
+        assert!(matches!(err, ParseError::ConflictingLevels), "{err:?}");
     }
 
     #[test]
     fn no_subcommand_no_input_errors() {
         let err = parse_argv(&[]).unwrap_err();
-        matches!(err, ParseError::NoSubcommand);
+        assert!(matches!(err, ParseError::NoSubcommand), "{err:?}");
     }
 
     #[test]
