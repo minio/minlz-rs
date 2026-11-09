@@ -281,7 +281,7 @@ unsafe fn part<const RIGHT: bool, const LEFT: bool>(
     p.nr
 }
 
-/// Partitions `ranks[..n]` by rank > thr; see [`super::Tier::part_full`] (Go `partFullAsm`).
+/// Partitions `ranks` by rank > thr; see [`super::Tier::part_full`] (Go `partFullAsm`).
 ///
 /// # Safety
 /// The CPU has [`PIVCO_AVX512`](crate::cpu::PIVCO_AVX512).
@@ -290,16 +290,15 @@ unsafe fn part<const RIGHT: bool, const LEFT: bool>(
 )]
 pub(super) unsafe fn part_full(
     ranks: &mut [u8],
-    n: usize,
     right: &mut [u8],
     bm: &mut [u8],
     thr: u8,
 ) -> usize {
+    let n = ranks.len();
     if n == 0 {
         return 0;
     }
-    let (ranks, right, bm) = (
-        &mut ranks[..n],
+    let (right, bm) = (
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
@@ -308,7 +307,7 @@ pub(super) unsafe fn part_full(
     unsafe { part::<true, true>(r, right.as_mut_ptr(), r, bm.as_mut_ptr(), n, thr) }
 }
 
-/// Partitions `ranks[..n]` like [`part_full`] without compacting the left ranks (Go
+/// Partitions `ranks` like [`part_full`] without compacting the left ranks (Go
 /// `partRightAsm`).
 ///
 /// # Safety
@@ -316,18 +315,12 @@ pub(super) unsafe fn part_full(
 #[target_feature(
     enable = "avx512f,avx512bw,avx512vl,avx512vbmi,avx512vbmi2,avx512vpopcntdq,bmi2,popcnt"
 )]
-pub(super) unsafe fn part_right(
-    ranks: &[u8],
-    n: usize,
-    right: &mut [u8],
-    bm: &mut [u8],
-    thr: u8,
-) -> usize {
+pub(super) unsafe fn part_right(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
+    let n = ranks.len();
     if n == 0 {
         return 0;
     }
-    let (ranks, right, bm) = (
-        &ranks[..n],
+    let (right, bm) = (
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
@@ -336,7 +329,7 @@ pub(super) unsafe fn part_right(
     unsafe { part::<true, false>(ranks.as_ptr(), r, core::ptr::null_mut(), b, n, thr) }
 }
 
-/// Writes only the bitmap of `ranks[..n]` and returns the number of set bits (Go
+/// Writes only the bitmap of `ranks` and returns the number of set bits (Go
 /// `partNoneAsm`).
 ///
 /// # Safety
@@ -344,11 +337,12 @@ pub(super) unsafe fn part_right(
 #[target_feature(
     enable = "avx512f,avx512bw,avx512vl,avx512vbmi,avx512vbmi2,avx512vpopcntdq,bmi2,popcnt"
 )]
-pub(super) unsafe fn part_none(ranks: &[u8], n: usize, bm: &mut [u8], thr: u8) -> usize {
+pub(super) unsafe fn part_none(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
+    let n = ranks.len();
     if n == 0 {
         return 0;
     }
-    let (ranks, bm) = (&ranks[..n], &mut bm[..n.div_ceil(8) + RANK_SLACK]);
+    let bm = &mut bm[..n.div_ceil(8) + RANK_SLACK];
     let null = core::ptr::null_mut();
     // SAFETY: the slices have the lengths part needs; right and left are not used.
     unsafe { part::<false, false>(ranks.as_ptr(), null, null, bm.as_mut_ptr(), n, thr) }
@@ -596,19 +590,21 @@ const PACK_D3: [u64; 8] = [
     0x0000000000331700,
 ];
 
-/// Packs the codes `ranks[..n]-base` of a flat region in the vertical layout to exactly
-/// `dst[..(n*d+7)/8]`, with zero padding bits (Go `packAsm`; upstream prim_enc_pack_dN).
+/// Packs the codes `ranks[i]-base` of a flat region in the vertical layout to exactly
+/// `dst[..(n*d+7)/8]` (n = ranks.len()), with zero padding bits (Go `packAsm`; upstream
+/// prim_enc_pack_dN).
 ///
 /// # Safety
 /// The CPU has [`PIVCO_AVX512`](crate::cpu::PIVCO_AVX512).
 #[target_feature(
     enable = "avx512f,avx512bw,avx512vl,avx512vbmi,avx512vbmi2,avx512vpopcntdq,bmi2,popcnt"
 )]
-pub(super) unsafe fn pack(dst: &mut [u8], ranks: &[u8], n: usize, d: u8, base: u8) {
+pub(super) unsafe fn pack(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
+    let n = ranks.len();
     if n == 0 || !(2..=8).contains(&d) {
-        return pack_generic(dst, ranks, n, d, base);
+        return pack_generic(dst, ranks, d, base);
     }
-    let (dst, ranks) = (&mut dst[..(n * usize::from(d)).div_ceil(8)], &ranks[..n]);
+    let dst = &mut dst[..(n * usize::from(d)).div_ceil(8)];
     let (n512, n128) = vert_split(n, d);
     let (o, s) = (dst.as_mut_ptr(), ranks.as_ptr());
     // SAFETY: dst holds the packed region of the n codes in ranks.

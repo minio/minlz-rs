@@ -119,7 +119,7 @@ impl Encoder {
             out: dst,
             pos: 0,
         };
-        w.node(0, ranks, n, tmp, 0);
+        w.node(0, &mut ranks[..n], tmp, 0);
         assert!(w.pos == w.out.len(), "pivco: dst is not the block size");
         Ok(())
     }
@@ -137,10 +137,11 @@ struct EncWalk<'a> {
 
 impl EncWalk<'_> {
     /// Ports upstream `codec_encode_node` (`src/pivco_huffman_codec.c`): the K_right header
-    /// in pre-order, the children larger first, the bitmap in post-order. `ranks[..n]` are
-    /// the subtree's symbol ranks; `tmp` is scratch for the right ranks of this and all
-    /// deeper nodes.
-    fn node(&mut self, rec: usize, ranks: &mut [u8], n: usize, tmp: &mut [u8], depth: usize) {
+    /// in pre-order, the children larger first, the bitmap in post-order. `ranks` are the
+    /// subtree's symbol ranks; `tmp` is scratch for the right ranks of this and all deeper
+    /// nodes.
+    fn node(&mut self, rec: usize, ranks: &mut [u8], tmp: &mut [u8], depth: usize) {
+        let n = ranks.len();
         if n == 0 {
             return;
         }
@@ -149,15 +150,15 @@ impl EncWalk<'_> {
         if kind == KIND_FLAT {
             let d = r.flat_depth();
             let tb = (n * usize::from(d)).div_ceil(8);
-            tier.pack(&mut self.out[self.pos..self.pos + tb], ranks, n, d, r.param);
+            tier.pack(&mut self.out[self.pos..self.pos + tb], ranks, d, r.param);
             self.pos += tb;
             return;
         }
         let bm = &mut self.stage[depth * BS..(depth + 1) * BS];
         let nr = match kind {
-            KIND_BOTH => tier.part_none(ranks, n, bm, r.param),
-            KIND_LEAF_LEFT => tier.part_right(ranks, n, tmp, bm, r.param),
-            _ => tier.part_full(ranks, n, tmp, bm, r.param),
+            KIND_BOTH => tier.part_none(ranks, bm, r.param),
+            KIND_LEAF_LEFT => tier.part_right(ranks, tmp, bm, r.param),
+            _ => tier.part_full(ranks, tmp, bm, r.param),
         };
         let nl = n - nr;
         if kind != KIND_BOTH {
@@ -167,13 +168,13 @@ impl EncWalk<'_> {
             let (rr, sub) = tmp.split_at_mut(nr);
             let right = rec + usize::from(r.right);
             if kind == KIND_LEAF_LEFT {
-                self.node(rec + 1, rr, nr, sub, depth + 1);
+                self.node(rec + 1, rr, sub, depth + 1);
             } else if nr > nl {
-                self.node(right, rr, nr, sub, depth + 1);
-                self.node(rec + 1, ranks, nl, sub, depth + 1);
+                self.node(right, rr, sub, depth + 1);
+                self.node(rec + 1, &mut ranks[..nl], sub, depth + 1);
             } else {
-                self.node(rec + 1, ranks, nl, sub, depth + 1);
-                self.node(right, rr, nr, sub, depth + 1);
+                self.node(rec + 1, &mut ranks[..nl], sub, depth + 1);
+                self.node(right, rr, sub, depth + 1);
             }
         }
         let nb = n.div_ceil(8);

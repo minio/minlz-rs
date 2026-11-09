@@ -62,18 +62,12 @@ pub(super) fn gather_neon(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
     mx.max(gather_generic(&mut ranks[k..], &src[k..], s2r))
 }
 
-pub(super) fn part_full_neon(
-    ranks: &mut [u8],
-    n: usize,
-    right: &mut [u8],
-    bm: &mut [u8],
-    thr: u8,
-) -> usize {
+pub(super) fn part_full_neon(ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
+    let n = ranks.len();
     if n == 0 || !has_neon() {
-        return part_full_generic(ranks, n, right, bm, thr);
+        return part_full_generic(ranks, right, bm, thr);
     }
-    let (ranks, right, bm) = (
-        &mut ranks[..n],
+    let (right, bm) = (
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
@@ -91,29 +85,17 @@ pub(super) fn part_full_neon(
         };
     }
     // The tail compacts its left ranks in place; they follow the j-nr vector ones.
-    let tr = part_full_generic(
-        &mut ranks[j..],
-        n - j,
-        &mut right[nr..],
-        &mut bm[j / 8..],
-        thr,
-    );
+    let tr = part_full_generic(&mut ranks[j..], &mut right[nr..], &mut bm[j / 8..], thr);
     ranks.copy_within(j..n - tr, j - nr);
     nr + tr
 }
 
-pub(super) fn part_right_neon(
-    ranks: &[u8],
-    n: usize,
-    right: &mut [u8],
-    bm: &mut [u8],
-    thr: u8,
-) -> usize {
+pub(super) fn part_right_neon(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
+    let n = ranks.len();
     if n == 0 || !has_neon() {
-        return part_right_generic(ranks, n, right, bm, thr);
+        return part_right_generic(ranks, right, bm, thr);
     }
-    let (ranks, right, bm) = (
-        &ranks[..n],
+    let (right, bm) = (
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
@@ -124,28 +106,30 @@ pub(super) fn part_right_neon(
             part_right_neon_asm(ranks.as_ptr(), right.as_mut_ptr(), bm.as_mut_ptr(), j, thr)
         };
     }
-    nr + part_right_generic(&ranks[j..], n - j, &mut right[nr..], &mut bm[j / 8..], thr)
+    nr + part_right_generic(&ranks[j..], &mut right[nr..], &mut bm[j / 8..], thr)
 }
 
-pub(super) fn part_none_neon(ranks: &[u8], n: usize, bm: &mut [u8], thr: u8) -> usize {
+pub(super) fn part_none_neon(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
+    let n = ranks.len();
     if n == 0 || !has_neon() {
-        return part_none_generic(ranks, n, bm, thr);
+        return part_none_generic(ranks, bm, thr);
     }
-    let (ranks, bm) = (&ranks[..n], &mut bm[..n.div_ceil(8) + RANK_SLACK]);
+    let bm = &mut bm[..n.div_ceil(8) + RANK_SLACK];
     let (j, mut nr) = (n & !7, 0);
     if j > 0 {
         // SAFETY: the CPU has NEON; ranks holds n >= j bytes, bm j/8.
         nr = unsafe { part_none_neon_asm(ranks.as_ptr(), bm.as_mut_ptr(), j, thr) };
     }
-    nr + part_none_generic(&ranks[j..], n - j, &mut bm[j / 8..], thr)
+    nr + part_none_generic(&ranks[j..], &mut bm[j / 8..], thr)
 }
 
-pub(super) fn pack_neon(dst: &mut [u8], ranks: &[u8], n: usize, d: u8, base: u8) {
+pub(super) fn pack_neon(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
+    let n = ranks.len();
     if n == 0 || !(2..=8).contains(&d) || !has_neon() {
-        return pack_generic(dst, ranks, n, d, base);
+        return pack_generic(dst, ranks, d, base);
     }
     let du = usize::from(d);
-    let (dst, ranks) = (&mut dst[..(n * du).div_ceil(8)], &ranks[..n]);
+    let dst = &mut dst[..(n * du).div_ceil(8)];
     let (n512, n128) = vert_split(n, d);
     if n512 > 0 {
         // SAFETY: the CPU has NEON; 2 <= d <= 7 (vert_split), ranks holds n512 bytes and dst

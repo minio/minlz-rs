@@ -159,10 +159,10 @@ fn kernel_allocs() {
             let mut bmo = [0u8; N / 8 + RANK_SLACK];
             let mut h = [0u32; 256];
             tier.gather(&mut ranks, &src[..N], &s2r);
-            tier.part_full(&mut ranks, N, &mut right, &mut bmo, 100);
-            tier.part_right(&ranks, N, &mut right, &mut bmo, 100);
-            tier.part_none(&ranks, N, &mut bmo, 100);
-            tier.pack(&mut right, &codes, N, 3, 0);
+            tier.part_full(&mut ranks[..N], &mut right, &mut bmo, 100);
+            tier.part_right(&ranks[..N], &mut right, &mut bmo, 100);
+            tier.part_none(&ranks[..N], &mut bmo, 100);
+            tier.pack(&mut right, &codes[..N], 3, 0);
             tier.histogram(&mut h, &src, &mut scratch);
             let mut dst = [0u8; N];
             let ops = [

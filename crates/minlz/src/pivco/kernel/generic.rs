@@ -33,12 +33,12 @@ pub(super) fn gather_generic(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u
 
 pub(super) fn part_full_generic(
     ranks: &mut [u8],
-    n: usize,
     right: &mut [u8],
     bm: &mut [u8],
     thr: u8,
 ) -> usize {
-    let (ranks, right, bm) = (&mut ranks[..n], &mut right[..n], &mut bm[..n.div_ceil(8)]);
+    let n = ranks.len();
+    let (right, bm) = (&mut right[..n], &mut bm[..n.div_ceil(8)]);
     let (mut nl, mut nr) = (0, 0);
     for (i, b) in bm.iter_mut().enumerate() {
         let mut m = 0u8;
@@ -59,14 +59,9 @@ pub(super) fn part_full_generic(
     nr
 }
 
-pub(super) fn part_right_generic(
-    ranks: &[u8],
-    n: usize,
-    right: &mut [u8],
-    bm: &mut [u8],
-    thr: u8,
-) -> usize {
-    let (ranks, right, bm) = (&ranks[..n], &mut right[..n], &mut bm[..n.div_ceil(8)]);
+pub(super) fn part_right_generic(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
+    let n = ranks.len();
+    let (right, bm) = (&mut right[..n], &mut bm[..n.div_ceil(8)]);
     let mut nr = 0;
     for (b, g8) in bm.iter_mut().zip(ranks.chunks(8)) {
         let mut m = 0u8;
@@ -82,8 +77,8 @@ pub(super) fn part_right_generic(
     nr
 }
 
-pub(super) fn part_none_generic(ranks: &[u8], n: usize, bm: &mut [u8], thr: u8) -> usize {
-    let (ranks, bm) = (&ranks[..n], &mut bm[..n.div_ceil(8)]);
+pub(super) fn part_none_generic(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
+    let bm = &mut bm[..ranks.len().div_ceil(8)];
     let mut nr = 0;
     for (b, g8) in bm.iter_mut().zip(ranks.chunks(8)) {
         let mut m = 0u8;

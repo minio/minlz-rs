@@ -282,84 +282,70 @@ impl Tier {
         }
     }
 
-    /// Partitions `ranks[..n]` by rank > `thr`: writes the bitmap to `bm` (padding bits
-    /// zero), moves right ranks in order to `right[..nr]`, compacts left ranks in order into
-    /// `ranks[..n-nr]`, and returns nr.
+    /// Partitions the n = `ranks.len()` ranks by rank > `thr`: writes the bitmap to `bm`
+    /// (padding bits zero), moves right ranks in order to `right[..nr]`, compacts left ranks
+    /// in order into `ranks[..n-nr]`, and returns nr.
     #[inline]
-    pub fn part_full(
-        self,
-        ranks: &mut [u8],
-        n: usize,
-        right: &mut [u8],
-        bm: &mut [u8],
-        thr: u8,
-    ) -> usize {
+    pub fn part_full(self, ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             // SAFETY: the guard checked the CPU features.
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
-                avx512::part_full(ranks, n, right, bm, thr)
+                avx512::part_full(ranks, right, bm, thr)
             },
-            Tier::Avx512 => generic::part_full_generic(ranks, n, right, bm, thr),
-            Tier::Avx2 => avx2::part_full_avx2(ranks, n, right, bm, thr),
-            Tier::Neon => neon::part_full_neon(ranks, n, right, bm, thr),
-            Tier::Generic => generic::part_full_generic(ranks, n, right, bm, thr),
+            Tier::Avx512 => generic::part_full_generic(ranks, right, bm, thr),
+            Tier::Avx2 => avx2::part_full_avx2(ranks, right, bm, thr),
+            Tier::Neon => neon::part_full_neon(ranks, right, bm, thr),
+            Tier::Generic => generic::part_full_generic(ranks, right, bm, thr),
         }
     }
 
     /// Is [`Tier::part_full`] without compacting the left ranks; `ranks` is read-only.
     #[inline]
-    pub fn part_right(
-        self,
-        ranks: &[u8],
-        n: usize,
-        right: &mut [u8],
-        bm: &mut [u8],
-        thr: u8,
-    ) -> usize {
+    pub fn part_right(self, ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             // SAFETY: the guard checked the CPU features.
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
-                avx512::part_right(ranks, n, right, bm, thr)
+                avx512::part_right(ranks, right, bm, thr)
             },
-            Tier::Avx512 => generic::part_right_generic(ranks, n, right, bm, thr),
-            Tier::Avx2 => avx2::part_right_avx2(ranks, n, right, bm, thr),
-            Tier::Neon => neon::part_right_neon(ranks, n, right, bm, thr),
-            Tier::Generic => generic::part_right_generic(ranks, n, right, bm, thr),
+            Tier::Avx512 => generic::part_right_generic(ranks, right, bm, thr),
+            Tier::Avx2 => avx2::part_right_avx2(ranks, right, bm, thr),
+            Tier::Neon => neon::part_right_neon(ranks, right, bm, thr),
+            Tier::Generic => generic::part_right_generic(ranks, right, bm, thr),
         }
     }
 
     /// Writes only the bitmap and returns the number of set bits.
     #[inline]
-    pub fn part_none(self, ranks: &[u8], n: usize, bm: &mut [u8], thr: u8) -> usize {
+    pub fn part_none(self, ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             // SAFETY: the guard checked the CPU features.
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
-                avx512::part_none(ranks, n, bm, thr)
+                avx512::part_none(ranks, bm, thr)
             },
-            Tier::Avx512 => generic::part_none_generic(ranks, n, bm, thr),
-            Tier::Avx2 => avx2::part_none_avx2(ranks, n, bm, thr),
-            Tier::Neon => neon::part_none_neon(ranks, n, bm, thr),
-            Tier::Generic => generic::part_none_generic(ranks, n, bm, thr),
+            Tier::Avx512 => generic::part_none_generic(ranks, bm, thr),
+            Tier::Avx2 => avx2::part_none_avx2(ranks, bm, thr),
+            Tier::Neon => neon::part_none_neon(ranks, bm, thr),
+            Tier::Generic => generic::part_none_generic(ranks, bm, thr),
         }
     }
 
     /// Writes the codes `ranks[i]-base` (each < 1<<d) of a flat region in the vertical
-    /// layout to exactly `dst[..(n*d+7)/8]`, with zero padding bits.
+    /// layout to exactly `dst[..(n*d+7)/8]` (n = `ranks.len()`), with zero padding bits.
     #[inline]
-    pub fn pack(self, dst: &mut [u8], ranks: &[u8], n: usize, d: u8, base: u8) {
+    pub fn pack(self, dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             // SAFETY: the guard checked the CPU features.
             Tier::Avx512 if cpu::has(cpu::PIVCO_AVX512) => unsafe {
-                avx512::pack(dst, ranks, n, d, base)
+                avx512::pack(dst, ranks, d, base)
             },
-            Tier::Avx512 => generic_pack::pack_generic(dst, ranks, n, d, base),
-            Tier::Avx2 => avx2::pack_avx2(dst, ranks, n, d, base),
-            Tier::Neon => neon::pack_neon(dst, ranks, n, d, base),
-            Tier::Generic => generic_pack::pack_generic(dst, ranks, n, d, base),
+            Tier::Avx512 => generic_pack::pack_generic(dst, ranks, d, base),
+            Tier::Avx2 => avx2::pack_avx2(dst, ranks, d, base),
+            Tier::Neon => neon::pack_neon(dst, ranks, d, base),
+            Tier::Generic => generic_pack::pack_generic(dst, ranks, d, base),
         }
     }
 

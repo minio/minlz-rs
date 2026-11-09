@@ -119,15 +119,15 @@ fn bench_partition(c: &mut Criterion) {
             b.iter(|| {
                 // part_full consumes its input; the copy is part of the time.
                 ranks[..BENCH_N].copy_from_slice(&src);
-                t.part_full(&mut ranks, BENCH_N, &mut right, &mut bm, 127)
+                t.part_full(&mut ranks[..BENCH_N], &mut right, &mut bm, 127)
             })
         });
         ranks[..BENCH_N].copy_from_slice(&src);
         g.bench_function(format!("{t}/right"), |b| {
-            b.iter(|| t.part_right(&ranks, BENCH_N, &mut right, &mut bm, 127))
+            b.iter(|| t.part_right(&ranks[..BENCH_N], &mut right, &mut bm, 127))
         });
         g.bench_function(format!("{t}/none"), |b| {
-            b.iter(|| t.part_none(&ranks, BENCH_N, &mut bm, 127))
+            b.iter(|| t.part_none(&ranks[..BENCH_N], &mut bm, 127))
         });
     }
     g.finish();
@@ -147,7 +147,7 @@ fn bench_pack(c: &mut Criterion) {
             }
             let size = (BENCH_N * usize::from(d)).div_ceil(8);
             g.bench_function(format!("{t}/d{d}"), |b| {
-                b.iter(|| t.pack(&mut dst[..size], &ranks, BENCH_N, d, 0))
+                b.iter(|| t.pack(&mut dst[..size], &ranks[..BENCH_N], d, 0))
             });
         }
     }

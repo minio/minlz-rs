@@ -71,9 +71,9 @@ fn partition() {
 fn partition_empty() {
     for tier in Tier::tiers() {
         assert!(
-            tier.part_full(&mut [], 0, &mut [], &mut [], 0) == 0
-                && tier.part_right(&[], 0, &mut [], &mut [], 0) == 0
-                && tier.part_none(&[], 0, &mut [], 0) == 0,
+            tier.part_full(&mut [], &mut [], &mut [], 0) == 0
+                && tier.part_right(&[], &mut [], &mut [], 0) == 0
+                && tier.part_none(&[], &mut [], 0) == 0,
             "{tier}: nonzero count"
         );
     }
@@ -102,11 +102,10 @@ pub(super) fn test_partition(tier: Tier, ranks: &[u8], thr: u8) {
             let (rkn, right) = if adjacent {
                 rk.split_at_mut(n)
             } else {
-                (&mut rk[..n + RANK_SLACK], &mut sep[..])
+                (&mut rk[..n], &mut sep[..])
             };
             tier.part_full(
                 rkn,
-                n,
                 &mut right[..n + RANK_SLACK],
                 &mut bm[..nb + RANK_SLACK],
                 thr,
@@ -141,11 +140,10 @@ pub(super) fn test_partition(tier: Tier, ranks: &[u8], thr: u8) {
                 let (h, t) = rk.split_at_mut(n);
                 (h, t)
             } else {
-                (&rk[..n + RANK_SLACK], &mut sep[..])
+                (&rk[..n], &mut sep[..])
             };
             tier.part_right(
                 rkn,
-                n,
                 &mut right[..n + RANK_SLACK],
                 &mut bm[..nb + RANK_SLACK],
                 thr,
@@ -166,7 +164,7 @@ pub(super) fn test_partition(tier: Tier, ranks: &[u8], thr: u8) {
     let mut rk = new_buf(n);
     rk[..n].copy_from_slice(ranks);
     let mut bm = new_buf(nb);
-    let nr = tier.part_none(&rk[..n + RANK_SLACK], n, &mut bm[..nb + RANK_SLACK], thr);
+    let nr = tier.part_none(&rk[..n], &mut bm[..nb + RANK_SLACK], thr);
     check_bm("part_none", &bm);
     assert!(
         nr == wr.len() && rk[..n] == *ranks && intact(&rk[n..]),
@@ -232,7 +230,7 @@ fn pack() {
                 // Junk in dst: every byte must be written.
                 let mut dst = rand_vec(&mut rng, size + GUARD_LEN);
                 dst[size..].fill(GUARD_BYTE);
-                tier.pack(&mut dst[..size], &ranks[..n + RANK_SLACK], n, d as u8, base);
+                tier.pack(&mut dst[..size], &ranks[..n], d as u8, base);
                 assert!(
                     dst[..size] == want && intact(&dst[size..]) && intact(&ranks[n..]),
                     "{tier} n={n} d={d}: region or guard"
@@ -369,12 +367,12 @@ fn vec_pack() {
             }
             let size = (n * usize::from(d)).div_ceil(8);
             let mut want = vec![0u8; size];
-            pack_generic(&mut want, &ranks, n, d, base);
+            pack_generic(&mut want, &ranks[..n], d, base);
             for &tier in &tiers {
                 // Junk in dst: every byte must be written. Guard bytes right after it.
                 let mut dst = rand_vec(&mut rng, size + GUARD_LEN);
                 dst[size..].fill(GUARD_BYTE);
-                tier.pack(&mut dst[..size], &ranks[..n], n, d, base);
+                tier.pack(&mut dst[..size], &ranks[..n], d, base);
                 assert!(
                     dst[..size] == want && intact(&dst[size..]) && intact(&ranks[n..]),
                     "{tier} n={n} d={d} base={base}: region or guard"
@@ -410,15 +408,15 @@ fn vec_page_guard() {
                 tier.gather(ranks, src, &s2r);
                 // Partitions: ranks exact.
                 for thr in [0u8, 100, 254] {
-                    tier.part_none(ranks, n, &mut bm, thr);
-                    tier.part_right(ranks, n, &mut right, &mut bm, thr);
-                    tier.part_full(ranks, n, &mut right, &mut bm, thr);
+                    tier.part_none(ranks, &mut bm, thr);
+                    tier.part_right(ranks, &mut right, &mut bm, thr);
+                    tier.part_full(ranks, &mut right, &mut bm, thr);
                 }
                 // Pack: ranks and region exact.
                 for d in 2..=8u8 {
                     ranks.iter_mut().for_each(|r| *r &= ((1u16 << d) - 1) as u8);
                     let dst = mem_a.slice((n * usize::from(d)).div_ceil(8), at_end);
-                    tier.pack(dst, ranks, n, d, 0);
+                    tier.pack(dst, ranks, d, 0);
                 }
                 // Histogram: src exact, with all bytes and with bytes below 0x80.
                 let mut h = [0u32; 256];

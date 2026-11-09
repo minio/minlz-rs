@@ -17,9 +17,9 @@
 
 use super::vert_split;
 
-pub(super) fn pack_generic(dst: &mut [u8], ranks: &[u8], n: usize, d: u8, base: u8) {
-    let du = usize::from(d);
-    let (dst, ranks) = (&mut dst[..(n * du).div_ceil(8)], &ranks[..n]);
+pub(super) fn pack_generic(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
+    let (n, du) = (ranks.len(), usize::from(d));
+    let dst = &mut dst[..(n * du).div_ceil(8)];
     let (n512, n128) = vert_split(n, d);
     vert_pack::<64>(dst, &ranks[..n512], d, base);
     let (dst, ranks) = (&mut dst[n512 * du / 8..], &ranks[n512..]);

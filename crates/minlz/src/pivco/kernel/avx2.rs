@@ -89,21 +89,15 @@ pub(super) fn gather_avx2(ranks: &mut [u8], src: &[u8], s2r: &[u8; 256]) -> u8 {
     unsafe { gather_avx2_asm(ranks.as_mut_ptr(), src.as_ptr(), n, s2r) }
 }
 
-pub(super) fn part_full_avx2(
-    ranks: &mut [u8],
-    n: usize,
-    right: &mut [u8],
-    bm: &mut [u8],
-    thr: u8,
-) -> usize {
+pub(super) fn part_full_avx2(ranks: &mut [u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
     if !has_avx2() {
-        return part_full_generic(ranks, n, right, bm, thr);
+        return part_full_generic(ranks, right, bm, thr);
     }
+    let n = ranks.len();
     if n == 0 {
         return 0;
     }
-    let (ranks, right, bm) = (
-        &mut ranks[..n],
+    let (right, bm) = (
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
@@ -119,21 +113,15 @@ pub(super) fn part_full_avx2(
     }
 }
 
-pub(super) fn part_right_avx2(
-    ranks: &[u8],
-    n: usize,
-    right: &mut [u8],
-    bm: &mut [u8],
-    thr: u8,
-) -> usize {
+pub(super) fn part_right_avx2(ranks: &[u8], right: &mut [u8], bm: &mut [u8], thr: u8) -> usize {
     if !has_avx2() {
-        return part_right_generic(ranks, n, right, bm, thr);
+        return part_right_generic(ranks, right, bm, thr);
     }
+    let n = ranks.len();
     if n == 0 {
         return 0;
     }
-    let (ranks, right, bm) = (
-        &ranks[..n],
+    let (right, bm) = (
         &mut right[..n + RANK_SLACK],
         &mut bm[..n.div_ceil(8) + RANK_SLACK],
     );
@@ -150,14 +138,15 @@ pub(super) fn part_right_avx2(
     }
 }
 
-pub(super) fn part_none_avx2(ranks: &[u8], n: usize, bm: &mut [u8], thr: u8) -> usize {
+pub(super) fn part_none_avx2(ranks: &[u8], bm: &mut [u8], thr: u8) -> usize {
     if !has_avx2() {
-        return part_none_generic(ranks, n, bm, thr);
+        return part_none_generic(ranks, bm, thr);
     }
+    let n = ranks.len();
     if n == 0 {
         return 0;
     }
-    let (ranks, bm) = (&ranks[..n], &mut bm[..n.div_ceil(8) + RANK_SLACK]);
+    let bm = &mut bm[..n.div_ceil(8) + RANK_SLACK];
     // SAFETY: the CPU has the features; the slices have the lengths part_avx2_asm needs,
     // and PART_NONE never writes ranks or right.
     unsafe {
@@ -171,12 +160,13 @@ pub(super) fn part_none_avx2(ranks: &[u8], n: usize, bm: &mut [u8], thr: u8) -> 
     }
 }
 
-pub(super) fn pack_avx2(dst: &mut [u8], ranks: &[u8], n: usize, d: u8, base: u8) {
+pub(super) fn pack_avx2(dst: &mut [u8], ranks: &[u8], d: u8, base: u8) {
+    let n = ranks.len();
     if !has_avx2() || n == 0 || !(2..=8).contains(&d) {
-        pack_generic(dst, ranks, n, d, base);
+        pack_generic(dst, ranks, d, base);
         return;
     }
-    let (dst, ranks) = (&mut dst[..(n * usize::from(d)).div_ceil(8)], &ranks[..n]);
+    let dst = &mut dst[..(n * usize::from(d)).div_ceil(8)];
     let (n512, n128) = vert_split(n, d);
     // SAFETY: the CPU has the features; dst holds the packed region and ranks n codes.
     unsafe { pack_avx2_asm(dst.as_mut_ptr(), ranks.as_ptr(), n, n512, n128, d, base) }
