@@ -233,6 +233,24 @@ fn remove_headers_rejects_garbage() {
     assert!(remove_index_headers(&[0xff; 64]).is_none());
 }
 
+/// Every length field, including ones shorter than the header, over every cut of a valid
+/// chunk: only the real length of the whole chunk gives the payload back.
+#[test]
+fn remove_headers_any_chunk_len() {
+    let payload = [1, 2, 3, 4, 5, 6, 7, 8];
+    let full = restore_index_headers(&payload);
+    let real = full.len() - 4;
+    for chunk_len in 0..=real + 1 {
+        let mut b = full.clone();
+        b[1] = chunk_len as u8;
+        for cut in 0..=b.len() {
+            let want = (cut == b.len() && chunk_len == real).then_some(&payload[..]);
+            let got = remove_index_headers(&b[..cut]);
+            assert_eq!(got, want, "chunk_len {chunk_len}, cut {cut}");
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "MAX_INDEX_ENTRIES sweep is impractical under miri")]
 fn reduce_light_at_max() {

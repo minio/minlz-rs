@@ -236,7 +236,7 @@ If any target finds a crash, add the minimised seed to
 | `simd_decode`              | SIMD body + `extra` under a valid header (≤ 1 MiB): every exec tier decodes as the reference decoder does. |
 | `stream_decode_arbitrary`  | Stream decoder (cap 9 MiB): random bytes → ST `Reader::read_to_end` + MT `Reader::decode_concurrent`.  Either path must return `Ok`/`Err`, not panic / deadlock; they agree, and `skip` matches on valid streams.  Mode byte picks threads / ignore CRC / 1 MiB max block size. |
 | `stream_roundtrip`         | Stream codec (cap 9 MiB): payload → ST `Writer` + MT `MtWriter`, decode through matching reader, assert byte-equality and written counts.  Mode byte picks concurrency / write method / block size / padding + index; the second byte the level. |
-| `index_load`               | `Index::load` on any bytes → no panic; `append_to` → `load` round-trips. |
+| `index_load`               | `Index::load` and `remove_index_headers` on any bytes → no panic; `append_to` → `load` round-trips. |
 | `pivco_*`                  | See [`README.md`](README.md). |
 
 Block fuzzers and stream fuzzers are kept separate because the chunk-

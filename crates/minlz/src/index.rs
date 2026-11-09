@@ -727,7 +727,8 @@ pub fn remove_index_headers(b: &[u8]) -> Option<&[u8]> {
         return None;
     }
     let b = &b[..chunk_len];
-    if &b[..INDEX_HEADER.len()] != INDEX_HEADER.as_slice() {
+    // chunk_len may be shorter than the header.
+    if !b.starts_with(INDEX_HEADER) {
         return None;
     }
     let b = &b[INDEX_HEADER.len()..];

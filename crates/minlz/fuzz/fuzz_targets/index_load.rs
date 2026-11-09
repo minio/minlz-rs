@@ -14,7 +14,9 @@
 
 //! Index parser fuzz target.
 //!
-//! * Arbitrary bytes → `Index::load` must never panic.
+//! * Arbitrary bytes → `Index::load` and `remove_index_headers` must never
+//!   panic, and a payload `remove_index_headers` returns must re-wrap and
+//!   strip back to itself.
 //! * For randomly-shaped indices, `append_to` → `load` must round-trip.
 //!
 //! Run with `cargo +nightly fuzz run index_load -- -max_total_time=60`.
@@ -22,7 +24,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use minlz::Index;
+use minlz::{Index, remove_index_headers, restore_index_headers};
 
 fuzz_target!(|data: &[u8]| {
     // Half the time, parse raw bytes; half the time, treat the input as
@@ -30,6 +32,9 @@ fuzz_target!(|data: &[u8]| {
     if data.first().copied().unwrap_or(0) & 1 == 0 {
         let mut idx = Index::default();
         let _ = idx.load(data);
+        if let Some(p) = remove_index_headers(data).filter(|p| !p.is_empty()) {
+            assert_eq!(remove_index_headers(&restore_index_headers(p)), Some(p));
+        }
         return;
     }
 

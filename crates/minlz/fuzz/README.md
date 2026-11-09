@@ -12,7 +12,7 @@ in Rust).
 | `simd_decode`              | `FuzzDecodeSIMD`         | SIMD block bodies with a valid header decode on every exec tier as the reference decoder does. |
 | `stream_decode_arbitrary`  | `FuzzStreamDecode`       | Single- and multi-threaded stream decoders never panic / OOB / deadlock, agree, and `skip` matches. |
 | `stream_roundtrip`         | `FuzzStreamEncode`       | Stream `Writer` / `MtWriter` round-trip across concurrency × level × block size × write method, with padding and index. |
-| `index_load`               | —                        | `Index::load` parses arbitrary bytes safely; `append_to` → `load` round-trips. |
+| `index_load`               | —                        | `Index::load` and `remove_index_headers` parse arbitrary bytes safely; `append_to` → `load` round-trips. |
 | `pivco_decode`             | `FuzzDecodeBlock{,Fixed}` | pivco block decode on every kernel tier: tiers agree, errors fail closed, accepted blocks are canonical. |
 | `pivco_roundtrip`          | `FuzzRoundTripBlock`     | pivco encode + decode on every kernel tier with a table built from the data; tiers write identical blocks. |
 | `pivco_table`              | `FuzzTable`, `FuzzLengths` | pivco `Table::set_lengths` / `build_lengths` on arbitrary lengths and histograms, round-tripping a payload. |
