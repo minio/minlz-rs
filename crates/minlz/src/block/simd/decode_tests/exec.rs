@@ -16,7 +16,7 @@
 
 use super::*;
 use crate::block::simd::decode::{Chunk, ll_stats, off_stats, tok_stats};
-use crate::block::simd::exec::{Tier, exec_exact, exec_flat_go, exec_go, simd_tiers};
+use crate::block::simd::exec::{Tier, exec_exact, exec_flat_go, exec_go};
 use crate::block::simd::{OFF_TAB, PAD, SLACK};
 use crate::guard::Buffer;
 
@@ -29,7 +29,7 @@ const TEST_EXECS: [(&str, bool, ExecFn); 6] = [
     ("go", false, |_, dst, lits, c, n, st| {
         exec_go(dst, lits, c, n, st)
     }),
-    // SAFETY: the tiers come from simd_tiers, and the tests build chunks whose counts are what
+    // SAFETY: the tiers come from Tier::tiers, and the tests build chunks whose counts are what
     // their tokens read, in buffers that keep the memory rules.
     ("dispatch", false, |t, dst, lits, c, n, st| unsafe {
         t.exec(dst, lits, c, n, st)
@@ -110,7 +110,7 @@ fn simd_exec() {
     // Buffers end at an inaccessible page, right after what exec_go reads or writes.
     let mut guards: [Buffer; 7] = core::array::from_fn(|_| Buffer::new(1 << 20).unwrap());
     let [g0, g1, g2, g3, g4, g5, g6] = &mut guards;
-    simd_tiers(|tier| {
+    for tier in Tier::tiers() {
         for (name, flat, f) in TEST_EXECS {
             for (i, (ops, lits, bad, bad_flat)) in cases.iter().enumerate() {
                 for delta in [false, true] {
@@ -164,13 +164,13 @@ fn simd_exec() {
                 }
             }
         }
-    });
+    }
 }
 
 /// Running no operations writes nothing and keeps the state.
 #[test]
 fn simd_exec_empty() {
-    simd_tiers(|tier| {
+    for tier in Tier::tiers() {
         // 1 is a repeat with no match, a literal length and an offset symbol without raw bits.
         let s = [1u8; PAD];
         let lits = [0xff; 100];
@@ -202,7 +202,7 @@ fn simd_exec_empty() {
                 );
             }
         }
-    });
+    }
 }
 
 /// Compares Tier::exec with exec_go on random streams. Offsets use every symbol, and most chunks
@@ -220,7 +220,7 @@ fn simd_exec_random() {
     let mut base = vec![0; hist + room];
     rng.read(&mut base);
     let mut lits = vec![0; (max_ops + 100) * (MAX_LEN + 256) + 1000 + PAD];
-    simd_tiers(|tier| {
+    for tier in Tier::tiers() {
         let (mut want, mut got) = (base.clone(), base.clone());
         for i in 0..cases {
             let (delta, flat) = (i & 1 != 0, i % 5 == 2);
@@ -318,7 +318,7 @@ fn simd_exec_random() {
                     &c,
                     n,
                     &mut sg,
-                    // SAFETY: tier comes from simd_tiers, the counts above are what the tokens
+                    // SAFETY: tier comes from Tier::tiers, the counts above are what the tokens
                     // read, and want, got and lits have room past the operations.
                     |dst, lits, c, k0, k, cur, st| unsafe {
                         tier.exec_flat(dst, lits, c, k0, k, cur, st)
@@ -337,7 +337,7 @@ fn simd_exec_random() {
             want[d0..end].copy_from_slice(&base[d0..end]);
             got[d0..end].copy_from_slice(&base[d0..end]);
         }
-    });
+    }
 }
 
 /// Chunk::run's split hands Tier::exec counts above what the first k tokens read; the loops
@@ -364,21 +364,22 @@ fn simd_exec_split_counts() {
     assert!(k < N && cur[0] < c.n_ll);
     let (mut gd, mut gl) = (Buffer::new(1 << 16).unwrap(), Buffer::new(1 << 16).unwrap());
     let lits: Vec<u8> = (0..N as u8).collect();
-    simd_tiers(|tier| {
+    for tier in Tier::tiers() {
         let lits = at(&mut gl, &lits, N + SLACK);
         let dst = at(&mut gd, &[], N);
         let mut want = vec![0u8; N + SLACK];
         let (mut st, mut sw) = ([0, 0, 1, 0], [0, 0, 1, 0]);
         exec_go(&mut want, lits, &c, N, &mut sw);
-        // SAFETY: tier from simd_tiers; counts and out are exact; lits has SLACK past the literals.
+        // SAFETY: tier from Tier::tiers; counts and out are exact; lits has SLACK past the
+        // literals.
         unsafe { c.run(tier, dst, lits, N, &mut st) };
         assert!(st == sw && dst[..N] == want[..N], "{tier:?}");
-    });
+    }
 }
 
 #[test]
 fn simd_stats() {
-    simd_tiers(|tier| {
+    for tier in Tier::tiers() {
         let mut rng = Rng(7);
         // Miri runs only the safe Go stats; 200 streams take each kind 50 times.
         for i in 0..if cfg!(miri) { 200 } else { 20000 } {
@@ -427,13 +428,13 @@ fn simd_stats() {
                 "{b:x?}: offsets {a} {ok}, want {nb}"
             );
         }
-    });
+    }
 }
 
 /// The stream checks ignore the bytes after a stream, and find a bad byte at every position.
 #[test]
 fn simd_stats_tail() {
-    simd_tiers(|tier| {
+    for tier in Tier::tiers() {
         let tok = |b: &[u8]| tok_stats(tier, b).4;
         let ll = |b: &[u8]| ll_stats(tier, b).2;
         let off = |b: &[u8]| off_stats(tier, b).1;
@@ -481,5 +482,5 @@ fn simd_stats_tail() {
                 }
             }
         }
-    });
+    }
 }

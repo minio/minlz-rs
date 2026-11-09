@@ -358,7 +358,7 @@ mod tests {
     fn decode_reuses_dst() {
         for Case { src, block, bad } in blocks() {
             let n = src.len();
-            exec::simd_tiers(|tier| {
+            exec::simd_tiers(|tier, pv| {
                 for (len, cap) in [
                     (0, 0),
                     (n + 100, n + 100),
@@ -366,7 +366,7 @@ mod tests {
                     (n / 3, n),
                     (10, 10),
                 ] {
-                    let what = format!("{n} bytes, {tier:?}, len {len} cap {cap}");
+                    let what = format!("{n} bytes, {tier:?}, pivco {pv:?}, len {len} cap {cap}");
                     let fresh = || {
                         let mut v = Vec::with_capacity(cap);
                         v.resize(len, 0x5a);
@@ -393,9 +393,9 @@ mod tests {
     #[test]
     fn append_decoded_keeps_prefix() {
         for Case { src, block, bad } in blocks() {
-            exec::simd_tiers(|tier| {
+            exec::simd_tiers(|tier, pv| {
                 for cap in [6, 6 + src.len()] {
-                    let what = format!("{} bytes, {tier:?}, cap {cap}", src.len());
+                    let what = format!("{} bytes, {tier:?}, pivco {pv:?}, cap {cap}", src.len());
                     let fresh = || {
                         let mut v = Vec::with_capacity(cap);
                         v.extend_from_slice(b"prefix");
@@ -419,7 +419,7 @@ mod tests {
     fn append_decoded_grows_geometrically() {
         let Case { src, block, .. } = blocks().last().unwrap();
         let n = if cfg!(miri) { 8 } else { 64 };
-        exec::simd_tiers(|tier| {
+        exec::simd_tiers(|tier, pv| {
             let mut dst = Vec::new();
             let mut caps: Vec<usize> = Vec::new();
             for _ in 0..n {
@@ -428,11 +428,12 @@ mod tests {
                     caps.push(dst.capacity());
                 }
             }
-            assert!(dst.chunks(src.len()).all(|c| c == src), "{tier:?}");
-            assert_eq!(dst.len(), n * src.len(), "{tier:?}");
+            let what = format!("{tier:?}, pivco {pv:?}");
+            assert!(dst.chunks(src.len()).all(|c| c == src), "{what}");
+            assert_eq!(dst.len(), n * src.len(), "{what}");
             assert!(
                 caps.windows(2).all(|w| w[1] >= w[0] * 3 / 2),
-                "{tier:?}: capacities {caps:?}"
+                "{what}: capacities {caps:?}"
             );
         });
     }

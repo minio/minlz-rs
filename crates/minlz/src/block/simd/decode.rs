@@ -139,6 +139,10 @@ impl Decoder {
 
     /// Decodes block into dst, and adds dst to the hasher if hash.
     pub(super) fn decode(&mut self, dst: &mut [u8], block: &[u8], hash: bool) -> Option<()> {
+        #[cfg(test)]
+        if let Some(t) = super::exec::forced_pivco() {
+            self.t.pv.set_tier(t);
+        }
         let limit = (1024 << (block[0] & 7)).min(MAX_CHUNK);
         let body = &block[1..];
         let (lz, n) = rvarint(body)?;

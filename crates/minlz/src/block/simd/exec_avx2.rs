@@ -496,7 +496,7 @@ mod tests {
         let _g = cpu::Disabled::new(cpu::AVX512);
         let has = cpu::has(cpu::AVX2);
         let mut seen = false;
-        simd_tiers(|t| seen |= t == Tier::Avx2);
+        simd_tiers(|t, _| seen |= t == Tier::Avx2);
         assert!(seen == has && (Tier::best() == Tier::Avx2) == has);
         cpu::disable(cpu::AVX2);
         assert!(!Tier::Avx2.usable() && Tier::best() == Tier::Go);

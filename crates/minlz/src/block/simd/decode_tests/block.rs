@@ -203,7 +203,7 @@ fn simd_layouts_spec() {
 #[test]
 #[cfg_attr(miri, ignore = "40 blocks of up to 5000 operations: over 30 minutes")]
 fn simd_decode_built() {
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         // Go's draws make blocks of more than MAX_CHUNKS chunks, or chunks of 1 operation with
         // code length tables, which never pad to 64 bytes below their output. Go's seed avoids
         // both; so does this one.
@@ -302,7 +302,7 @@ fn simd_delta_example() {
 /// The long match rule (4.3) on the last operation of a block, which runs in exec_exact.
 #[test]
 fn simd_long_match_tail() {
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         let mut b = TestBuilder::default();
         for (last, ok) in [
             (op(1, 40, 32), true),
@@ -346,7 +346,7 @@ fn simd_long_match_tail() {
 fn simd_tail() {
     // Miri: shorter blocks and every eighth tail.
     let (n_ops, step) = if cfg!(miri) { (60, 8) } else { (200, 1) };
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         let mut rng = Rng(3);
         let mut b = TestBuilder::default();
         for tail in (0..40).step_by(step) {
@@ -389,7 +389,7 @@ pub(super) fn go_fixtures(max: usize) -> Vec<(String, Vec<u8>)> {
 /// and 64 KiB at every SIMD level; the Go fixtures stand in for them.
 #[test]
 fn simd_guard_page() {
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         let mut b = TestBuilder::default();
         let mut blocks = Vec::new();
         // Miri: the shorter blocks, whose last raw bits still end at each bit position.
@@ -1199,7 +1199,7 @@ fn simd_validation() {
         "valid class",
         "chunk at limit",
     ];
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         let mut b = TestBuilder::default();
         for tc in validation_cases() {
             let name = tc.name;
@@ -1282,7 +1282,7 @@ fn simd_validation() {
 
 #[test]
 fn simd_validation_chunks() {
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         let mut b = TestBuilder::default();
         for n in [MAX_CHUNKS, MAX_CHUNKS + 1] {
             let mut ops = vec![op(1, MAX_LEN, 1)];
@@ -1331,7 +1331,7 @@ fn simd_validation_65535_operations() {
             );
         }
         let block = e.bytes();
-        simd_tiers(|_| test_decode(&block, want));
+        simd_tiers(|_, _| test_decode(&block, want));
         // The reference doesn't depend on the tier.
         let rf = decode_simd_block(&block);
         assert!(
@@ -1346,16 +1346,16 @@ fn simd_validation_65535_operations() {
             "{name}: reference: no error"
         );
         let (n, body) = simd_header(&block[1..]).unwrap();
-        simd_tiers(|tier| {
+        simd_tiers(|tier, pv| {
             let mut dst = vec![0xfe; n + 64];
             let r = decode_simd(&mut dst[..n], body);
             assert!(
                 matches!(r, Err(Error::Corrupt(_))),
-                "{name} {tier:?}: {r:?}"
+                "{name} {tier:?} pivco {pv:?}: {r:?}"
             );
             assert!(
                 dst[n..].iter().all(|&v| v == 0xfe),
-                "{name} {tier:?}: wrote past dst"
+                "{name} {tier:?} pivco {pv:?}: wrote past dst"
             );
         });
     };
@@ -1429,7 +1429,7 @@ fn simd_validation_65535_operations() {
         let (e, want) = test_pad(&mut b, &mut tb);
         check(&format!("random {i}"), &e, &want, true);
     }
-    simd_tiers(|tier| {
+    for tier in Tier::tiers() {
         let (out, n_lit, n_off, n_esc, ok) = tok_stats(tier, &vec![135; MAX_CHUNK]);
         assert!(
             ok && (out, n_lit, n_off, n_esc) == (33 * MAX_CHUNK, MAX_CHUNK, 0, MAX_CHUNK),
@@ -1447,7 +1447,7 @@ fn simd_validation_65535_operations() {
             ok && n == 20 * MAX_CHUNK,
             "{tier:?}: offset symbols: {n} {ok}"
         );
-    });
+    }
 }
 
 #[test]
@@ -1469,7 +1469,7 @@ fn simd_validation_max_size() {
         let block = e.bytes();
         let rf = decode_simd_block(&block);
         // Building is the slow part, so only the decodes run per tier.
-        simd_tiers(|_| {
+        simd_tiers(|_, _| {
             if size <= max {
                 test_decode(&block, &want);
                 assert!(rf.as_ref() == Ok(&want), "size {size}: reference");
@@ -1513,7 +1513,7 @@ fn simd_corrupt_clears() {
     } else {
         (80000, 2000, 600, 3000)
     };
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         let mut b = TestBuilder::default();
         let (e, _) = b.build(&TestBlock {
             lits: b"Z".repeat(zs),
@@ -1685,95 +1685,104 @@ fn change_block(
 /// Compares the decoder with the reference decoder on built blocks, and on changed ones.
 #[test]
 fn simd_reference() {
-    simd_tiers(|_| {
-        let mut rng = Rng(6);
-        let mut b = TestBuilder::default();
-        let mut sd = Tables::default();
-        let modes = [STORED, CODE_LENS, CURRENT, CLASS_LENS, CURRENT];
-        let lit_modes = [STORED, CODE_LENS, CURRENT, CLASS_LENS, DELTA_LENS];
-        // Operations at the edge of validity, not all valid.
-        let edge = [
-            vec![op(100, 33, 20)],
-            vec![op(100, 33, 32)],
-            vec![op(20, 33, 40)],
-            vec![op(10, 20, 1000)],
-            vec![op(0, 20, 1), op(10, 20, 1)],
-        ];
-        // Literals of every value, so the literal class layouts matter.
-        let all: Vec<u8> = (0..=255).collect();
-        // Miri: the edge blocks and one of each kind after them, each small.
-        let (blocks, changes, max_ops) = if cfg!(miri) {
-            (10, 3, 40)
+    let mut rng = Rng(6);
+    let mut b = TestBuilder::default();
+    let mut sd = Tables::default();
+    let modes = [STORED, CODE_LENS, CURRENT, CLASS_LENS, CURRENT];
+    let lit_modes = [STORED, CODE_LENS, CURRENT, CLASS_LENS, DELTA_LENS];
+    // Operations at the edge of validity, not all valid.
+    let edge = [
+        vec![op(100, 33, 20)],
+        vec![op(100, 33, 32)],
+        vec![op(20, 33, 40)],
+        vec![op(10, 20, 1000)],
+        vec![op(0, 20, 1), op(10, 20, 1)],
+    ];
+    // Literals of every value, so the literal class layouts matter.
+    let all: Vec<u8> = (0..=255).collect();
+    // Miri: the edge blocks and one of each kind after them, each small.
+    let (blocks, changes, max_ops) = if cfg!(miri) {
+        (10, 3, 40)
+    } else {
+        (100, 60, 1500)
+    };
+    let mut valid = 0;
+    for i in 0..blocks {
+        let alphabet: &[u8] = if i % 2 == 0 {
+            &all
         } else {
-            (100, 60, 1500)
+            b"aaabbcdef\x00\xff"
         };
-        let mut valid = 0;
-        for i in 0..blocks {
-            let alphabet: &[u8] = if i % 2 == 0 {
-                &all
-            } else {
-                b"aaabbcdef\x00\xff"
-            };
-            let n = 1 + rng.intn(max_ops);
-            let max_off = 1 << rng.intn(25);
-            let (mut ops, mut lits) = test_ops(&mut rng, n, alphabet, 288, max_off);
-            if i < edge.len() {
-                (ops, lits) = (edge[i].clone(), b"abc".repeat(100));
-            } else if i % 5 == 3 {
-                // Single-value streams.
-                ops = vec![op(1, 4, 3); 1 + rng.intn(500)];
-                lits = b"a".repeat(ops.len());
+        let n = 1 + rng.intn(max_ops);
+        let max_off = 1 << rng.intn(25);
+        let (mut ops, mut lits) = test_ops(&mut rng, n, alphabet, 288, max_off);
+        if i < edge.len() {
+            (ops, lits) = (edge[i].clone(), b"abc".repeat(100));
+        } else if i % 5 == 3 {
+            // Single-value streams.
+            ops = vec![op(1, 4, 3); 1 + rng.intn(500)];
+            lits = b"a".repeat(ops.len());
+        }
+        let limit = rng.intn(7);
+        let mut tb = TestBlock {
+            ops,
+            lits,
+            limit,
+            chunk: 32 + rng.intn(300),
+            lit_block: 64 + rng.intn(2000),
+            modes: modes[..1 + i % modes.len()].to_vec(),
+            lit_modes: lit_modes[..1 + i % lit_modes.len()].to_vec(),
+            delta: rng.uint64(),
+            ..Default::default()
+        };
+        if i % 4 == 1 {
+            tb.chunk = (1024 << limit).min(MAX_CHUNK);
+        }
+        let orig = test_pad(&mut b, &mut tb).0.bytes();
+        // Building the blocks and the reference cost most of the test, so they run once, and only
+        // the decoder runs on every tier.
+        let mut cases = Vec::new();
+        for j in 0..changes {
+            let (mut e, want) = b.build(&tb);
+            if j % 2 == 1 {
+                change_block(&mut rng, &mut b, &mut sd, &mut e, tb.lit_block);
             }
-            let limit = rng.intn(7);
-            let mut tb = TestBlock {
-                ops,
-                lits,
-                limit,
-                chunk: 32 + rng.intn(300),
-                lit_block: 64 + rng.intn(2000),
-                modes: modes[..1 + i % modes.len()].to_vec(),
-                lit_modes: lit_modes[..1 + i % lit_modes.len()].to_vec(),
-                delta: rng.uint64(),
-                ..Default::default()
-            };
-            if i % 4 == 1 {
-                tb.chunk = (1024 << limit).min(MAX_CHUNK);
+            let mut block = e.bytes();
+            if j > 0 && j % 2 == 0 {
+                let (_, n) = get_uvarint(&block[1..]).unwrap();
+                let p = 1 + n + rng.intn(block.len() - 1 - n);
+                match rng.intn(4) {
+                    0 => block[p] ^= 1 << rng.intn(8),
+                    1 => block[p] = rng.intn(256) as u8,
+                    2 => _ = block.remove(p),
+                    _ => block.truncate(p),
+                }
             }
-            let orig = test_pad(&mut b, &mut tb).0.bytes();
-            for j in 0..changes {
-                let (mut e, want) = b.build(&tb);
-                if j % 2 == 1 {
-                    change_block(&mut rng, &mut b, &mut sd, &mut e, tb.lit_block);
-                }
-                let mut block = e.bytes();
-                if j > 0 && j % 2 == 0 {
-                    let (_, n) = get_uvarint(&block[1..]).unwrap();
-                    let p = 1 + n + rng.intn(block.len() - 1 - n);
-                    match rng.intn(4) {
-                        0 => block[p] ^= 1 << rng.intn(8),
-                        1 => block[p] = rng.intn(256) as u8,
-                        2 => _ = block.remove(p),
-                        _ => block.truncate(p),
-                    }
-                }
+            let rf = decode_simd_block(&block);
+            assert!(
+                j > 0 || i < edge.len() || rf.as_ref() == Ok(&want),
+                "block {i}: reference: {:?}",
+                rf.as_ref().err()
+            );
+            if rf.is_ok() && block != orig {
+                valid += 1;
+            }
+            cases.push((block, rf));
+        }
+        simd_tiers(|_, _| {
+            for (j, (block, rf)) in cases.iter().enumerate() {
                 let mut got = Vec::new();
-                let r = crate::decode(&mut got, &block);
-                let rf = decode_simd_block(&block);
+                let r = crate::decode(&mut got, block);
                 let same = rf.as_ref().is_ok_and(|rf| *rf == got);
                 assert!(
-                    r.is_ok() == rf.is_ok()
-                        && (r.is_err() || same)
-                        && (j > 0 || i < edge.len() || rf.as_ref() == Ok(&want)),
+                    r.is_ok() == rf.is_ok() && (r.is_err() || same),
                     "block {i} change {j}: decode: {r:?}, reference: {:?}, same output: {same}",
-                    rf.err()
+                    rf.as_ref().err()
                 );
-                if r.is_ok() && block != orig {
-                    valid += 1;
-                }
             }
-        }
-        eprintln!("{valid} changed blocks decoded");
-    });
+        });
+    }
+    eprintln!("{valid} changed blocks decoded");
 }
 
 /// The group lengths and both flag codes of a token class table must be complete codes, even
@@ -1896,7 +1905,7 @@ fn simd_token_components() {
 /// classes 5 and 6 (the lowercase letters), and the block would decode.
 #[test]
 fn simd_class_len_16() {
-    simd_tiers(|_| {
+    simd_tiers(|_, _| {
         let lay = &LAYOUTS[LITS];
         let mut cl = vec![0u8; lay.n];
         (cl[5], cl[6]) = (1, 1);
@@ -1960,121 +1969,131 @@ fn test_lit_decode(tier: Tier, block: &[u8]) -> Result<Vec<u8>, Error> {
 #[test]
 #[cfg_attr(miri, ignore = "blocks of thousands of operations: over 25 minutes")]
 fn simd_lit_lazy() {
-    simd_tiers(|tier| {
-        let mut rng = Rng(11);
-        let mut b = TestBuilder::default();
-        let lit_modes = [STORED, CODE_LENS, CURRENT, CLASS_LENS, DELTA_LENS, STORED];
-        let mut cases: Vec<(String, TestEnc, Vec<u8>)> = Vec::new();
-        let mut add = |b: &mut TestBuilder, name: String, mut tb: TestBlock| {
-            let (e, want) = test_pad(b, &mut tb);
-            cases.push((name, e, want));
-        };
-        for i in 0..6 {
-            let n = 3000 + rng.intn(3000);
-            let max_off = 1 << rng.intn(20);
-            let (ops, lits) = test_ops(&mut rng, n, b"abcdefgh\x00", 288, max_off);
-            let delta = (i & 1) as u64 * rng.uint64();
-            let tb = TestBlock {
-                ops: ops.clone(),
-                lits: lits.clone(),
-                limit: 2,
-                chunk: 500 + rng.intn(3000),
-                lit_block: 1 + rng.intn(200),
-                modes: vec![CODE_LENS, CURRENT],
-                lit_modes: lit_modes[i..].to_vec(),
-                delta,
-                ..Default::default()
-            };
-            add(&mut b, format!("many literal blocks per chunk {i}"), tb);
-            let tb = TestBlock {
-                chunk: ops.len() / 90 + rng.intn(20),
-                ops,
-                lits,
-                lit_block: 5000 + rng.intn(60000),
-                lit_modes: lit_modes[i..].to_vec(),
-                delta,
-                ..Default::default()
-            };
-            add(&mut b, format!("many chunks per literal block {i}"), tb);
-        }
-        // Few literals in the operations, many after them.
-        let tail: Vec<u8> = (0..30000).map(|_| b"abcd"[rng.intn(4)]).collect();
+    let mut rng = Rng(11);
+    let mut b = TestBuilder::default();
+    let lit_modes = [STORED, CODE_LENS, CURRENT, CLASS_LENS, DELTA_LENS, STORED];
+    let mut cases: Vec<(String, TestEnc, Vec<u8>)> = Vec::new();
+    let mut add = |b: &mut TestBuilder, name: String, mut tb: TestBlock| {
+        let (e, want) = test_pad(b, &mut tb);
+        cases.push((name, e, want));
+    };
+    for i in 0..6 {
+        let n = 3000 + rng.intn(3000);
+        let max_off = 1 << rng.intn(20);
+        let (ops, lits) = test_ops(&mut rng, n, b"abcdefgh\x00", 288, max_off);
+        let delta = (i & 1) as u64 * rng.uint64();
         let tb = TestBlock {
-            ops: vec![op(40, 32, 7), op(2, 30, 0)],
-            lits: tail.clone(),
-            chunk: 1,
-            lit_block: 2000,
-            lit_modes: vec![STORED, CODE_LENS, CURRENT],
-            delta: 1,
+            ops: ops.clone(),
+            lits: lits.clone(),
+            limit: 2,
+            chunk: 500 + rng.intn(3000),
+            lit_block: 1 + rng.intn(200),
+            modes: vec![CODE_LENS, CURRENT],
+            lit_modes: lit_modes[i..].to_vec(),
+            delta,
             ..Default::default()
         };
-        add(&mut b, "literals after the operations".into(), tb);
-        let mut e = TestEnc {
-            typ: BLOCK_TYPE,
-            size: tail.len(),
-            no_lz: true,
+        add(&mut b, format!("many literal blocks per chunk {i}"), tb);
+        let tb = TestBlock {
+            chunk: ops.len() / 90 + rng.intn(20),
+            ops,
+            lits,
+            lit_block: 5000 + rng.intn(60000),
+            lit_modes: lit_modes[i..].to_vec(),
+            delta,
             ..Default::default()
         };
-        for (i, v) in tail.chunks(7000).enumerate() {
-            e.lits.push(b.stream(LITS, [CODE_LENS, CURRENT][i % 2], v));
-        }
-        cases.push(("no operations".into(), e, tail));
+        add(&mut b, format!("many chunks per literal block {i}"), tb);
+    }
+    // Few literals in the operations, many after them.
+    let tail: Vec<u8> = (0..30000).map(|_| b"abcd"[rng.intn(4)]).collect();
+    let tb = TestBlock {
+        ops: vec![op(40, 32, 7), op(2, 30, 0)],
+        lits: tail.clone(),
+        chunk: 1,
+        lit_block: 2000,
+        lit_modes: vec![STORED, CODE_LENS, CURRENT],
+        delta: 1,
+        ..Default::default()
+    };
+    add(&mut b, "literals after the operations".into(), tb);
+    let mut e = TestEnc {
+        typ: BLOCK_TYPE,
+        size: tail.len(),
+        no_lz: true,
+        ..Default::default()
+    };
+    for (i, v) in tail.chunks(7000).enumerate() {
+        e.lits.push(b.stream(LITS, [CODE_LENS, CURRENT][i % 2], v));
+    }
+    cases.push(("no operations".into(), e, tail));
 
-        let extra = b"yz".repeat(500);
-        let changes = 60;
-        for (name, te, want0) in &cases {
-            let block = te.bytes();
-            assert_eq!(
-                decode_simd_block(&block).as_ref(),
-                Ok(want0),
-                "{name}: reference"
+    let extra = b"yz".repeat(500);
+    let changes = 60;
+    for (name, te, want0) in &cases {
+        let block = te.bytes();
+        assert_eq!(
+            decode_simd_block(&block).as_ref(),
+            Ok(want0),
+            "{name}: reference"
+        );
+        // Building the blocks and the reference cost most of the test, so they run once, and only
+        // the decoder runs on every tier.
+        let mut changed = Vec::new();
+        for j in 0..changes {
+            let mut e = te.clone();
+            let mut want = None;
+            match j % 6 {
+                // The literals run out, mostly in the operations.
+                0 => e.lits.truncate(rng.intn(e.lits.len())),
+                1 => _ = e.lits.remove(rng.intn(e.lits.len())),
+                // One literal more than the block holds.
+                2 => e.lits.push(TestStream {
+                    data: b"x".to_vec(),
+                    ..Default::default()
+                }),
+                3 => {
+                    e.size += extra.len();
+                    e.lits.push(b.stream(LITS, CODE_LENS, &extra));
+                    want = Some([&want0[..], &extra].concat());
+                }
+                4 => {
+                    let i = rng.intn(e.lits.len());
+                    let s = &mut e.lits[i];
+                    let n = s.data.len().saturating_sub(1 + rng.intn(3));
+                    s.data.truncate(n);
+                }
+                _ => {}
+            }
+            let mut block = e.bytes();
+            if j % 6 == 5 {
+                let (_, h) = get_uvarint(&block[1..]).unwrap();
+                let p = 1 + h + rng.intn(block.len() - 1 - h);
+                block[p] ^= 1 << rng.intn(8);
+            }
+            let rf = decode_simd_block(&block);
+            assert!(
+                want.is_none() || rf.as_ref().ok() == want.as_ref(),
+                "{name} change {j}: reference {:?}",
+                rf.as_ref().err()
             );
+            changed.push((block, rf));
+        }
+        simd_tiers(|tier, _| {
             test_decode(&block, want0);
             assert_eq!(test_lit_decode(tier, &block).as_ref(), Ok(want0), "{name}");
-            for j in 0..changes {
-                let mut e = te.clone();
-                let mut want = None;
-                match j % 6 {
-                    // The literals run out, mostly in the operations.
-                    0 => e.lits.truncate(rng.intn(e.lits.len())),
-                    1 => _ = e.lits.remove(rng.intn(e.lits.len())),
-                    // One literal more than the block holds.
-                    2 => e.lits.push(TestStream {
-                        data: b"x".to_vec(),
-                        ..Default::default()
-                    }),
-                    3 => {
-                        e.size += extra.len();
-                        e.lits.push(b.stream(LITS, CODE_LENS, &extra));
-                        want = Some([&want0[..], &extra].concat());
-                    }
-                    4 => {
-                        let i = rng.intn(e.lits.len());
-                        let s = &mut e.lits[i];
-                        let n = s.data.len().saturating_sub(1 + rng.intn(3));
-                        s.data.truncate(n);
-                    }
-                    _ => {}
-                }
-                let mut block = e.bytes();
-                if j % 6 == 5 {
-                    let (_, h) = get_uvarint(&block[1..]).unwrap();
-                    let p = 1 + h + rng.intn(block.len() - 1 - h);
-                    block[p] ^= 1 << rng.intn(8);
-                }
-                let got = test_lit_decode(tier, &block);
-                let rf = decode_simd_block(&block);
+            for (j, (block, rf)) in changed.iter().enumerate() {
+                let got = test_lit_decode(tier, block);
                 assert!(
                     got.is_ok() == rf.is_ok()
-                        && (got.is_err() || got.as_ref().ok() == rf.as_ref().ok())
-                        && (want.is_none() || got.as_ref().ok() == want.as_ref()),
+                        && (got.is_err() || got.as_ref().ok() == rf.as_ref().ok()),
                     "{name} change {j}: {:?}, reference {:?}",
                     got.err(),
-                    rf.err()
+                    rf.as_ref().err()
                 );
             }
-        }
-    });
+        });
+    }
 }
 
 /// fill decodes literal blocks only until the literals a chunk needs are decoded, and zeros

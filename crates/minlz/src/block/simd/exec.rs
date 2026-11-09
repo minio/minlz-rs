@@ -64,6 +64,8 @@ use super::exec_avx2::{
     off_stats_avx2, tok_stats_avx2,
 };
 use super::{MAX_LEN, OFF_TAB};
+#[cfg(test)]
+use crate::pivco::kernel::Tier as PivcoTier;
 
 /// The exec loops and stats of a CPU tier: Go's `cpu` flags that `simdExec`, `simdExecFlat`
 /// and the stats dispatch on. A vector tier whose loops aren't built for the target runs the Go
@@ -89,17 +91,29 @@ pub(crate) enum Tier {
 
 #[cfg(test)]
 thread_local! {
-    static FORCED: core::cell::Cell<Option<Tier>> = const { core::cell::Cell::new(None) };
+    static FORCED: core::cell::Cell<Option<(Tier, PivcoTier)>> =
+        const { core::cell::Cell::new(None) };
 }
 
-/// Runs f once per usable tier, with the decodes of this thread forced to it (Go `simdTiers`).
+/// Runs f once per usable tier and pivco tier, with the decodes of this thread forced to them
+/// (Go `simdTiers`, which only varies the tier). Tests that pass the tier to the loops themselves
+/// need only [`Tier::tiers`].
 #[cfg(test)]
-pub(crate) fn simd_tiers(mut f: impl FnMut(Tier)) {
+pub(crate) fn simd_tiers(mut f: impl FnMut(Tier, PivcoTier)) {
     for t in Tier::tiers() {
-        FORCED.set(Some(t));
-        f(t);
+        for p in PivcoTier::tiers() {
+            FORCED.set(Some((t, p)));
+            f(t, p);
+        }
     }
     FORCED.set(None);
+}
+
+/// The pivco tier [`simd_tiers`] forces. Without it, a decoder keeps the pivco tier it took on
+/// first use, and the thread's decoder outlives the rounds of simd_tiers.
+#[cfg(test)]
+pub(super) fn forced_pivco() -> Option<PivcoTier> {
+    FORCED.get().map(|(_, p)| p)
 }
 
 /// The signature of the AVX2 and NEON exec loops, Go's
@@ -247,7 +261,7 @@ impl Tier {
     /// [`simd_tiers`] forces.
     pub(crate) fn current() -> Tier {
         #[cfg(test)]
-        if let Some(t) = FORCED.get() {
+        if let Some((t, _)) = FORCED.get() {
             return t;
         }
         Tier::best()

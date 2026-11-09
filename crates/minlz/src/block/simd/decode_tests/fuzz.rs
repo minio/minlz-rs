@@ -47,7 +47,7 @@ fn fuzz_decode_simd(extra: u32, body: &[u8]) {
     // reaching back too far fault.
     let mut dg = Buffer::new(n).unwrap();
     let dst = dg.slice(n, body.len() & 1 == 0);
-    simd_tiers(|tier| {
+    simd_tiers(|tier, pv| {
         dst.fill(fill);
         let got = simd_header(&src[1..]).and_then(|(size, b)| {
             assert_eq!(size, n);
@@ -56,10 +56,13 @@ fn fuzz_decode_simd(extra: u32, body: &[u8]) {
         assert_eq!(
             got.is_ok(),
             want.is_ok(),
-            "{tier:?}: err {got:?}, reference {want:?}"
+            "{tier:?} pivco {pv:?}: err {got:?}, reference {want:?}"
         );
         if let Ok(w) = &want {
-            assert!(dst[..] == w[..], "{tier:?}: reference mismatch");
+            assert!(
+                dst[..] == w[..],
+                "{tier:?} pivco {pv:?}: reference mismatch"
+            );
         }
     });
 }

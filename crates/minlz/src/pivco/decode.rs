@@ -48,6 +48,14 @@ impl Decoder {
         d
     }
 
+    /// Makes the decoder run the kernels of `tier` from now on, as [`Decoder::with_tier`] does
+    /// for a new one.
+    #[cfg(test)]
+    pub(crate) fn set_tier(&mut self, tier: Tier) {
+        self.setup();
+        self.tier = tier;
+    }
+
     fn setup(&mut self) {
         if self.arena.is_empty() {
             self.arena = vec![0; ARENA_SIZE + SCRATCH_ALIGN];

@@ -1104,11 +1104,12 @@ fn fuzz_encoding_blocks_seeded() {
                 assert!(decode_block(&enc).as_ref() == Ok(data), "{what}");
                 continue;
             }
-            super::super::exec::simd_tiers(|t| {
+            super::super::exec::simd_tiers(|t, pv| {
                 dec.clear();
                 dec.resize(data.len(), 0xfe);
-                decode(&mut dec, &enc).unwrap_or_else(|e| panic!("{what}, {t:?}: {e}"));
-                assert!(dec == *data, "{what}, {t:?}: mismatch");
+                decode(&mut dec, &enc)
+                    .unwrap_or_else(|e| panic!("{what}, {t:?}, pivco {pv:?}: {e}"));
+                assert!(dec == *data, "{what}, {t:?}, pivco {pv:?}: mismatch");
             });
             let r = decode_simd_block_strict(&enc);
             assert!(r.as_ref() == Ok(data), "{what}: reference {:?}", r.err());
