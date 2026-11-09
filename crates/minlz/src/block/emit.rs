@@ -285,18 +285,15 @@ pub(super) fn emit_copy_lits2(dst: &mut [u8], lits: &[u8], offset: usize, length
 /// Return the number of bytes [`emit_literal`] would use for a literal of
 /// length `n` (the header only, not the payload).  Port of
 /// `encode.go:emitLiteralSizeN`.
-///
-/// Like Go's, it is one byte high for `n == 285` and `n == 65565`; L3 scores
-/// with it, so changing it would change the parse.
 #[inline]
 pub(super) fn emit_literal_size_n(n: usize) -> usize {
     if n == 0 {
         0
     } else if n <= 29 {
         1
-    } else if n < 29 + (1 << 8) {
+    } else if n <= 29 + (1 << 8) {
         2
-    } else if n < 29 + (1 << 16) {
+    } else if n <= 29 + (1 << 16) {
         3
     } else {
         4
@@ -428,6 +425,25 @@ mod tests {
                 got_header, want_header,
                 "length={len}: header mismatch\ngot  {got_header:?}\nwant {want_header:?}"
             );
+        }
+    }
+
+    /// Ports `TestEmitLiteralSizeN` (`encode_test.go`): L3's estimate is the header
+    /// [`emit_literal`] writes.
+    #[test]
+    fn emit_literal_size_n_matches_emit_literal() {
+        let lit = vec![0u8; 65600];
+        let mut dst = vec![0u8; lit.len() + 16];
+        // The header size only steps after 29, 285 and 65565; copying every length between is
+        // slow, more so under Miri.
+        let (step, near) = if cfg!(miri) {
+            (8192, 65564..=65566)
+        } else {
+            (97, 65530..=65600)
+        };
+        for n in (1..=320).chain((388..65530).step_by(step)).chain(near) {
+            let header = emit_literal(&mut dst, &lit[..n]) - n;
+            assert_eq!(emit_literal_size_n(n), header, "n={n}");
         }
     }
 

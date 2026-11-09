@@ -1227,6 +1227,43 @@ fn encode_matches_go() {
     }
 }
 
+/// `lits` random bytes, a copy of the `copy` bytes 100 back, `zeros` zeros and `tail` random
+/// bytes.
+fn literal_border_input(lits: usize, copy: usize, zeros: usize, tail: usize) -> Vec<u8> {
+    let mut rng = Xor64::new(0);
+    let mut v: Vec<u8> = (0..lits).map(|_| (rng.next() >> 24) as u8).collect();
+    for _ in 0..copy {
+        v.push(v[v.len() - 100]);
+    }
+    v.extend(std::iter::repeat_n(0, zeros));
+    v.extend((0..tail).map(|_| (rng.next() >> 24) as u8));
+    v
+}
+
+/// Pins L3 output where it depends on the header size of 285 and 65565 literals, which
+/// `emit_literal_size_n` overestimated by a byte before Go 3598d19: a 5-byte copy after 285
+/// literals, and literal tails that fit the size limit only with the right header. Each row:
+/// the input's arguments, then size and XXH3 of the input and of Go's L3 block (same with
+/// `-tags noasm`).
+#[test]
+#[cfg_attr(miri, ignore = "L3 fills 10 MiB of tables per block")]
+fn l3_literal_header_estimate_matches_go() {
+    #[rustfmt::skip]
+    let rows = [
+        ((285, 5, 64, 0), (354, 0x8519_2dec_546f_13a8), (297, 0x0a13_ead7_8cd9_5df0)),
+        ((1, 0, 10, 285), (296, 0xeaab_4a47_16a8_42b3), (294, 0xdff9_afe2_8793_3349)),
+        ((1, 0, 11, 65565), (65577, 0xbed7_bb0c_8ed5_fde6), (65576, 0x75b5_3020_df08_64d9)),
+    ];
+    for ((lits, copy, zeros, tail), src_want, want) in rows {
+        let src = literal_border_input(lits, copy, zeros, tail);
+        let what = format!("literal_border_input({lits}, {copy}, {zeros}, {tail})");
+        assert_eq!((src.len(), crate::xxh3::hash(&src)), src_want, "{what}");
+        let mut enc = Vec::new();
+        encode(&mut enc, &src, Level::Smallest).unwrap();
+        assert_eq!((enc.len(), crate::xxh3::hash(&enc)), want, "{what}");
+    }
+}
+
 /// Size of the shortest header that can encode a literal (or repeat) of n
 /// bytes. Port of Go's `literalHeaderLen`.
 fn literal_header_len(n: usize) -> usize {
