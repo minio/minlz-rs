@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::Error as BlockError;
 use crate::block;
@@ -1133,6 +1134,78 @@ fn concurrent_chunk_crc() {
                 let r = res.unwrap_or_else(|e| panic!("{what}: {e}"));
                 assert_eq!(r.bytes_written, input.len() as u64, "{what}");
                 assert!(r.writer == input, "{what}");
+            }
+        }
+    }
+}
+
+/// A sink that keeps what it was given after `decode_concurrent` fails with it.
+#[derive(Clone, Debug, Default)]
+struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedSink {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Ports `TestDecodeConcurrentErrorPrefix` (`reader_test.go`): `decode_concurrent` writes exactly
+/// the blocks before a failed one, and reports its error even when a later chunk fails first.
+#[test]
+#[cfg_attr(miri, ignore = "1 MiB streams too slow for miri")]
+fn decode_concurrent_error_prefix() {
+    use block::Level::{Balanced, BalancedSimd};
+    const BLOCK_SIZE: usize = 64 << 10;
+    const BLOCKS: usize = 16;
+    const BAD: usize = 2;
+    let text = seek_test_data(BLOCKS * BLOCK_SIZE, 1);
+    let random = rand_bytes(1, BLOCKS * BLOCK_SIZE);
+    for (data, level, typ) in [
+        (&random, Balanced, CHUNK_TYPE_UNCOMPRESSED_DATA),
+        (&text, Balanced, CHUNK_TYPE_MINLZ_COMPRESSED_DATA),
+        (&text, BalancedSimd, CHUNK_TYPE_MINLZ_SIMD),
+    ] {
+        let stream = write_stream(
+            data,
+            WriterBuilder::new().level(level).block_size(BLOCK_SIZE),
+        );
+        let mut chunks = Vec::new();
+        let mut off = 0;
+        while off < stream.len() {
+            if stream[off] == typ {
+                chunks.push(off);
+            }
+            off += CHUNK_HEADER_SIZE + read_chunk_len(&stream[off + 1..]);
+        }
+        assert_eq!(chunks.len(), BLOCKS, "chunk{typ:02x}");
+        let mut crc_err = stream.clone();
+        crc_err[chunks[BAD] + CHUNK_HEADER_SIZE] ^= 1;
+        let cut = |s: &[u8], n: usize| s[..chunks[n] + CHUNK_HEADER_SIZE + 10].to_vec();
+        for (name, s, want) in [
+            ("checksum", crc_err.clone(), Error::Crc),
+            ("truncated", cut(&stream, BAD), Error::Corrupt),
+            // The dispatcher fails at the cut, usually before a worker finds the bad checksum.
+            ("checksum, cut later", cut(&crc_err, BAD + 3), Error::Crc),
+        ] {
+            for threads in [1, 2, 4, 16] {
+                let what = format!("chunk{typ:02x}/{name}/threads{threads}");
+                let out = SharedSink::default();
+                let e = Reader::new(Cursor::new(&s))
+                    .decode_concurrent(out.clone(), threads)
+                    .expect_err(&what);
+                assert_eq!(e.to_string(), want.to_string(), "{what}");
+                let got = out.0.lock().unwrap();
+                assert!(
+                    got[..] == data[..BAD * BLOCK_SIZE],
+                    "{what}: wrote {} bytes, want the {} before the failed block",
+                    got.len(),
+                    BAD * BLOCK_SIZE
+                );
             }
         }
     }
