@@ -186,8 +186,11 @@ impl<R: Read + Seek> ReadSeeker<R> {
         let u_off = entry.uncompressed;
 
         self.reader.r.seek(SeekFrom::Start(c_off))?;
-        // The jump skips the identifier of the target stream; the hash still verifies SIMD chunks.
+        // The jump skips the identifier of the target stream, which may differ from the last one
+        // read: accept what any identifier allows.  The hash still verifies SIMD chunks.
         self.reader.simd = true;
+        self.reader.max_block = self.reader.max_block_user;
+        self.reader.stream_start_unknown = true;
         // Hard-reset block state: clearing the decoded buffer makes the
         // next data chunk's `block_start += decoded.len()` a no-op, so
         // block_start at the new chunk equals u_off as desired.

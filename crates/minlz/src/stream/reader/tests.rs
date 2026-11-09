@@ -1625,6 +1625,29 @@ fn read_seeker_simd_concat() {
     }
 }
 
+/// An index jump into a later concatenated stream skips its identifier: neither that stream's
+/// EOF size (counted from its identifier) nor its block size may be checked against the first.
+#[test]
+#[cfg_attr(miri, ignore = "multi-MiB streams too slow for miri")]
+fn read_seeker_concat_jump_into_later_stream() {
+    let (a, b) = (seek_test_data(400 << 10, 1), seek_test_data(3 << 20, 2));
+    let want = [&a[..], &b].concat();
+    let sb = write_stream(
+        &b,
+        WriterBuilder::new()
+            .level(block::Level::BalancedSimd)
+            .block_size(1 << 20),
+    );
+    let stream = [seek_test_stream(block::Level::Balanced, &a), sb].concat();
+    let idx = crate::index::index_stream(&stream[..]).unwrap();
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+    let off = a.len() + (2 << 20) + 5;
+    rs.seek(SeekFrom::Start(off as u64)).unwrap();
+    let mut got = Vec::new();
+    rs.read_to_end(&mut got).unwrap();
+    assert!(got == want[off..]);
+}
+
 /// Ports `TestReaderSIMDFlagStrict` (`seek_simd_test.go`): reads still require the flag of the
 /// last identifier they read.
 #[test]

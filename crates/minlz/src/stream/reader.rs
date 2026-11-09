@@ -169,6 +169,9 @@ pub struct Reader<R> {
     /// The stream identifier allows SIMD chunks.
     pub(super) simd: bool,
     pub(super) expect_eof: bool,
+    /// An index jump skipped the stream identifier, so the EOF chunk's size,
+    /// which counts from that identifier, cannot be checked.
+    pub(super) stream_start_unknown: bool,
     pub(super) ignore_stream_id: bool,
     pub(super) ignore_crc: bool,
     /// Sticky error.  Once set, every subsequent read returns it.
@@ -197,6 +200,7 @@ impl<R: Read> Reader<R> {
             header_read: b.ignore_stream_id,
             simd: b.ignore_stream_id,
             expect_eof: false,
+            stream_start_unknown: false,
             ignore_stream_id: b.ignore_stream_id,
             ignore_crc: b.ignore_crc,
             err: None,
@@ -216,6 +220,7 @@ impl<R: Read> Reader<R> {
         self.header_read = self.ignore_stream_id;
         self.simd = self.ignore_stream_id;
         self.expect_eof = false;
+        self.stream_start_unknown = false;
         self.err = None;
     }
 
@@ -637,13 +642,14 @@ impl<R: Read> Reader<R> {
                 if n != chunk_len {
                     return Err(Error::Corrupt);
                 }
-                if want_size != self.stream_size() {
+                if !self.stream_start_unknown && want_size != self.stream_size() {
                     return Err(Error::Corrupt);
                 }
             }
         }
         self.expect_eof = false;
         self.header_read = false;
+        self.stream_start_unknown = false;
         Ok(())
     }
 
