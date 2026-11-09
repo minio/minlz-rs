@@ -346,12 +346,20 @@ fn apply_long_flag<I: Iterator<Item = OsString>>(
     // As in Go's flag package, a bool flag is `-name` or `-name=value`, never `-name value`.
     let on = || val.map_or(Ok(true), |v| parse_bool(name, v));
     match name {
-        // Go's level flags are bools too; `=false` leaves the level alone.
-        "xfast" | "1" | "2" | "3" if !on()? => {}
-        "xfast" => opts.base = Some(Level::SuperFast),
-        "1" => opts.base = Some(Level::Fastest),
-        "2" => opts.base = Some(Level::Balanced),
-        "3" => opts.base = Some(Level::Smallest),
+        // Go's level flags are bools too; `=false` undoes the same flag given earlier.
+        "xfast" | "1" | "2" | "3" => {
+            let level = Some(match name {
+                "xfast" => Level::SuperFast,
+                "1" => Level::Fastest,
+                "2" => Level::Balanced,
+                _ => Level::Smallest,
+            });
+            if on()? {
+                opts.base = level;
+            } else if opts.base == level {
+                opts.base = None;
+            }
+        }
         "0" => opts.uncompressed = on()?,
         "block" => opts.block = on()?,
         "c" | "stdout" => opts.stdout = on()?,
@@ -589,6 +597,8 @@ mod tests {
         for (args, want) in [
             (&["-xfast=true"][..], Level::SuperFastSimd),
             (&["-1", "-xfast=false"], Level::FastestSimd),
+            (&["-xfast", "-xfast=false"], Level::BalancedSimd),
+            (&["-1", "-1=false"], Level::BalancedSimd),
             (&["-3=1"], Level::SmallestSimd),
         ] {
             let cli = parse_argv(&[&["c"], args, &["x"]].concat()).unwrap();
