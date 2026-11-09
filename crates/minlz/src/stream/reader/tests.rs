@@ -1692,7 +1692,7 @@ fn read_seeker_concat_offsets_are_global() {
 }
 
 /// Reads through the second stream's EOF chunk, which is checked when its identifier was read
-/// and not after an index jump skipped it.
+/// and only bounded after an index jump skipped it.
 #[test]
 #[cfg_attr(miri, ignore = "700 KiB streams too slow for miri")]
 fn read_seeker_concat_reads_through_eof() {
@@ -1744,6 +1744,33 @@ fn read_seeker_concat_reads_through_eof() {
     assert_eq!(r.current_offset(), skip as u64);
     let got = r.decode_concurrent(Vec::new(), 2).unwrap().writer;
     assert!(got == want[skip..], "skip then decode_concurrent");
+}
+
+/// After an index jump the EOF size still bounds the stream: a chunk cut from the jumped-into
+/// stream fails as it does for a sequential read, and the exact check resumes at the next
+/// stream identifier.
+#[test]
+#[cfg_attr(miri, ignore = "640 KiB streams too slow for miri")]
+fn read_seeker_jump_detects_dropped_chunk() {
+    let data = seek_test_data(640 << 10, 7);
+    let stream = seek_test_stream(block::Level::Balanced, &data);
+    let idx = crate::index::index_stream(&stream[..]).unwrap();
+    let off = find_chunk(&stream, 8, |t| {
+        t == CHUNK_TYPE_MINLZ_COMPRESSED_DATA || t == CHUNK_TYPE_UNCOMPRESSED_DATA
+    });
+    let len = CHUNK_HEADER_SIZE + read_chunk_len(&stream[off + 1..]);
+    let cut = [&stream[..off], &stream[off + len..]].concat();
+    let cases = [
+        [&cut[..], &stream].concat(),
+        [&stream[..], &cut].concat(),
+        cut,
+    ];
+    for (i, s) in cases.iter().enumerate() {
+        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(s)), &idx).unwrap();
+        rs.seek(SeekFrom::Start((2 << 16) + 5)).unwrap();
+        let e = rs.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(is_corrupt(&e), "case {i}: {e}");
+    }
 }
 
 /// Ports `TestReaderSIMDFlagStrict` (`seek_simd_test.go`): reads still require the flag of the

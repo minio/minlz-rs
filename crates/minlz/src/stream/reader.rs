@@ -171,7 +171,9 @@ pub struct Reader<R> {
     pub(super) simd: bool,
     pub(super) expect_eof: bool,
     /// Uncompressed offset where the current stream starts, which its EOF chunk's size counts
-    /// from.  `None` after an index jump skipped the stream identifier.
+    /// from.  `None` after an index jump skipped the stream identifier: the EOF size is then
+    /// only checked not to exceed the global offset, which misses a duplicated chunk and a
+    /// chunk dropped from a later concatenated stream.
     pub(super) stream_start: Option<u64>,
     pub(super) ignore_stream_id: bool,
     pub(super) ignore_crc: bool,
@@ -644,7 +646,12 @@ impl<R: Read> Reader<R> {
                 if n != chunk_len {
                     return Err(Error::Corrupt);
                 }
-                if self.stream_size().is_some_and(|size| size != want_size) {
+                let bad = match self.stream_size() {
+                    Some(size) => size != want_size,
+                    // The stream starts at or after offset 0, so its size is at most the offset.
+                    None => want_size > self.block_start + self.decoded.len() as u64,
+                };
+                if bad {
                     return Err(Error::Corrupt);
                 }
             }
