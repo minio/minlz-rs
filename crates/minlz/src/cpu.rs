@@ -55,7 +55,8 @@ pub fn has(mask: u32) -> bool {
 /// checks tier selection is not re-enabled by another; tests that only use tiers may see
 /// fewer while one is held, which they tolerate.
 #[cfg(test)]
-#[cfg_attr(not(all(target_arch = "x86_64", not(miri))), allow(dead_code))] // x86 tier tests only
+// Only the SIMD tier tests (x86_64 and little-endian aarch64) use it.
+#[cfg_attr(not(all(target_arch = "x86_64", not(miri))), allow(dead_code))]
 pub(crate) struct Disabled {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
