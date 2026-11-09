@@ -201,10 +201,10 @@ impl Index {
     /// * An entry at the last entry's uncompressed offset replaces its compressed
     ///   offset, so the index points at the block after the chunks before it.
     /// * If the uncompressed gap from the last entry is `< est_block_uncomp`
-    ///   (including a non-increasing offset), the call is a no-op — used to
+    ///   (including a decreasing offset), the call is a no-op — used to
     ///   thin the index during writing.
-    /// * Otherwise a *decreasing* compressed offset is rejected
-    ///   ([`Error::Invalid`]).
+    /// * Otherwise, and for a replacement, a *decreasing* compressed offset is
+    ///   rejected ([`Error::Invalid`]).
     /// * After insertion, if the entry count would exceed 65 535, the
     ///   internal `reduce_light` shrinker doubles `est_block_uncomp` and
     ///   re-thins entries in place.
@@ -217,6 +217,9 @@ impl Index {
         }
         if let Some(latest) = self.offsets.last_mut() {
             if uncompressed == latest.uncompressed {
+                if latest.compressed > compressed {
+                    return Err(Error::Invalid("compressed offset decreased"));
+                }
                 latest.compressed = compressed;
                 return Ok(());
             }

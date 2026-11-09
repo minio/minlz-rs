@@ -522,6 +522,18 @@ fn add_same_uncompressed_moves_to_later_chunk() {
 }
 
 #[test]
+fn add_same_uncompressed_rejects_decreasing_compressed() {
+    let mut idx = Index::default();
+    idx.reset(1 << 20);
+    idx.add(100, 0).unwrap();
+    idx.add(5000, 1 << 20).unwrap();
+    assert!(matches!(idx.add(50, 1 << 20), Err(Error::Invalid(_))));
+    let mut buf = Vec::new();
+    idx.append_to(&mut buf, Some(2 << 20), None).unwrap();
+    Index::default().load(&buf).unwrap();
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "MAX_INDEX_ENTRIES+5000 entries is impractical under miri"
