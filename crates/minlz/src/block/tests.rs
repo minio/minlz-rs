@@ -73,7 +73,6 @@ fn max_encoded_len_matches_go() {
     }
 }
 
-/// Ports `TestEmpty` from `minlz_test.go:199`.
 #[test]
 fn level_discriminants_match_go() {
     for v in [-1, 1, 2, 3, 4, 5, 6, 7, 260, 261, 262] {
@@ -90,6 +89,7 @@ fn level_is_simd() {
     }
 }
 
+/// Ports `TestEmpty` from `minlz_test.go:199`.
 #[test]
 fn empty() {
     roundtrip(&[]).expect("empty roundtrip");
