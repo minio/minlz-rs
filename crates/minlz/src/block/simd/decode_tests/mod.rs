@@ -397,9 +397,15 @@ pub(super) fn test_offset(off: usize) -> (u8, u64, usize) {
 /// Returns the values of the streams of ops.
 pub(super) fn test_values(ops: &[TestOp]) -> [Vec<u8>; 5] {
     let mut s: [Vec<u8>; 5] = Default::default();
+    // Code 33 plus an escape byte: a longer length would wrap in the escape stream.
+    const MAX_LONG: usize = MAX_LEN + 1 + 255;
     let (mut acc, mut nacc) = (0u64, 0);
     for o in ops {
         let (mut ll, mut ml) = (o.ll, o.ml);
+        assert!(
+            ll <= MAX_LONG && ml <= MAX_LONG,
+            "operation lengths {ll}, {ml} above {MAX_LONG}"
+        );
         let mut t = 0u8;
         if ll > 0 {
             t |= 2;
