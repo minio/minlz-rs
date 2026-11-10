@@ -39,9 +39,10 @@
 //!   and more, such as stream blocks at the default 2 MiB. On small blocks the classic levels
 //!   compress faster, and usually decompress faster too.
 //! * The delta levels ([`Level::SuperFastSimdDelta`], [`Level::FastestSimdDelta`],
-//!   [`Level::BalancedSimdDelta`]) store literals as the difference to the bytes at the last match
-//!   offset. That mainly helps binary data, like tables of numbers, but makes text larger and
-//!   costs decompression speed. [`Level::SmallestSimd`] decides this itself.
+//!   [`Level::BalancedSimdDelta`]) store the first 32 literals of each operation as the difference
+//!   to the bytes at the last match offset (`SPEC_SIMD.md` 4.5). That mainly helps binary data,
+//!   like tables of numbers, but makes text larger and costs decompression speed.
+//!   [`Level::SmallestSimd`] decides this itself.
 //! * Decoders for format v1.0 cannot read SIMD blocks. Use the classic levels for data that every
 //!   MinLZ decoder must read.
 //! * The decoder picks its tier once: AVX-512 on x86-64 CPUs with AVX-512 (F, BW, VL, VBMI,

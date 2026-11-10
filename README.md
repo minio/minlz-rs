@@ -213,9 +213,10 @@ fn roundtrip(src: &[u8]) -> Result<(), minlz::Error> {
   blocks.  For small blocks the classic levels compress faster, and
   usually decompress faster too.
 - **Delta literals.** `Level::SuperFastSimdDelta`, `FastestSimdDelta`
-  and `BalancedSimdDelta` store literals as the difference to the bytes
-  at the last match offset.  This mainly helps binary data, like tables
-  of numbers, but makes text larger and costs decompression speed.
+  and `BalancedSimdDelta` store the first 32 literals of each operation
+  as the difference to the bytes at the last match offset (`SPEC_SIMD.md`
+  4.5).  This mainly helps binary data, like tables of numbers, but
+  makes text larger and costs decompression speed.
   `Level::SmallestSimd` decides this itself.
 - **Compatibility.** Decoders for format v1.0, such as the Go package
   before v1.3.0, cannot read SIMD blocks, nor streams written at SIMD
