@@ -489,5 +489,29 @@ fn split_chunk_body(body: &[u8]) -> Result<(usize, &[u8]), Error> {
     Ok((dlen, compressed))
 }
 
+/// Port of Go's `overlapTailBlock`: a block ending in an overlapping copy,
+/// with its exact expected output. The tests and the benches use it.
+#[cfg(any(test, feature = "unstable-internals"))]
+#[doc(hidden)]
+pub fn overlap_tail_block(offset: usize, length: usize, trailing: usize) -> (Vec<u8>, Vec<u8>) {
+    // A preceding match keeps even short final copies smaller than raw input.
+    const PREFIX_MATCH: usize = 64;
+    let literal: Vec<u8> = (0..offset).map(|i| (i * 173 + i / 97) as u8).collect();
+    let head = offset + PREFIX_MATCH + length;
+    let mut want: Vec<u8> = (0..head).map(|i| literal[i % offset]).collect();
+    want.extend((0..trailing).map(|i| (i * 29 + 7) as u8));
+    let mut payload = vec![0u8; max_encoded_len(want.len()).unwrap() + 16];
+    let mut n = emit::emit_literal(&mut payload, &literal);
+    n += emit::emit_copy(&mut payload[n..], offset, PREFIX_MATCH);
+    n += emit::emit_copy(&mut payload[n..], offset, length);
+    if trailing != 0 {
+        n += emit::emit_literal(&mut payload[n..], &want[head..]);
+    }
+    let mut encoded = vec![0];
+    format::put_uvarint(&mut encoded, want.len() as u64);
+    encoded.extend_from_slice(&payload[..n]);
+    (encoded, want)
+}
+
 #[cfg(test)]
 mod tests;

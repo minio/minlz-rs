@@ -38,13 +38,26 @@ pub(super) struct Tables {
 
 /// The literals of a block decoded so far, `buf[..n]`. `buf` holds every literal of the block
 /// and [`PAD`] bytes; the bytes after the literals are those of earlier blocks, except the
-/// [`PAD`] bytes that [`Lits::fill`] zeroes.
+/// [`PAD`] bytes that [`Lits::fill`] zeroes. Stored literal blocks stay in the literal section
+/// until a chunk needs them copied to `buf` (see [`Lits::chunk_lits`]).
 #[derive(Default)]
 pub(super) struct Lits {
     pub(super) buf: Vec<u8>,
     pub(super) n: usize,
     /// The literal blocks decoded so far.
     blocks: usize,
+    /// The runs of stored literal blocks. Runs before `run` are read.
+    stored: Vec<LitRun>,
+    run: usize,
+}
+
+/// A run of consecutive stored literal blocks (Go `simdLitRun`): the literals at to at + n,
+/// stored at `sec[off..off + n]` of the literal section sec.
+#[derive(Clone, Copy)]
+struct LitRun {
+    at: usize,
+    off: usize,
+    n: usize,
 }
 
 /// Decodes SIMD blocks (Go `simdDecoder`). It keeps its buffers between blocks: a thread
@@ -168,6 +181,7 @@ impl Decoder {
         if n_lits == 0 || lr.pos != lr.end || d + n_lits - l != dst.len() {
             return None;
         }
+        self.lits.copy_stored(lr.body, l, n_lits);
         dst[d..].copy_from_slice(&self.lits.buf[l..n_lits]);
         if hash {
             // ops added dst[..d].
@@ -188,7 +202,8 @@ impl Decoder {
         if self.lits.buf.len() < size + PAD {
             self.lits.buf = vec![0; size + PAD];
         }
-        (self.lits.n, self.lits.blocks) = (0, 0);
+        (self.lits.n, self.lits.blocks, self.lits.run) = (0, 0, 0);
+        self.lits.stored.clear();
         Some(Reader {
             recs: &sec[end..sec.len() - n],
             body: sec,
@@ -280,11 +295,14 @@ impl Decoder {
             if st[1] + need > self.lits.n {
                 self.lits.fill(&mut self.t, lr, st[1], need, dst.len())?;
             }
+            let (lits, at) = self.lits.chunk_lits(lr.body, st[1], st[1] + need);
             let d = st[0];
+            st[1] -= at;
             // SAFETY: the tier comes from Tier::current, the stats above counted c's streams and
-            // out, and the literal buffer has PAD bytes past dst.len(), which the literals used
-            // never pass.
-            unsafe { c.run(tier, dst, &self.lits.buf, out, st) };
+            // out, and lits is readable PAD bytes past the literals used: they never pass need
+            // literals, nor the output position.
+            unsafe { c.run(tier, dst, lits, out, st) };
+            st[1] += at;
             // Chunks only use more literals than are decoded once the literal blocks run out.
             if st[3] != 0 || st[1] > self.lits.n {
                 return None;
@@ -315,17 +333,66 @@ impl Lits {
                 return None;
             }
             self.blocks += 1;
-            let n = self.n;
+            let (n, pos) = (self.n, r.pos);
             let hi = pivco::MAX_BLOCK_SIZE.min(size - n);
             let (nv, v) = t.stream(r, LITS, 1, hi, &mut self.buf[n..])?;
-            if let Some(v) = v {
-                self.buf[n..n + nv].copy_from_slice(&v[..nv]);
+            if v.is_some() {
+                // Literal blocks are stored back to back, so stored blocks in a row are one run.
+                let open = self.stored.len() > self.run;
+                match self.stored.last_mut() {
+                    Some(k) if open && k.off + k.n == pos => k.n += nv,
+                    _ => self.stored.push(LitRun {
+                        at: n,
+                        off: pos,
+                        n: nv,
+                    }),
+                }
             }
             self.n += nv;
         }
         // The loops read up to 32 bytes past the literals of a chunk.
         self.buf[self.n..self.n + PAD].fill(0);
         Some(())
+    }
+
+    /// Returns the literals for a chunk that reads literals a to b, and the position of their
+    /// first literal (Go `chunkLits`). A run of stored literal blocks is read in place from the
+    /// literal section sec when it holds a to b and sec holds [`PAD`] bytes after them, more than
+    /// the [`SLACK`] bytes the loops read past the literals. Otherwise the stored literals read
+    /// are copied to `buf`.
+    pub(super) fn chunk_lits<'s>(
+        &'s mut self,
+        sec: &'s [u8],
+        a: usize,
+        b: usize,
+    ) -> (&'s [u8], usize) {
+        while self.stored.get(self.run).is_some_and(|r| r.at + r.n <= a) {
+            self.run += 1;
+        }
+        if let Some(&r) = self.stored.get(self.run)
+            && r.at <= a
+            && b <= r.at + r.n
+            && r.off + (b - r.at) + PAD <= sec.len()
+        {
+            return (&sec[r.off..], r.at);
+        }
+        self.copy_stored(sec, a, b + PAD);
+        (&self.buf, 0)
+    }
+
+    /// Copies the stored literals from position a to b of the literal section sec to `buf` (Go
+    /// `copyStored`).
+    pub(super) fn copy_stored(&mut self, sec: &[u8], a: usize, b: usize) {
+        for r in &self.stored[self.run..] {
+            if r.at >= b {
+                break;
+            }
+            let (from, to) = (r.at.max(a), (r.at + r.n).min(b));
+            if from < to {
+                let s = r.off + (from - r.at);
+                self.buf[from..to].copy_from_slice(&sec[s..s + (to - from)]);
+            }
+        }
     }
 }
 

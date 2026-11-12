@@ -425,12 +425,43 @@ fn bench_simd_decode(c: &mut Criterion) {
     g.finish();
 }
 
+/// Port of Go's `BenchmarkDecodeOverlapTail`: copy-width, prefix-growth and long-match
+/// boundaries of a block that ends in an overlapping copy.
+fn bench_overlap_tail(c: &mut Criterion) {
+    let mut g = c.benchmark_group("decode_overlap_tail");
+    for (offset, length) in [
+        (1, 127),
+        (1, 128),
+        (3, 129),
+        (15, 127),
+        (16, 31),
+        (16, 32),
+        (16, 129),
+        (17, 257),
+        (63, 127),
+        (64, 128),
+        (4096, 1 << 20),
+        (65536, 1 << 20),
+    ] {
+        let (enc, want) = minlz::block::overlap_tail_block(offset, length, 0);
+        let mut buf = Vec::with_capacity(want.len());
+        decode(&mut buf, &enc).expect("decode");
+        assert_eq!(buf, want, "offset {offset} length {length}");
+        g.throughput(Throughput::Bytes(want.len() as u64));
+        g.bench_function(format!("offset{offset}/length{length}"), |b| {
+            b.iter(|| decode(&mut buf, &enc).expect("decode"));
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_encode,
     bench_decode,
     bench_snappy_encode,
     bench_snappy_decode,
-    bench_simd_decode
+    bench_simd_decode,
+    bench_overlap_tail
 );
 criterion_main!(benches);
