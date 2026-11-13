@@ -434,39 +434,37 @@ impl Tier {
     /// Returns the statistics of a prefix of tok and its length (Go `simdTokStatsAsm`):
     /// the summed match length codes, the operations with literals, the repeats and the escaped
     /// matches. ok is false if the prefix has a token above 135. See `tok_stats`.
+    /// A vector arm runs only when the CPU has the tier's features, so any tier is safe to pass:
+    /// without them the prefix is empty.
     pub(super) fn tok_stats_asm(self, _tok: &[u8]) -> (usize, usize, usize, usize, usize, bool) {
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
-            Tier::Avx512 if !_tok.is_empty() => {
-                // SAFETY: the tier comes from Tier::best or Tier::tiers, which checked the CPU.
+            Tier::Avx512 if self.usable() && !_tok.is_empty() => {
+                // SAFETY: the guard checked the CPU features.
                 let (out, lit, rep, esc, ok) =
                     unsafe { super::exec_avx512::tok_stats_avx512(_tok) };
                 (out, lit >> 1, rep, esc >> 2, _tok.len(), ok)
             }
             #[cfg(all(target_arch = "x86_64", not(miri)))]
-            Tier::Avx2 => {
+            Tier::Avx2 if self.usable() => {
                 let n = _tok.len() & !31;
                 if n == 0 {
                     return (0, 0, 0, 0, 0, true);
                 }
-                // SAFETY: the tier is usable, so the CPU has AVX2 and BMI2.
+                // SAFETY: the guard checked the CPU features, AVX2 and BMI2.
                 let (out, lit, rep, esc, ok) = unsafe { tok_stats_avx2(&_tok[..n]) };
                 (out, lit >> 1, rep, esc >> 2, n, ok)
             }
-            #[cfg(not(all(target_arch = "x86_64", not(miri))))]
-            Tier::Avx2 => (0, 0, 0, 0, 0, true),
-            Tier::Avx512 => (0, 0, 0, 0, 0, true),
+            Tier::Avx2 | Tier::Avx512 => (0, 0, 0, 0, 0, true),
             #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-            Tier::NeonBatch | Tier::Neon => {
+            Tier::NeonBatch | Tier::Neon if self.usable() => {
                 let n = _tok.len() & !15;
-                // SAFETY: the tier is usable.
+                // SAFETY: the guard checked the CPU features.
                 let (out, lit, rep, esc, ok) =
                     unsafe { super::exec_neon::tok_stats_neon(&_tok[..n]) };
                 (out, lit, rep, esc, n, ok)
             }
-            #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
-            Tier::NeonBatch | Tier::Neon => (0, 0, 0, 0, 0, true),
-            Tier::Go => (0, 0, 0, 0, 0, true),
+            Tier::NeonBatch | Tier::Neon | Tier::Go => (0, 0, 0, 0, 0, true),
         }
     }
 
@@ -476,34 +474,30 @@ impl Tier {
     pub(super) fn ll_stats_asm(self, _ll: &[u8]) -> (usize, usize, usize, bool) {
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
-            Tier::Avx512 if !_ll.is_empty() => {
+            Tier::Avx512 if self.usable() && !_ll.is_empty() => {
                 // SAFETY: as in tok_stats_asm.
                 let (sum, n_esc, ok) = unsafe { super::exec_avx512::ll_stats_avx512(_ll) };
                 (sum, n_esc, _ll.len(), ok)
             }
             #[cfg(all(target_arch = "x86_64", not(miri)))]
-            Tier::Avx2 => {
+            Tier::Avx2 if self.usable() => {
                 let n = _ll.len() & !31;
                 if n == 0 {
                     return (0, 0, 0, true);
                 }
-                // SAFETY: the tier is usable, so the CPU has AVX2 and BMI2.
+                // SAFETY: as in tok_stats_asm.
                 let (sum, n_esc, ok) = unsafe { ll_stats_avx2(&_ll[..n]) };
                 (sum, n_esc, n, ok)
             }
-            #[cfg(not(all(target_arch = "x86_64", not(miri))))]
-            Tier::Avx2 => (0, 0, 0, true),
-            Tier::Avx512 => (0, 0, 0, true),
+            Tier::Avx2 | Tier::Avx512 => (0, 0, 0, true),
             #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-            Tier::NeonBatch | Tier::Neon => {
+            Tier::NeonBatch | Tier::Neon if self.usable() => {
                 let n = _ll.len() & !15;
-                // SAFETY: the tier is usable.
+                // SAFETY: as in tok_stats_asm.
                 let (sum, esc, ok) = unsafe { super::exec_neon::ll_stats_neon(&_ll[..n]) };
                 (sum, esc, n, ok)
             }
-            #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
-            Tier::NeonBatch | Tier::Neon => (0, 0, 0, true),
-            Tier::Go => (0, 0, 0, true),
+            Tier::NeonBatch | Tier::Neon | Tier::Go => (0, 0, 0, true),
         }
     }
 
@@ -512,35 +506,31 @@ impl Tier {
     pub(super) fn off_stats_asm(self, _offc: &[u8]) -> (usize, usize, bool) {
         match self {
             #[cfg(all(target_arch = "x86_64", not(miri)))]
-            Tier::Avx512 if !_offc.is_empty() => {
+            Tier::Avx512 if self.usable() && !_offc.is_empty() => {
                 // SAFETY: as in tok_stats_asm.
                 let (sum, zeros, ok) = unsafe { super::exec_avx512::off_stats_avx512(_offc) };
                 (sum + zeros - _offc.len(), _offc.len(), ok)
             }
             #[cfg(all(target_arch = "x86_64", not(miri)))]
-            Tier::Avx2 => {
+            Tier::Avx2 if self.usable() => {
                 let n = _offc.len() & !31;
                 if n == 0 {
                     return (0, 0, true);
                 }
-                // SAFETY: the tier is usable, so the CPU has AVX2 and BMI2.
+                // SAFETY: as in tok_stats_asm.
                 let (sum, zeros, ok) = unsafe { off_stats_avx2(&_offc[..n]) };
                 // Go's sum - n + zeros, ordered so it can't underflow: each byte adds to one.
                 (sum + zeros - n, n, ok)
             }
-            #[cfg(not(all(target_arch = "x86_64", not(miri))))]
-            Tier::Avx2 => (0, 0, true),
-            Tier::Avx512 => (0, 0, true),
+            Tier::Avx2 | Tier::Avx512 => (0, 0, true),
             #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-            Tier::NeonBatch | Tier::Neon => {
+            Tier::NeonBatch | Tier::Neon if self.usable() => {
                 let n = _offc.len() & !15;
-                // SAFETY: the tier is usable.
+                // SAFETY: as in tok_stats_asm.
                 let (bits, _, ok) = unsafe { super::exec_neon::off_stats_neon(&_offc[..n]) };
                 (bits, n, ok)
             }
-            #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
-            Tier::NeonBatch | Tier::Neon => (0, 0, true),
-            Tier::Go => (0, 0, true),
+            Tier::NeonBatch | Tier::Neon | Tier::Go => (0, 0, true),
         }
     }
 }

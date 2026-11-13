@@ -44,7 +44,9 @@ use super::format::{
     MIN_BLOCK_SIZE, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, make_stream_header, put_uvarint,
 };
 use super::mt_pool::BufferPool;
-use super::writer::{Written, encode_block, put_uncompressed_header, simd_stream};
+use super::writer::{
+    Written, encode_block, put_chunk_header, put_uncompressed_header, simd_stream,
+};
 
 /// One item in the per-stream order queue.  The writer thread drains
 /// this in submission order and writes the bytes to `W`.
@@ -186,11 +188,30 @@ impl Engine {
         }
     }
 
+    /// Parks the engine for the next writer of its shape. The parked engines of one shape keep
+    /// at most one worker per CPU, and at least one engine, so a burst of writers that finish
+    /// together does not keep all their threads and buffers for [`ENGINE_IDLE`]. A surplus
+    /// engine drops at once.
     fn park(self) {
         // Under Miri no thread may outlive its test, so the engine drops here.
-        if !cfg!(miri) {
-            IDLE.lock().unwrap().push(self);
+        if cfg!(miri) {
+            return;
         }
+        let surplus = {
+            let mut idle = IDLE.lock().unwrap();
+            let same = idle
+                .iter()
+                .filter(|e| e.key == self.key && e.pid == self.pid)
+                .count();
+            if same == 0 || (same + 1) * self.key.0 <= super::worker_count(0) {
+                idle.push(self);
+                None
+            } else {
+                Some(self)
+            }
+        };
+        // Dropping joins the runner, which takes IDLE when it times out, so it runs unlocked.
+        drop(surplus);
     }
 }
 
@@ -513,9 +534,8 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         self.flush_ibuf()?;
         // EOF chunk; an empty stream is this chunk alone, as Go writes it.
         let mut tmp = [0u8; CHUNK_HEADER_SIZE + MAX_VARINT_LEN_64];
-        tmp[0] = CHUNK_TYPE_EOF;
         let n = put_uvarint(&mut tmp[CHUNK_HEADER_SIZE..], self.uncomp_written);
-        tmp[1] = n as u8;
+        put_chunk_header(&mut tmp, CHUNK_TYPE_EOF, n);
         self.submit_raw(tmp[..CHUNK_HEADER_SIZE + n].to_vec())?;
 
         // A failed send means the writer thread already stopped on an error,
@@ -911,10 +931,7 @@ fn emit_mt_padding<W: Write>(
     }
     let body_len = (to_add as usize) - CHUNK_HEADER_SIZE;
     let mut hdr = [0u8; CHUNK_HEADER_SIZE];
-    hdr[0] = CHUNK_TYPE_PADDING;
-    hdr[1] = body_len as u8;
-    hdr[2] = (body_len >> 8) as u8;
-    hdr[3] = (body_len >> 16) as u8;
+    put_chunk_header(&mut hdr, CHUNK_TYPE_PADDING, body_len);
     w.write_all(&hdr).map_err(|e| record(err_slot, e))?;
     let zeros = [0u8; 4096];
     let mut remaining = body_len;

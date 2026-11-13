@@ -280,12 +280,8 @@ impl<W: Write> Writer<W> {
         }
         self.flush_ibuf()?;
         self.ensure_header()?;
-        let hdr = [
-            id,
-            data.len() as u8,
-            (data.len() >> 8) as u8,
-            (data.len() >> 16) as u8,
-        ];
+        let mut hdr = [0u8; CHUNK_HEADER_SIZE];
+        put_chunk_header(&mut hdr, id, data.len());
         self.write_all_tracked(&hdr)?;
         self.write_all_tracked(data)?;
         Ok(())
@@ -431,11 +427,8 @@ impl<W: Write> Writer<W> {
 
     fn emit_eof(&mut self) -> io::Result<()> {
         let mut tmp = [0u8; CHUNK_HEADER_SIZE + MAX_VARINT_LEN_64];
-        tmp[0] = CHUNK_TYPE_EOF;
         let n = put_uvarint(&mut tmp[CHUNK_HEADER_SIZE..], self.uncomp_written);
-        tmp[1] = n as u8;
-        tmp[2] = 0;
-        tmp[3] = 0;
+        put_chunk_header(&mut tmp, CHUNK_TYPE_EOF, n);
         self.write_all_tracked(&tmp[..CHUNK_HEADER_SIZE + n])
     }
 
@@ -460,10 +453,7 @@ impl<W: Write> Writer<W> {
         }
         let body_len = (to_add as usize) - CHUNK_HEADER_SIZE;
         let mut hdr = [0u8; CHUNK_HEADER_SIZE];
-        hdr[0] = CHUNK_TYPE_PADDING;
-        hdr[1] = body_len as u8;
-        hdr[2] = (body_len >> 8) as u8;
-        hdr[3] = (body_len >> 16) as u8;
+        put_chunk_header(&mut hdr, CHUNK_TYPE_PADDING, body_len);
         self.write_all_tracked(&hdr)?;
         // Stream zero bytes in fixed-size chunks rather than allocating a
         // body_len-sized Vec (body_len can be up to MAX_BLOCK_SIZE).
@@ -576,7 +566,7 @@ pub(super) fn encode_block(
 }
 
 /// Writes the header of a chunk with `n` bytes of content to `dst`.
-fn put_chunk_header(dst: &mut [u8], chunk_type: u8, n: usize) {
+pub(super) fn put_chunk_header(dst: &mut [u8], chunk_type: u8, n: usize) {
     dst[0] = chunk_type;
     dst[1] = n as u8;
     dst[2] = (n >> 8) as u8;

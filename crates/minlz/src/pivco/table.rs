@@ -177,7 +177,7 @@ impl Table {
     /// (`src/huffman_table.c`) on the lengths, which must all be below 16.
     fn build(&mut self) -> Result<(), Error> {
         // Symbols are counted and placed in 8 interleaved segments of the symbol range (C
-        // uses 4 quarters): neighbouring symbols often share a length, and every counter or
+        // uses 4 quarters): neighboring symbols often share a length, and every counter or
         // cursor update waits for the previous one of its segment and length.
         const Q: usize = 32;
         let l = &self.lens;
