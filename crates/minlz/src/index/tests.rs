@@ -816,15 +816,13 @@ fn load_stream_short_file_errors() {
     let mut cur = Cursor::new(stream);
     let mut idx = Index::default();
     let err = idx.load_stream(&mut cur).unwrap_err();
-    // No trailer (Unsupported) or a seek/read I/O error — both acceptable;
-    // just ensure it doesn't panic.
-    assert!(
-        matches!(
-            err.kind(),
-            io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof
-        ),
-        "err={err:?}"
-    );
+    assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "err={err:?}");
+
+    // A trailer whose size reaches past the start of the stream.
+    let mut stream = 11u32.to_le_bytes().to_vec();
+    stream.extend_from_slice(INDEX_TRAILER);
+    let err = idx.load_stream(&mut Cursor::new(stream)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "err={err:?}");
 }
 
 #[test]

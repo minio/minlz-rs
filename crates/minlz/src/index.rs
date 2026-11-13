@@ -507,6 +507,11 @@ impl Index {
     /// Load an index by seeking to the end of `rs`, finding the trailer,
     /// then reading the index chunk.  Matches Go `Index.LoadStream`.
     pub fn load_stream<R: Read + Seek>(&mut self, rs: &mut R) -> io::Result<()> {
+        // A seek before the start fails with InvalidInput, which is reserved for bad settings.
+        let len = rs.seek(SeekFrom::End(0))?;
+        if len < 10 {
+            return Err(Error::Truncated.into());
+        }
         rs.seek(SeekFrom::End(-10))?;
         let mut tail = [0u8; 10];
         rs.read_exact(&mut tail)?;
@@ -516,6 +521,9 @@ impl Index {
         let sz = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
         if sz as usize > MAX_USER_CHUNK_SIZE + SKIPPABLE_FRAME_HEADER {
             return Err(Error::Invalid("size exceeds maximum").into());
+        }
+        if u64::from(sz) > len {
+            return Err(Error::Invalid("size exceeds stream").into());
         }
         rs.seek(SeekFrom::End(-(sz as i64)))?;
         let mut buf = vec![0u8; sz as usize];
