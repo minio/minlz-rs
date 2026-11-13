@@ -44,7 +44,7 @@ use super::format::{
     MIN_BLOCK_SIZE, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, make_stream_header, put_uvarint,
 };
 use super::mt_pool::BufferPool;
-use super::writer::{encode_block, put_uncompressed_header, simd_stream};
+use super::writer::{Written, encode_block, put_uncompressed_header, simd_stream};
 
 /// One item in the per-stream order queue.  The writer thread drains
 /// this in submission order and writes the bytes to `W`.
@@ -373,6 +373,8 @@ pub struct MtWriter<W: Write + Send + 'static> {
     /// write fails.  Read by [`MtWriter::write`] and [`finish`].
     err: Arc<Mutex<Option<io::Error>>>,
     uncomp_written: u64,
+    /// Compressed bytes written to `W`, updated by the writer thread.
+    comp_written: Arc<AtomicU64>,
     wrote_header: bool,
     _w: PhantomData<fn() -> W>,
 }
@@ -392,6 +394,8 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         let err: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
 
         let err_writer = err.clone();
+        let comp_written = Arc::new(AtomicU64::new(0));
+        let comp_counter = comp_written.clone();
         let input_pool_w = engine.input_pool.clone();
         let obuf_pool_w = engine.obuf_pool.clone();
         let writer_index = if b.generate_index || b.append_index {
@@ -411,6 +415,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
                 order_rx,
                 finish_tx,
                 err_writer,
+                comp_counter,
                 input_pool_w,
                 obuf_pool_w,
                 writer_index,
@@ -431,14 +436,19 @@ impl<W: Write + Send + 'static> MtWriter<W> {
             engine: Some(engine),
             err,
             uncomp_written: 0,
+            comp_written,
             wrote_header: false,
             _w: PhantomData,
         }
     }
 
-    /// Total uncompressed bytes accepted.
-    pub fn uncompressed_written(&self) -> u64 {
-        self.uncomp_written
+    /// Total uncompressed bytes accepted, and compressed bytes the writer thread has written to
+    /// the sink. The compressed count lags behind the input until [`Write::flush`].
+    pub fn written(&self) -> Written {
+        Written {
+            uncompressed: self.uncomp_written,
+            compressed: self.comp_written.load(Ordering::Relaxed),
+        }
     }
 
     /// Flush pending input, then encode `buf` as whole blocks.  Like Go's
@@ -779,6 +789,7 @@ fn writer_loop<W: Write + Send + 'static>(
     order_rx: Receiver<OrderItem>,
     finish_tx: SyncSender<io::Result<(W, Vec<u8>)>>,
     err_slot: Arc<Mutex<Option<io::Error>>>,
+    comp_counter: Arc<AtomicU64>,
     input_pool: Arc<BufferPool>,
     obuf_pool: Arc<BufferPool>,
     mut index: Option<Index>,
@@ -798,6 +809,7 @@ fn writer_loop<W: Write + Send + 'static>(
                 OrderItem::Raw(bytes) => {
                     w.write_all(&bytes).map_err(|e| record(&err_slot, e))?;
                     comp_written += bytes.len() as u64;
+                    comp_counter.store(comp_written, Ordering::Relaxed);
                 }
                 OrderItem::Flush(done) => {
                     w.flush().map_err(|e| record(&err_slot, e))?;
@@ -833,6 +845,7 @@ fn writer_loop<W: Write + Send + 'static>(
                     input_pool.release(input);
                     res.map_err(|e| record(&err_slot, e))?;
                     comp_written += chunk_len as u64;
+                    comp_counter.store(comp_written, Ordering::Relaxed);
                 }
             }
         };

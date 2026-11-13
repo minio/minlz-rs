@@ -122,6 +122,24 @@ fn concurrency_auto_and_one_work() {
 }
 
 #[test]
+fn written_reports_byte_counts() {
+    let mut w = MtWriterBuilder::new()
+        .concurrency(2)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    assert_eq!(w.written(), Default::default());
+    let payload = vec![b'q'; 8 << 10];
+    w.write_all(&payload).unwrap();
+    w.flush().unwrap();
+    let written = w.written();
+    assert_eq!(written.uncompressed, payload.len() as u64);
+    assert!(written.compressed > 0);
+    // After finish there's the EOF chunk too.
+    let out = w.finish().unwrap();
+    assert!(out.len() as u64 > written.compressed);
+}
+
+#[test]
 fn finish_returns_inner_writer() {
     let payload = b"return me".to_vec();
     let mut w = MtWriter::new(Vec::<u8>::new());
@@ -517,7 +535,7 @@ fn mt_index_offsets_match_st_index_offsets() {
         .build(Vec::<u8>::new())
         .unwrap();
     st.write_all(&payload).unwrap();
-    let st_idx = st.close_index().unwrap();
+    let (_, st_idx) = st.close_index().unwrap();
 
     let mut mt = MtWriterBuilder::new()
         .block_size(block_size)
@@ -566,7 +584,7 @@ fn mt_close_index_matches_st_close_index() {
         .build(Vec::<u8>::new())
         .unwrap();
     st.write_all(&payload).unwrap();
-    let st_idx = st.close_index().unwrap();
+    let (_, st_idx) = st.close_index().unwrap();
     let build = || {
         MtWriterBuilder::new()
             .block_size(64 << 10)

@@ -525,7 +525,7 @@ impl AnyWriter {
                 (w.finish().unwrap(), n)
             }
             Self::Mt(w) => {
-                let n = w.uncompressed_written();
+                let n = w.written().uncompressed;
                 (w.finish().unwrap(), n)
             }
         }

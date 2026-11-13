@@ -34,7 +34,7 @@ use super::format::{
     MIN_BLOCK_SIZE, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, make_stream_header, put_uvarint,
 };
 
-/// Byte counts reported by [`Writer::written`].
+/// Byte counts reported by [`Writer::written`] and [`MtWriter::written`](super::MtWriter::written).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Written {
     /// Uncompressed bytes accepted via [`std::io::Write::write`].
@@ -296,8 +296,7 @@ impl<W: Write> Writer<W> {
 
     /// Like [`Self::finish`] but also returns the encoded index bytes.
     /// Requires `generate_index` (the default) to have been left enabled.
-    /// Inner writer is dropped.
-    pub fn close_index(mut self) -> io::Result<Vec<u8>> {
+    pub fn close_index(mut self) -> io::Result<(W, Vec<u8>)> {
         if let Some(e) = self.err.take() {
             return Err(e);
         }
@@ -307,7 +306,8 @@ impl<W: Write> Writer<W> {
                 "minlz: close_index called but generate_index is false",
             ));
         }
-        self.close_inner(true)
+        let index = self.close_inner(true)?;
+        Ok((self.w, index))
     }
 
     /// Shared close path used by both [`Self::finish`] and

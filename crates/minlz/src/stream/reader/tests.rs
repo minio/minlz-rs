@@ -2147,7 +2147,7 @@ fn fuzz_stream_encode_seeded() {
                     }
                 }
                 w.flush().unwrap();
-                assert_eq!(w.uncompressed_written(), data.len() as u64, "encoder {i}");
+                assert_eq!(w.written().uncompressed, data.len() as u64, "encoder {i}");
                 w.finish().unwrap()
             };
             if padding > 1 {

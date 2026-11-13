@@ -358,7 +358,7 @@ fn writer_close_index_round_trip() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     let mut idx = Index::default();
     idx.load(&idx_bytes).unwrap();
@@ -383,7 +383,7 @@ fn seek_with_index_skip() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     let mut idx = Index::default();
     idx.load(&idx_bytes).unwrap();
@@ -484,7 +484,7 @@ fn read_seeker_external_index_bytes() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     // (a) Full chunk form.
     let reader = StreamReader::new(Cursor::new(compressed.clone()));
@@ -983,7 +983,7 @@ fn writer_close_index_round_trip_miri() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
     let mut idx = Index::default();
     idx.load(&idx_bytes).unwrap();
     assert_eq!(idx.total_uncompressed, Some(payload.len() as u64));
@@ -1067,7 +1067,7 @@ fn read_seeker_external_index_bytes_miri() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     let reader = StreamReader::new(Cursor::new(compressed.clone()));
     let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).expect("ReadSeeker::new");
