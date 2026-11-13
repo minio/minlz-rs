@@ -17,6 +17,9 @@ path = "src/lib.rs"
 [features]
 # The clean-room reference decoder `minlz::reference`, an oracle for tests and fuzzing.
 reference = []
+# Internals for the workspace's own tests, benches, fuzzers and `mz`: CPU tier switches and the
+# entropy coder and hash. Not covered by semver.
+unstable-internals = []
 
 [[example]]
 name = "bench"
@@ -39,6 +42,7 @@ name = "xxh3"
 harness = false
 
 [dev-dependencies]
+minlz = { package = "minio-minlz", path = ".", features = ["unstable-internals"] }
 criterion = { version = "0.8.2", default-features = false, features = ["html_reports"] }
 ureq = "3.3.0"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }

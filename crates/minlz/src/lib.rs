@@ -60,24 +60,36 @@
 #![deny(missing_docs)]
 
 pub mod block;
+#[cfg(feature = "unstable-internals")]
 #[doc(hidden)]
 pub mod cpu;
+#[cfg(not(feature = "unstable-internals"))]
+#[allow(dead_code, unused_imports)]
+mod cpu;
 mod error;
 #[cfg(test)]
 mod fuzz_seeds;
 #[cfg(test)]
 mod guard;
 pub mod index;
+#[cfg(feature = "unstable-internals")]
 #[doc(hidden)]
 pub mod pivco;
+#[cfg(not(feature = "unstable-internals"))]
+#[allow(dead_code, unused_imports)]
+mod pivco;
 #[cfg(any(test, feature = "reference"))]
 #[doc(hidden)]
 pub mod reference;
 pub mod stream;
 #[cfg(test)]
 mod unzip;
+#[cfg(feature = "unstable-internals")]
 #[doc(hidden)]
 pub mod xxh3;
+#[cfg(not(feature = "unstable-internals"))]
+#[allow(dead_code, unused_imports)]
+mod xxh3;
 
 pub use block::{
     Level, MAX_BLOCK_SIZE, append_decoded, append_encoded, decode, decoded_len, encode, is_minlz,
