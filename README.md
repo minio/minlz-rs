@@ -491,7 +491,7 @@ targets (decode-arbitrary, roundtrip, stream-roundtrip,
 stream-decode-arbitrary, index-load).  See its
 [`RUNBOOK.md`](crates/minlz/fuzz/RUNBOOK.md) for setup.
 
-MSRV: **Rust 1.85**.
+MSRV: **Rust 1.87**.
 
 ## License
 
