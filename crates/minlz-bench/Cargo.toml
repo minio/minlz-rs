@@ -1,0 +1,14 @@
+[package]
+name = "minlz-bench"
+version = "0.0.0"
+description = "Throughput of the MinLZ codec through its public API, to compare two versions"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+minlz = { path = "../minlz" }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1,0 +1,8 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+description = "Developer tasks for this workspace, run as `cargo xtask <task>`"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false

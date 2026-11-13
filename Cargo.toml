@@ -1,12 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/minlz", "bin/mz"]
+members = ["crates/minlz", "crates/minlz-bench", "bin/mz", "xtask"]
+# `cargo xtask` runs the developer tasks of xtask/, and `cargo xtask bench` builds
+# crates/minlz-bench; plain cargo commands leave both out.
+default-members = ["crates/minlz", "bin/mz"]
 # The cargo-fuzz crate at `crates/minlz/fuzz` is a stand-alone manifest
 # (its own `[workspace]` block) and is not part of this workspace.
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "Apache-2.0"
 repository = "https://github.com/minio/minlz-rs"
 authors = ["MinIO Inc."]
