@@ -55,14 +55,6 @@ pub(crate) fn worker_count(n: usize) -> usize {
     std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
 }
 
-#[cfg(test)]
-#[test]
-fn worker_count_zero_is_available_parallelism() {
-    let available = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    assert_eq!(worker_count(0), available);
-    assert_eq!(worker_count(3), 3);
-}
-
 pub use error::Error;
 pub use format::{
     CHUNK_TYPE_PADDING, CHUNK_TYPE_STREAM_IDENTIFIER, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE,
@@ -75,3 +67,11 @@ pub(crate) use reader::simd_chunk_header;
 pub use reader::{Reader, ReaderBuilder, UserChunkCb};
 pub use seek::ReadSeeker;
 pub use writer::{Writer, WriterBuilder, Written};
+
+#[cfg(test)]
+#[test]
+fn worker_count_zero_is_available_parallelism() {
+    let available = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    assert_eq!(worker_count(0), available);
+    assert_eq!(worker_count(3), 3);
+}
