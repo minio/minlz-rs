@@ -326,7 +326,7 @@ fn header_read_errors_are_sticky() {
         kind: io::ErrorKind::UnexpectedEof,
         failed: false,
     };
-    let mut rs = ReadSeeker::new(Reader::new(inner), &idx).unwrap();
+    let mut rs = ReadSeeker::with_index(Reader::new(inner), &idx).unwrap();
     let mut buf = vec![0u8; 4096];
     rs.read_exact(&mut buf).unwrap();
     let err = rs.read(&mut buf).unwrap_err();
@@ -910,7 +910,7 @@ fn reader_empty_stream() {
         .finish()
         .unwrap();
     assert!(mt == empty, "MtWriter: {mt:x?}");
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&empty)), &[]).unwrap();
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&empty))).unwrap();
     assert_eq!(rs.seek(SeekFrom::End(0)).unwrap(), 0, "ReadSeeker: Seek");
     assert_eq!(rs.read_at(&mut [0; 8], 0).unwrap(), 0, "ReadSeeker: ReadAt");
     let cases = [
@@ -949,7 +949,7 @@ fn reader_empty_stream() {
         let idx = crate::index::index_stream(Cursor::new(&stream))
             .unwrap_or_else(|e| panic!("{name}/IndexStream: {e}"));
         let off = want.as_ref().map_or(data.len(), Vec::len) / 2;
-        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+        let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
         rs.seek(SeekFrom::Start(off as u64)).unwrap();
         let mut seek = Vec::new();
         let seek = rs.read_to_end(&mut seek).map(|_| seek);
@@ -1005,7 +1005,7 @@ fn reader_skip_crc() {
 
         // Skipping to the exact end of the corrupted chunk must not leave it
         // in the buffer for a later seek back into it.
-        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&b)), &[]).unwrap();
+        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&b))).unwrap();
         rs.seek(SeekFrom::Start(8192)).unwrap();
         let e = rs.read_at(&mut [0; 100], 4096).unwrap_err();
         assert!(
@@ -1683,7 +1683,7 @@ fn reader_block_type_mismatch() {
             }),
             ("Skip", &|s| Reader::new(s).skip(off)),
             ("ReadAt", &|s| {
-                let mut rs = ReadSeeker::new(Reader::new(Cursor::new(s)), &index)?;
+                let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(s)), &index)?;
                 rs.read_at(&mut [0; 10], off).map(drop)
             }),
             ("IndexStream", &|s| {
@@ -1743,7 +1743,7 @@ fn read_seeker_simd_concat() {
     ] {
         let stream = [seek_test_stream(lv[0], &a), seek_test_stream(lv[1], &b)].concat();
         let idx = crate::index::index_stream(&stream[..]).unwrap();
-        let new_rs = || ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+        let new_rs = || ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
         let mut got = [0u8; N];
         // Each direction on a new reader: seeks go to either stream before and after the read
         // across the boundary has read the second identifier.
@@ -1786,7 +1786,7 @@ fn read_seeker_concat_jump_into_later_stream() {
     );
     let stream = [seek_test_stream(block::Level::Balanced, &a), sb].concat();
     let idx = crate::index::index_stream(&stream[..]).unwrap();
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+    let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
     let off = a.len() + (2 << 20) + 5;
     rs.seek(SeekFrom::Start(off as u64)).unwrap();
     let mut got = Vec::new();
@@ -1811,7 +1811,7 @@ fn read_seeker_concat_offsets() {
     ] {
         let stream = [seek_test_stream(block::Level::Balanced, &a), sb].concat();
         let idx = crate::index::index_stream(&stream[..]).unwrap();
-        let new_rs = || ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+        let new_rs = || ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
         let mut rs = new_rs();
         let mut got = [0u8; 1000];
         let off = a.len() - 500;
@@ -1853,7 +1853,7 @@ fn seek_test_concat() -> (Vec<u8>, Vec<u8>, usize, Vec<u8>) {
 #[cfg_attr(miri, ignore = "700 KiB streams too slow for miri")]
 fn read_seeker_concat_offsets_are_global() {
     let (stream, want, a_len, idx) = seek_test_concat();
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+    let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
     let mut got = [0u8; 1000];
     let cross = a_len - 500;
     rs.read_exact_at(&mut got, cross as u64).unwrap();
@@ -1889,7 +1889,7 @@ fn read_seeker_concat_reads_through_eof() {
     bad[eof + CHUNK_HEADER_SIZE] ^= 1;
     // A sequential crossing reads the second identifier, a jump past its first block doesn't.
     for (off, checked) in [(a_len - 500, true), (a_len + (100 << 10), false)] {
-        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+        let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
         rs.seek(SeekFrom::Start(off as u64)).unwrap();
         let mut got = Vec::new();
         rs.read_to_end(&mut got).unwrap();
@@ -1903,7 +1903,7 @@ fn read_seeker_concat_reads_through_eof() {
             "Seek({off}): ReadAt(10) after EOF"
         );
 
-        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&bad)), &idx).unwrap();
+        let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&bad)), &idx).unwrap();
         rs.seek(SeekFrom::Start(off as u64)).unwrap();
         let res = rs.read_to_end(&mut Vec::new());
         if checked {
@@ -1914,7 +1914,7 @@ fn read_seeker_concat_reads_through_eof() {
         }
     }
     // After reading the second stream from a crossing, the fast path must find the first.
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+    let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
     rs.read_exact_at(&mut [0; 1000], (a_len - 500) as u64)
         .unwrap();
     rs.seek(SeekFrom::Start(10)).unwrap();
@@ -1953,7 +1953,7 @@ fn read_seeker_jump_detects_dropped_chunk() {
         cut,
     ];
     for (i, s) in cases.iter().enumerate() {
-        let mut rs = ReadSeeker::new(Reader::new(Cursor::new(s)), &idx).unwrap();
+        let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(s)), &idx).unwrap();
         rs.seek(SeekFrom::Start((2 << 16) + 5)).unwrap();
         let e = rs.read_to_end(&mut Vec::new()).unwrap_err();
         assert!(is_corrupt(&e), "case {i}: {e}");
@@ -1977,7 +1977,7 @@ fn read_seeker_jump_detects_extra_data() {
     let dup = [&stream[..off], chunk, chunk, &stream[off..]].concat();
     let e = decode_to_end(Reader::new(&dup[..])).unwrap_err();
     assert!(is_corrupt(&e), "Reader: {e}");
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&dup)), &idx).unwrap();
+    let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&dup)), &idx).unwrap();
     rs.seek(SeekFrom::Start((1 << 16) + 5)).unwrap();
     let e = rs.read_to_end(&mut Vec::new()).unwrap_err();
     assert!(is_corrupt(&e), "ReadSeeker: {e}");
@@ -1999,7 +1999,7 @@ fn read_seeker_jump_ends_at_next_identifier() {
     let idx = crate::index::index_stream(&bad[..]).unwrap();
     let e = decode_to_end(Reader::new(&bad[..])).unwrap_err();
     assert!(is_corrupt(&e), "Reader: {e}");
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&bad)), &idx).unwrap();
+    let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&bad)), &idx).unwrap();
     rs.seek(SeekFrom::Start((1 << 16) + 5)).unwrap();
     let e = rs.read_to_end(&mut Vec::new()).unwrap_err();
     assert!(is_corrupt(&e), "ReadSeeker: {e}");
@@ -2020,7 +2020,7 @@ fn reader_simd_flag_strict() {
     // index_stream rejects no_flag, so index the stream with the flag; the offsets are the same.
     let idx = crate::index::index_stream(&[&simd[..], &simd].concat()[..]).unwrap();
     let stream = [&simd[..], &no_flag].concat();
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(&stream)), &idx).unwrap();
+    let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &idx).unwrap();
     let e = rs
         .read_at(&mut [0; 1000], a.len() as u64 - 500)
         .unwrap_err();

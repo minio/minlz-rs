@@ -426,7 +426,7 @@ fn read_seeker_seek_start_end_and_current() {
     let compressed = build_indexed_stream(&payload);
 
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     // SeekFrom::Start with an offset inside a later block.
     let off = (200 << 10) as u64;
@@ -463,7 +463,7 @@ fn read_seeker_read_at_random() {
     let compressed = build_indexed_stream(&payload);
 
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let mut buf = vec![0u8; 100];
     let offsets = [0u64, 11, 1_000, 65_000, (128 << 10) - 33, (256 << 10) - 100];
@@ -488,7 +488,8 @@ fn read_seeker_external_index_bytes() {
 
     // (a) Full chunk form.
     let reader = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).expect("ReadSeeker::new");
+    let mut rs =
+        crate::stream::ReadSeeker::with_index(reader, &idx_bytes).expect("ReadSeeker::new");
     rs.seek(SeekFrom::Start(150 << 10)).unwrap();
     let mut buf = vec![0u8; 1024];
     rs.read_exact(&mut buf).unwrap();
@@ -498,20 +499,29 @@ fn read_seeker_external_index_bytes() {
     let slim = remove_index_headers(&idx_bytes).unwrap().to_vec();
     let restored = restore_index_headers(&slim);
     let reader2 = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs2 = crate::stream::ReadSeeker::new(reader2, &restored).expect("ReadSeeker::new");
+    let mut rs2 =
+        crate::stream::ReadSeeker::with_index(reader2, &restored).expect("ReadSeeker::new");
     rs2.seek(SeekFrom::Start(150 << 10)).unwrap();
     let mut buf2 = vec![0u8; 1024];
     rs2.read_exact(&mut buf2).unwrap();
     assert_eq!(buf, buf2);
 
-    // (c) Bare slim form passed *directly* to ReadSeeker::new — must
+    // (c) Bare slim form passed *directly* to ReadSeeker::with_index — must
     // be auto-detected and accepted without calling restore_index_headers.
-    let reader3 = StreamReader::new(Cursor::new(compressed));
-    let mut rs3 = crate::stream::ReadSeeker::new(reader3, &slim).expect("ReadSeeker::new bare");
+    let reader3 = StreamReader::new(Cursor::new(compressed.clone()));
+    let mut rs3 =
+        crate::stream::ReadSeeker::with_index(reader3, &slim).expect("ReadSeeker::with_index bare");
     rs3.seek(SeekFrom::Start(150 << 10)).unwrap();
     let mut buf3 = vec![0u8; 1024];
     rs3.read_exact(&mut buf3).unwrap();
     assert_eq!(buf, buf3);
+
+    // (d) No bytes are no index.
+    let reader4 = StreamReader::new(Cursor::new(compressed));
+    let err = crate::stream::ReadSeeker::with_index(reader4, &[])
+        .err()
+        .expect("empty index");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 }
 
 // -------------------- additional coverage (Stage F follow-ups) --------------------
@@ -674,7 +684,7 @@ fn read_seeker_index_without_zero_entry() {
     .unwrap();
 
     let reader = StreamReader::new(Cursor::new(&compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).unwrap();
+    let mut rs = crate::stream::ReadSeeker::with_index(reader, &idx_bytes).unwrap();
     assert!(rs.index().offsets().len() > 200);
     let mut buf = [0u8; 16];
     // A far read first, so the next one can't use the buffered block.
@@ -799,7 +809,7 @@ fn read_at_short_read_at_eof() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 200 << 10];
     let n = rs.read_at(&mut buf, (50 << 10) as u64).unwrap();
     assert_eq!(n, 50 << 10);
@@ -812,7 +822,7 @@ fn read_exact_at_errors_on_eof() {
     let payload = vec![b'x'; 100 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 200 << 10];
     let err = rs.read_exact_at(&mut buf, (50 << 10) as u64).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
@@ -825,7 +835,7 @@ fn read_seeker_seek_past_end_errors_then_recovers() {
     let payload = vec![b'A'; 256 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
 
     // Read a few bytes so the reader has internal state.
     let mut warm = [0u8; 16];
@@ -999,7 +1009,7 @@ fn seek_with_index_skip_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let off = (16 << 10) as u64;
     rs.seek(SeekFrom::Start(off)).unwrap();
@@ -1017,7 +1027,7 @@ fn read_seeker_seek_start_end_and_current_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let off = (20 << 10) as u64;
     let abs = rs.seek(SeekFrom::Start(off)).unwrap();
@@ -1047,7 +1057,7 @@ fn read_seeker_read_at_random_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let mut buf = vec![0u8; 64];
     for &off in &[0u64, 11, 4_000, (16 << 10) - 33, (32 << 10) - 64] {
@@ -1070,7 +1080,8 @@ fn read_seeker_external_index_bytes_miri() {
     let (_, idx_bytes) = w.close_index().unwrap();
 
     let reader = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).expect("ReadSeeker::new");
+    let mut rs =
+        crate::stream::ReadSeeker::with_index(reader, &idx_bytes).expect("ReadSeeker::new");
     rs.seek(SeekFrom::Start(20 << 10)).unwrap();
     let mut buf = vec![0u8; 512];
     rs.read_exact(&mut buf).unwrap();
@@ -1079,7 +1090,8 @@ fn read_seeker_external_index_bytes_miri() {
     let slim = remove_index_headers(&idx_bytes).unwrap().to_vec();
     let restored = restore_index_headers(&slim);
     let reader2 = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs2 = crate::stream::ReadSeeker::new(reader2, &restored).expect("ReadSeeker::new");
+    let mut rs2 =
+        crate::stream::ReadSeeker::with_index(reader2, &restored).expect("ReadSeeker::new");
     rs2.seek(SeekFrom::Start(20 << 10)).unwrap();
     let mut buf2 = vec![0u8; 512];
     rs2.read_exact(&mut buf2).unwrap();
@@ -1095,7 +1107,7 @@ fn read_at_short_read_at_eof_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 64 << 10];
     let n = rs.read_at(&mut buf, (16 << 10) as u64).unwrap();
     assert_eq!(n, 16 << 10);
@@ -1108,7 +1120,7 @@ fn read_exact_at_errors_on_eof_miri() {
     let payload = vec![b'x'; 32 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 64 << 10];
     let err = rs.read_exact_at(&mut buf, (16 << 10) as u64).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
@@ -1120,7 +1132,7 @@ fn read_seeker_seek_past_end_errors_then_recovers_miri() {
     let payload = vec![b'A'; 32 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
 
     let mut warm = [0u8; 16];
     rs.read_exact(&mut warm).unwrap();

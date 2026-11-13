@@ -32,7 +32,7 @@ const INDEX_HEADER: &[u8; 6] = b"s2idx\x00";
 
 /// Random-access wrapper around a [`Reader`].
 ///
-/// Construct via [`ReadSeeker::new`].  The underlying input must implement
+/// Construct via [`ReadSeeker::new`] or [`ReadSeeker::with_index`].  The underlying input must implement
 /// both [`Read`] and [`Seek`].  An index is required — either passed in as
 /// bytes or loaded from the end of the stream on construction.
 /// A seek through the index skips the target stream's identifier, so until
@@ -51,9 +51,23 @@ pub struct ReadSeeker<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> ReadSeeker<R> {
-    /// Wrap `reader` with seek support.
+    /// Wrap `reader` with seek support, loading the index from the end of the underlying source
+    /// via [`Index::load_stream`]. The source's seek position before the call is preserved.
+    pub fn new(mut reader: Reader<R>) -> io::Result<Self> {
+        let mut index = Index::default();
+        let pos = reader.r.stream_position()?;
+        let res = index.load_stream(&mut reader.r);
+        // Always restore the underlying position before propagating.
+        let restore = reader.r.seek(SeekFrom::Start(pos));
+        res?;
+        restore?;
+        Ok(Self { reader, index })
+    }
+
+    /// Wrap `reader` with seek support, using a separately stored index.
     ///
-    /// `index_bytes` accepts three shapes:
+    /// `index_bytes` accepts two shapes, detected by the chunk-type byte and the `s2idx\x00`
+    /// header at offset 4:
     ///
     /// * The full `0x40` chunk (or legacy `0x99` chunk) as emitted by
     ///   [`crate::stream::Writer::close_index`] /
@@ -64,35 +78,20 @@ impl<R: Read + Seek> ReadSeeker<R> {
     ///   minus the 4-byte chunk header, the `"s2idx\x00"` header, the
     ///   stored 4-byte size, and the `"\x00xdi2s"` trailer (~20 bytes
     ///   smaller).  Useful for sidecar storage.
-    /// * An empty slice — the index is loaded from the end of the
-    ///   underlying source via [`Index::load_stream`].  The source's
-    ///   seek position before the call is preserved.
-    ///
-    /// The shape is auto-detected by checking the chunk-type byte and
-    /// the `s2idx\x00` header at offset 4.
-    pub fn new(mut reader: Reader<R>, index_bytes: &[u8]) -> io::Result<Self> {
+    pub fn with_index(reader: Reader<R>, index_bytes: &[u8]) -> io::Result<Self> {
         let mut index = Index::default();
-        if !index_bytes.is_empty() {
-            if looks_like_full_index_chunk(index_bytes) {
-                index.load(index_bytes)?;
-            } else {
-                // Bare form — wrap it back into a full chunk and parse.
-                let restored = restore_index_headers(index_bytes);
-                if restored.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "minlz: empty index payload",
-                    ));
-                }
-                index.load(&restored)?;
-            }
+        if looks_like_full_index_chunk(index_bytes) {
+            index.load(index_bytes)?;
         } else {
-            let pos = reader.r.stream_position()?;
-            let res = index.load_stream(&mut reader.r);
-            // Always restore the underlying position before propagating.
-            let restore = reader.r.seek(SeekFrom::Start(pos));
-            res?;
-            restore?;
+            // Bare form — wrap it back into a full chunk and parse.
+            let restored = restore_index_headers(index_bytes);
+            if restored.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "minlz: empty index payload",
+                ));
+            }
+            index.load(&restored)?;
         }
         Ok(Self { reader, index })
     }
@@ -102,18 +101,7 @@ impl<R: Read + Seek> ReadSeeker<R> {
         &self.index
     }
 
-    /// Seek by uncompressed offset.  Returns the absolute offset reached.
-    ///
-    /// * [`SeekFrom::Start`] — absolute uncompressed offset.
-    /// * [`SeekFrom::Current`] — relative to the next byte that
-    ///   [`Read::read`] would return.
-    /// * [`SeekFrom::End`] — relative to `index.total_uncompressed`;
-    ///   requires the latter to be known (not `-1`).
-    ///
-    /// Fast path: when the target lands inside the currently-decoded
-    /// block, no underlying I/O is performed — the read position is
-    /// adjusted in place.
-    pub fn seek_uncompressed(&mut self, pos: SeekFrom) -> io::Result<u64> {
+    fn seek_uncompressed(&mut self, pos: SeekFrom) -> io::Result<u64> {
         if let Some(e) = self.reader.err.as_ref() {
             // Reset on EOF only — caller can re-seek past EOF and retry.
             if e.kind() != io::ErrorKind::UnexpectedEof {
@@ -273,6 +261,17 @@ impl<R: Read + Seek> Read for ReadSeeker<R> {
 }
 
 impl<R: Read + Seek> Seek for ReadSeeker<R> {
+    /// Seek by uncompressed offset.  Returns the absolute offset reached.
+    ///
+    /// * [`SeekFrom::Start`] — absolute uncompressed offset.
+    /// * [`SeekFrom::Current`] — relative to the next byte that
+    ///   [`Read::read`] would return.
+    /// * [`SeekFrom::End`] — relative to `index.total_uncompressed`;
+    ///   requires the latter to be known (not `-1`).
+    ///
+    /// Fast path: when the target lands inside the currently-decoded
+    /// block, no underlying I/O is performed — the read position is
+    /// adjusted in place.
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.seek_uncompressed(pos)
     }

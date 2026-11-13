@@ -567,7 +567,7 @@ fn test_simd_stream_read(comp: &[u8], want: &[u8]) {
     let idx = index_stream(comp).expect("index_stream");
     let mut index = Index::default();
     index.load(&idx).unwrap();
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(comp)), &[]).expect("ReadSeeker");
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(comp))).expect("ReadSeeker");
     let mut tmp = [0u8; 1000];
     let n = want.len();
     for off in [0, n / 3 + 7, n / 2, n - 100] {

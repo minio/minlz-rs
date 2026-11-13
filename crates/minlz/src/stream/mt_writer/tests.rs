@@ -385,7 +385,7 @@ fn append_index_round_trips_via_read_seeker() {
 
         // Seek probes via ReadSeeker.
         let reader = Reader::new(Cursor::new(stream.clone()));
-        let mut rs = ReadSeeker::new(reader, &[])
+        let mut rs = ReadSeeker::new(reader)
             .unwrap_or_else(|e| panic!("ReadSeeker::new (n={concurrency}): {e}"));
         assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
 
@@ -507,7 +507,7 @@ fn mt_padding_plus_index_aligns_and_reads() {
     );
     // ReadSeeker still finds the index at the tail.
     let reader = Reader::new(Cursor::new(buf));
-    let mut rs = ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = ReadSeeker::new(reader).expect("ReadSeeker::new");
     assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
     // total_compressed must be unknown (None) when padding is in play.
     assert_eq!(rs.index().total_compressed(), None);
@@ -548,7 +548,7 @@ fn mt_index_offsets_match_st_index_offsets() {
 
     // Extract the MT-emitted index by reading the tail.
     let reader = Reader::new(Cursor::new(mt_stream.clone()));
-    let rs = ReadSeeker::new(reader, &[]).unwrap();
+    let rs = ReadSeeker::new(reader).unwrap();
     let mt_idx = rs.index().clone();
 
     let mut parsed_st = Index::default();

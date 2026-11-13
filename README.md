@@ -147,9 +147,9 @@ fn random_read(payload: &[u8], offset: u64) -> std::io::Result<Vec<u8>> {
     w.write_all(payload)?;
     w.finish()?;
 
-    // Empty slice → ReadSeeker loads the index from the tail itself.
+    // ReadSeeker::new loads the index from the end of the stream.
     let reader = Reader::new(Cursor::new(compressed));
-    let mut rs = ReadSeeker::new(reader, &[])?;
+    let mut rs = ReadSeeker::new(reader)?;
     rs.seek(SeekFrom::Start(offset))?;
     let mut buf = vec![0u8; 4096];
     rs.read_exact(&mut buf)?;
