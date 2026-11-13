@@ -2268,3 +2268,17 @@ fn reader_types_are_send() {
     assert_send::<Reader<Cursor<Vec<u8>>>>();
     assert_send::<ReadSeeker<Cursor<Vec<u8>>>>();
 }
+
+#[test]
+fn accessors_reach_the_source() {
+    let stream = write_stream(b"accessors", WriterBuilder::new().append_index());
+    let mut r = Reader::new(Cursor::new(stream.clone()));
+    assert_eq!(r.get_ref().get_ref(), &stream);
+    r.get_mut().set_position(0);
+    assert_eq!(r.into_inner().into_inner(), stream);
+
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(stream.clone()))).unwrap();
+    assert_eq!(rs.get_ref().get_ref(), &stream);
+    rs.get_mut().set_position(0);
+    assert_eq!(rs.into_inner().into_inner(), stream);
+}

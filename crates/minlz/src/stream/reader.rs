@@ -230,6 +230,21 @@ impl<R: Read> Reader<R> {
         self.err = None;
     }
 
+    /// Borrow the underlying source.
+    pub fn get_ref(&self) -> &R {
+        &self.r
+    }
+
+    /// Mutably borrow the underlying source. Reading from it directly desynchronizes the reader.
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.r
+    }
+
+    /// Unwrap the underlying source. Decoded data not yet read is lost.
+    pub fn into_inner(self) -> R {
+        self.r
+    }
+
     /// Uncompressed offset at the start of the block currently being drained,
     /// counted from the start of the first of any concatenated streams.
     pub fn block_start(&self) -> u64 {

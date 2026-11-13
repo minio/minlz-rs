@@ -244,6 +244,16 @@ impl<W: Write> Writer<W> {
         }
     }
 
+    /// Borrow the underlying sink.
+    pub fn get_ref(&self) -> &W {
+        &self.w
+    }
+
+    /// Mutably borrow the underlying sink. Writing to it directly corrupts the stream.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.w
+    }
+
     /// Add a user chunk (`id` in `0x80..=0xfd`) to the stream.  Any pending
     /// buffered input is flushed first so that user chunks appear in the
     /// stream at the position the caller invoked the method.

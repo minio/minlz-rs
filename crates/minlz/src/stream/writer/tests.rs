@@ -247,6 +247,16 @@ fn written_reports_byte_counts() {
 }
 
 #[test]
+fn accessors_reach_the_sink() {
+    let mut w = Writer::new(Vec::new());
+    w.write_all(b"accessors").unwrap();
+    w.flush().unwrap();
+    let len = w.get_ref().len();
+    assert!(len > 0);
+    assert_eq!(w.get_mut().len(), len);
+}
+
+#[test]
 fn flush_does_not_emit_eof() {
     let mut buf: Vec<u8> = Vec::new();
     {

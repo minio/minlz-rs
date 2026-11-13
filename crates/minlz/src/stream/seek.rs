@@ -101,6 +101,22 @@ impl<R: Read + Seek> ReadSeeker<R> {
         &self.index
     }
 
+    /// Borrow the underlying source.
+    pub fn get_ref(&self) -> &R {
+        self.reader.get_ref()
+    }
+
+    /// Mutably borrow the underlying source. Reading from or seeking it directly desynchronizes
+    /// the reader.
+    pub fn get_mut(&mut self) -> &mut R {
+        self.reader.get_mut()
+    }
+
+    /// Unwrap the underlying source. Decoded data not yet read is lost.
+    pub fn into_inner(self) -> R {
+        self.reader.into_inner()
+    }
+
     fn seek_uncompressed(&mut self, pos: SeekFrom) -> io::Result<u64> {
         if let Some(e) = self.reader.err.as_ref() {
             // Reset on EOF only — caller can re-seek past EOF and retry.
