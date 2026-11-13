@@ -47,6 +47,7 @@ pub struct Encoder {
 impl Encoder {
     /// Returns an Encoder with its scratch allocated that runs the kernels of `tier`; for
     /// tests and benchmarks.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn with_tier(tier: Tier) -> Self {
         let mut e = Self::default();
         e.setup();

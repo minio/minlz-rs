@@ -95,27 +95,32 @@ impl Table {
     }
 
     /// Returns the code lengths.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn lens(&self) -> &[u8; 256] {
         &self.lens
     }
 
     /// Returns the schedule records.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn recs(&self) -> &[Rec] {
         &self.sched[..usize::from(self.nsched)]
     }
 
     /// Returns the zero padded rank-to-symbol table.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn r2s(&self) -> &[u8; R2S_LEN] {
         &self.r2s
     }
 
     /// Returns the symbol-to-rank table; 0xFF for unused symbols when there are fewer
     /// than 256 ranks.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn s2r(&self) -> &[u8; 256] {
         &self.s2r
     }
 
     /// Returns the number of ranks (leaves); 2 for a single-symbol table.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn nranks(&self) -> usize {
         usize::from(self.nranks)
     }

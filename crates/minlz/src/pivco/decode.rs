@@ -48,6 +48,7 @@ pub struct Decoder {
 impl Decoder {
     /// Returns a Decoder with its scratch allocated that runs the kernels of `tier`; for
     /// tests and benchmarks.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn with_tier(tier: Tier) -> Self {
         let mut d = Self::default();
         d.setup();

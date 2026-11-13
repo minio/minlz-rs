@@ -36,11 +36,13 @@ pub const PIVCO_HIST_AVX512: u32 = 32;
 static DISABLED: AtomicU32 = AtomicU32::new(0);
 
 /// Turns off the features in `mask` (a union of the constants above) until [`enable_all`].
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub fn disable(mask: u32) {
     DISABLED.fetch_or(mask, Ordering::Relaxed);
 }
 
 /// Turns every detected feature back on.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub fn enable_all() {
     DISABLED.store(0, Ordering::Relaxed);
 }

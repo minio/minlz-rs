@@ -64,7 +64,6 @@ pub mod block;
 #[doc(hidden)]
 pub mod cpu;
 #[cfg(not(feature = "unstable-internals"))]
-#[allow(dead_code, unused_imports)]
 mod cpu;
 mod error;
 #[cfg(test)]
@@ -76,7 +75,6 @@ pub mod index;
 #[doc(hidden)]
 pub mod pivco;
 #[cfg(not(feature = "unstable-internals"))]
-#[allow(dead_code, unused_imports)]
 mod pivco;
 #[cfg(any(test, feature = "reference"))]
 #[doc(hidden)]
@@ -88,7 +86,6 @@ mod unzip;
 #[doc(hidden)]
 pub mod xxh3;
 #[cfg(not(feature = "unstable-internals"))]
-#[allow(dead_code, unused_imports)]
 mod xxh3;
 
 pub use block::{

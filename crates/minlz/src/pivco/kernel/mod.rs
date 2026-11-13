@@ -232,6 +232,7 @@ impl Tier {
     }
 
     /// Returns all usable tiers, best first; [`Tier::Generic`] is always last.
+    #[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
     pub fn tiers() -> Vec<Tier> {
         let mut ts = Vec::new();
         if cpu::has(cpu::PIVCO_AVX512) {
