@@ -1057,7 +1057,10 @@ fn read_uncompressed_pieces() {
         let mut bad = data.clone();
         bad[pos] ^= 1;
         let e = super::read_uncompressed(&mut &bad[..], &mut buf, sum, false).unwrap_err();
-        assert!(matches!(e, Error::Crc), "flip at {pos}: {e}");
+        assert!(
+            matches!(e.get_ref().and_then(|e| e.downcast_ref()), Some(Error::Crc)),
+            "flip at {pos}: {e}"
+        );
         super::read_uncompressed(&mut &bad[..], &mut buf, sum, true).unwrap();
     }
 }

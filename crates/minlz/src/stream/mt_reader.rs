@@ -61,7 +61,7 @@ struct DecodeJob {
 /// Worker output sent to the writer thread: (decoded body, ok flag).
 /// The writer thread releases `body` back to its pool after writing.
 struct DecodeOutput {
-    result: Result<Vec<u8>, Error>,
+    result: io::Result<Vec<u8>>,
 }
 
 /// Result of [`super::Reader::decode_concurrent`]: the recovered sink plus the
@@ -424,7 +424,7 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
             decoded_pool,
         } = job;
         let mut decoded = decoded_pool.reuse();
-        let res: Result<Vec<u8>, Error> = (|| {
+        let res: io::Result<Vec<u8>> = (|| {
             if chunk_type == CHUNK_TYPE_MINLZ_SIMD {
                 let (n, block) = simd_chunk_header(&body, max_block)?;
                 // The decoder writes every byte, so the bytes a reused buffer holds need no zeroing.
@@ -434,10 +434,10 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
             }
             let (dlen, _) = min_lz_chunk_len(&body)?;
             if dlen > max_block {
-                return Err(Error::TooLarge);
+                return Err(Error::TooLarge.into());
             }
             decoded.clear();
-            block::append_decoded_chunk_body(&mut decoded, &body)?;
+            block::append_decoded_chunk_body(&mut decoded, &body).map_err(Error::Block)?;
             if !ignore_crc {
                 let to_crc: &[u8] = if chunk_type == CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC {
                     let (_, n) = get_uvarint(&body).ok_or(Error::Corrupt)?;
@@ -446,7 +446,7 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
                     &decoded[..]
                 };
                 if masked_crc32c(to_crc) != checksum {
-                    return Err(Error::Crc);
+                    return Err(Error::Crc.into());
                 }
             }
             Ok(std::mem::take(&mut decoded))
@@ -479,7 +479,7 @@ fn writer_loop<W: Write + Send>(
                     decoded_pool.release(buf);
                     write_res?;
                 }
-                Ok(DecodeOutput { result: Err(e) }) => return Err(record(&err_slot, e.into())),
+                Ok(DecodeOutput { result: Err(e) }) => return Err(record(&err_slot, e)),
                 Err(_) => {
                     return Err(record(
                         &err_slot,

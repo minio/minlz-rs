@@ -325,11 +325,11 @@ impl<R: Read> Reader<R> {
                 // reports UnexpectedEof if none does.
                 CHUNK_TYPE_EOF => self.handle_eof_chunk(chunk_len),
                 CHUNK_TYPE_STREAM_IDENTIFIER => self.handle_stream_identifier(chunk_len),
-                t if t <= MAX_NON_SKIPPABLE_CHUNK => Err(Error::Unsupported),
+                t if t <= MAX_NON_SKIPPABLE_CHUNK => Err(Error::Unsupported.into()),
                 _ => self.handle_skippable(chunk_type, chunk_len),
             };
             if let Err(e) = res {
-                return self.set_err::<()>(e);
+                return self.set_io_err::<()>(e);
             }
         }
         Ok(())
@@ -347,7 +347,7 @@ impl<R: Read> Reader<R> {
         n: &mut u64,
     ) -> Result<()> {
         if chunk_len < CHECKSUM_SIZE {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         self.ensure_buf(chunk_len)?;
         read_exact_or_corrupt(&mut self.r, &mut self.buf[..chunk_len])?;
@@ -355,14 +355,14 @@ impl<R: Read> Reader<R> {
         let body = &self.buf[CHECKSUM_SIZE..chunk_len];
         let (dlen, _) = min_lz_chunk_len(body)?;
         if dlen > self.max_block {
-            return Err(Error::TooLarge);
+            return Err(Error::TooLarge.into());
         }
-        block::decoded_len_chunk_body(body)?;
+        block::decoded_len_chunk_body(body).map_err(Error::Block)?;
         if (dlen as u64) > *n {
             // Need decode for the partial block.
             self.block_start += self.decoded.len() as u64;
             self.decoded.clear();
-            block::append_decoded_chunk_body(&mut self.decoded, body)?;
+            block::append_decoded_chunk_body(&mut self.decoded, body).map_err(Error::Block)?;
             if !self.ignore_crc {
                 let to_crc: &[u8] = if chunk_type == CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC {
                     strip_dlen_varint(body)?
@@ -370,7 +370,7 @@ impl<R: Read> Reader<R> {
                     &self.decoded[..]
                 };
                 if masked_crc32c(to_crc) != checksum {
-                    return Err(Error::Crc);
+                    return Err(Error::Crc.into());
                 }
             }
             self.decoded_pos = *n as usize;
@@ -407,11 +407,11 @@ impl<R: Read> Reader<R> {
     /// shape as the compressed variant but with a 1:1 wire length.
     fn skip_uncompressed_or_decode(&mut self, chunk_len: usize, n: &mut u64) -> Result<()> {
         if chunk_len < CHECKSUM_SIZE || chunk_len > self.max_buf_size() {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         let n2 = chunk_len - CHECKSUM_SIZE;
         if n2 > self.max_block {
-            return Err(Error::TooLarge);
+            return Err(Error::TooLarge.into());
         }
         if (n2 as u64) > *n {
             // Partial — read CRC + body into `decoded` and verify.
@@ -508,11 +508,11 @@ impl<R: Read> Reader<R> {
                 CHUNK_TYPE_UNCOMPRESSED_DATA => self.handle_uncompressed_chunk(chunk_len),
                 CHUNK_TYPE_EOF => self.handle_eof_chunk(chunk_len),
                 CHUNK_TYPE_STREAM_IDENTIFIER => self.handle_stream_identifier(chunk_len),
-                t if t <= MAX_NON_SKIPPABLE_CHUNK => Err(Error::Unsupported),
+                t if t <= MAX_NON_SKIPPABLE_CHUNK => Err(Error::Unsupported.into()),
                 _ => self.handle_skippable(chunk_type, chunk_len),
             };
             if let Err(e) = res {
-                return self.set_err::<()>(e).map(|_| false);
+                return self.set_io_err::<()>(e).map(|_| false);
             }
             // Else loop: either decoded was populated (top-of-loop returns
             // Ok(true)) or this was a metadata chunk and we read another.
@@ -565,7 +565,7 @@ impl<R: Read> BufRead for Reader<R> {
 impl<R: Read> Reader<R> {
     fn handle_compressed_chunk(&mut self, chunk_type: u8, chunk_len: usize) -> Result<()> {
         if chunk_len < CHECKSUM_SIZE {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         self.block_start += self.decoded.len() as u64;
         self.ensure_buf(chunk_len)?;
@@ -577,10 +577,10 @@ impl<R: Read> Reader<R> {
         // `0` marker is only present in the standalone block format.
         let (dlen, _) = min_lz_chunk_len(body)?;
         if dlen > self.max_block {
-            return Err(Error::TooLarge);
+            return Err(Error::TooLarge.into());
         }
         self.decoded.clear();
-        block::append_decoded_chunk_body(&mut self.decoded, body)?;
+        block::append_decoded_chunk_body(&mut self.decoded, body).map_err(Error::Block)?;
         debug_assert_eq!(self.decoded.len(), dlen);
 
         if !self.ignore_crc {
@@ -592,7 +592,7 @@ impl<R: Read> Reader<R> {
                 &self.decoded[..]
             };
             if masked_crc32c(to_crc) != checksum {
-                return Err(Error::Crc);
+                return Err(Error::Crc.into());
             }
         }
         self.decoded_pos = 0;
@@ -609,7 +609,7 @@ impl<R: Read> Reader<R> {
     /// the offset of its SIMD block.
     fn read_simd_chunk(&mut self, chunk_len: usize) -> Result<(usize, usize)> {
         if !self.simd {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         self.ensure_buf(chunk_len)?;
         read_exact_or_corrupt(&mut self.r, &mut self.buf[..chunk_len])?;
@@ -635,14 +635,14 @@ impl<R: Read> Reader<R> {
 
     fn handle_uncompressed_chunk(&mut self, chunk_len: usize) -> Result<()> {
         if chunk_len < CHECKSUM_SIZE || chunk_len > self.max_buf_size() {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         self.block_start += self.decoded.len() as u64;
         // Read the 4-byte checksum first into `buf` so we can stream the
         // payload directly into `decoded` (Go does the same).
         let n = chunk_len - CHECKSUM_SIZE;
         if n > self.max_block {
-            return Err(Error::TooLarge);
+            return Err(Error::TooLarge.into());
         }
         self.ensure_buf(CHECKSUM_SIZE)?;
         read_exact_or_corrupt(&mut self.r, &mut self.buf[..CHECKSUM_SIZE])?;
@@ -657,7 +657,7 @@ impl<R: Read> Reader<R> {
 
     fn handle_eof_chunk(&mut self, chunk_len: usize) -> Result<()> {
         if chunk_len > MAX_VARINT_LEN_64 {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         if chunk_len != 0 {
             let mut tmp = [0u8; MAX_VARINT_LEN_64];
@@ -665,10 +665,10 @@ impl<R: Read> Reader<R> {
             if !self.ignore_stream_id {
                 let (want_size, n) = get_uvarint(&tmp[..chunk_len]).ok_or(Error::Corrupt)?;
                 if n != chunk_len {
-                    return Err(Error::Corrupt);
+                    return Err(Error::Corrupt.into());
                 }
                 if !self.stream_size().contains(&want_size) {
-                    return Err(Error::Corrupt);
+                    return Err(Error::Corrupt.into());
                 }
             }
         }
@@ -689,23 +689,23 @@ impl<R: Read> Reader<R> {
 
     fn handle_stream_identifier(&mut self, chunk_len: usize) -> Result<()> {
         if chunk_len != MAGIC_BODY_LEN {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         let mut tmp = [0u8; MAGIC_BODY_LEN];
         read_exact_or_corrupt(&mut self.r, &mut tmp)?;
         if &tmp[..MAGIC_BODY.len()] != MAGIC_BODY {
             // Snappy/S2 fallback is out of scope.
-            return Err(Error::Unsupported);
+            return Err(Error::Unsupported.into());
         }
         let indicator = tmp[MAGIC_BODY_LEN - 1];
         // Bit 7 must be 0.
         if indicator & 0x80 != 0 {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         self.simd = indicator & STREAM_FLAG_SIMD != 0;
         let new_max = block_size_from_indicator(indicator).ok_or(Error::Corrupt)?;
         if new_max > self.max_block_user {
-            return Err(Error::TooLarge);
+            return Err(Error::TooLarge.into());
         }
         self.max_block = new_max;
         self.block_start += self.decoded.len() as u64;
@@ -725,15 +725,14 @@ impl<R: Read> Reader<R> {
             if let Some(ref mut cb) = maybe_cb {
                 self.cb_buf.clear();
                 self.cb_buf.resize(chunk_len, 0);
-                let read_res = read_exact_or_corrupt(&mut self.r, &mut self.cb_buf[..])
-                    .map_err(io::Error::from);
+                let read_res = read_exact_or_corrupt(&mut self.r, &mut self.cb_buf[..]);
                 let invoke_res = read_res.and_then(|()| cb(id, &self.cb_buf));
                 self.callbacks[cb_idx] = maybe_cb;
                 invoke_res?;
                 return Ok(());
             }
             if (MIN_USER_NON_SKIPPABLE_CHUNK..=MAX_USER_NON_SKIPPABLE_CHUNK).contains(&id) {
-                return Err(Error::Corrupt);
+                return Err(Error::Corrupt.into());
             }
         }
         // Silent skip (padding 0xfe, reserved skippables 0x40..=0x7f, or
@@ -754,7 +753,7 @@ impl<R: Read> Reader<R> {
     fn ensure_buf(&mut self, n: usize) -> Result<()> {
         let cap = self.max_buf_size();
         if n > cap {
-            return Err(Error::Corrupt);
+            return Err(Error::Corrupt.into());
         }
         if self.buf.len() < n {
             self.buf.resize(n, 0);
@@ -790,7 +789,7 @@ impl<R: Read> Reader<R> {
 pub(super) fn min_lz_chunk_len(block: &[u8]) -> Result<(usize, usize)> {
     match get_uvarint(block) {
         Some((v, n)) if v >> 24 == 0 => Ok((v as usize, n)),
-        _ => Err(Error::Corrupt),
+        _ => Err(Error::Corrupt.into()),
     }
 }
 
@@ -798,7 +797,7 @@ pub(super) fn min_lz_chunk_len(block: &[u8]) -> Result<(usize, usize)> {
 /// (Go `simdChunkHeader`).
 pub(crate) fn simd_chunk_header(payload: &[u8], max_block: usize) -> Result<(usize, &[u8])> {
     let Some(block) = payload.get(SIMD_HASH_SIZE..) else {
-        return Err(Error::Corrupt);
+        return Err(Error::Corrupt.into());
     };
     // As for min_lz_chunk_len, other block types are corrupt.
     let (n, block) = simd::simd_header(block).map_err(|e| match e {
@@ -806,7 +805,7 @@ pub(crate) fn simd_chunk_header(payload: &[u8], max_block: usize) -> Result<(usi
         _ => Error::Corrupt,
     })?;
     if n > max_block {
-        return Err(Error::TooLarge);
+        return Err(Error::TooLarge.into());
     }
     Ok((n, block))
 }
@@ -820,9 +819,9 @@ pub(super) fn decode_simd_chunk(
     block: &[u8],
     ignore_hash: bool,
 ) -> Result<()> {
-    let h = simd::decode_simd_hash(dst, block, !ignore_hash)?;
+    let h = simd::decode_simd_hash(dst, block, !ignore_hash).map_err(Error::Block)?;
     if !ignore_hash && payload[..SIMD_HASH_SIZE] != h.to_le_bytes() {
-        return Err(Error::Crc);
+        return Err(Error::Crc.into());
     }
     Ok(())
 }
@@ -897,7 +896,7 @@ pub(super) fn read_uncompressed<R: Read>(
         }
     }
     if !ignore_crc && mask_crc32c(c) != checksum {
-        return Err(Error::Crc);
+        return Err(Error::Crc.into());
     }
     Ok(())
 }
@@ -907,8 +906,8 @@ pub(super) fn read_uncompressed<R: Read>(
 fn read_exact_or_corrupt<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<()> {
     match r.read_exact(buf) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(Error::Corrupt),
-        Err(e) => Err(Error::Io(e)),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(Error::Corrupt.into()),
+        res => res,
     }
 }
 
