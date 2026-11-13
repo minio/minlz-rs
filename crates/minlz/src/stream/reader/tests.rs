@@ -2295,3 +2295,23 @@ fn decode_concurrent_into_borrowed_sink() {
     assert_eq!(n, data.len() as u64);
     assert_eq!(out, data);
 }
+
+#[test]
+fn builder_rejects_bad_config() {
+    let empty = || Cursor::new(Vec::<u8>::new());
+    let cb = |_: u8, _: &[u8]| Ok(());
+    for id in [0x00, 0x7f, 0xfe, 0xff] {
+        let res = ReaderBuilder::new()
+            .user_chunk_callback(id, cb)
+            .build(empty());
+        assert!(matches!(res, Err(Error::Config(_))), "id 0x{id:02x}");
+    }
+    for id in [0x80, 0xfd] {
+        let res = ReaderBuilder::new()
+            .user_chunk_callback(id, cb)
+            .build(empty());
+        assert!(res.is_ok(), "id 0x{id:02x}");
+    }
+    let res = ReaderBuilder::new().max_block_size(0).build(empty());
+    assert!(matches!(res, Err(Error::Config(_))));
+}

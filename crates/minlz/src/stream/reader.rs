@@ -64,6 +64,8 @@ pub struct ReaderBuilder {
     ignore_stream_id: bool,
     ignore_crc: bool,
     callbacks: [Option<UserChunkCb>; USER_CB_COUNT],
+    /// A callback id outside the user chunk range, reported by `build`.
+    bad_callback_id: Option<u8>,
 }
 
 impl Default for ReaderBuilder {
@@ -73,6 +75,7 @@ impl Default for ReaderBuilder {
             ignore_stream_id: false,
             ignore_crc: false,
             callbacks: std::array::from_fn(|_| None),
+            bad_callback_id: None,
         }
     }
 }
@@ -119,27 +122,31 @@ impl ReaderBuilder {
     ///
     /// The callback receives `(id, payload)` and returns an [`io::Result`].
     /// An `Err` aborts decoding and is surfaced via the next read.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `id` is outside the user-defined chunk range.
+    /// An `id` outside `0x80..=0xfd` makes [`build`](Self::build) fail.
     pub fn user_chunk_callback<F>(mut self, id: u8, cb: F) -> Self
     where
         F: FnMut(u8, &[u8]) -> io::Result<()> + Send + 'static,
     {
-        assert!(
-            (MIN_USER_SKIPPABLE_CHUNK..=MAX_USER_NON_SKIPPABLE_CHUNK).contains(&id),
-            "user-chunk callback id must be in 0x80..=0xfd, got 0x{id:02x}"
-        );
-        self.callbacks[(id - MIN_USER_SKIPPABLE_CHUNK) as usize] = Some(Box::new(cb));
+        match id.checked_sub(MIN_USER_SKIPPABLE_CHUNK) {
+            Some(i) if id <= MAX_USER_NON_SKIPPABLE_CHUNK => {
+                self.callbacks[i as usize] = Some(Box::new(cb));
+            }
+            _ => self.bad_callback_id = Some(id),
+        }
         self
     }
 
     /// Consume the builder and wrap `r` in a [`Reader`].
     ///
     /// # Errors
-    /// [`Error::Config`] if `max_block_size` is `0` or exceeds `MAX_BLOCK_SIZE`.
+    /// [`Error::Config`] if `max_block_size` is `0` or exceeds `MAX_BLOCK_SIZE`, or a user chunk
+    /// callback was registered for an id outside `0x80..=0xfd`.
     pub fn build<R: Read>(self, r: R) -> Result<Reader<R>> {
+        if self.bad_callback_id.is_some() {
+            return Err(Error::Config(
+                "user chunk callback id must be in 0x80..=0xfd",
+            ));
+        }
         if self.max_block_size == 0 || self.max_block_size > MAX_BLOCK_SIZE {
             return Err(Error::Config(
                 "max_block_size must be in (0, MAX_BLOCK_SIZE]",
