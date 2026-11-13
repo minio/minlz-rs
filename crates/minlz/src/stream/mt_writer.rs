@@ -442,8 +442,9 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         }
     }
 
-    /// Total uncompressed bytes accepted, and compressed bytes the writer thread has written to
-    /// the sink. The compressed count lags behind the input until [`Write::flush`].
+    /// Uncompressed bytes handed to the workers, and compressed bytes the writer thread has
+    /// written to the sink. Input still buffered is not counted, and the compressed count lags
+    /// the encoding, so both are exact only after [`Write::flush`].
     pub fn written(&self) -> Written {
         Written {
             uncompressed: self.uncomp_written,

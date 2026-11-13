@@ -37,7 +37,7 @@ use super::format::{
 /// Byte counts reported by [`Writer::written`] and [`MtWriter::written`](super::MtWriter::written).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Written {
-    /// Uncompressed bytes accepted via [`std::io::Write::write`].
+    /// Uncompressed bytes encoded into blocks; input still buffered is not counted.
     pub uncompressed: u64,
     /// Compressed bytes written to the sink.
     pub compressed: u64,
@@ -235,8 +235,8 @@ impl<W: Write> Writer<W> {
         }
     }
 
-    /// Total uncompressed bytes accepted by [`Write::write`] and total
-    /// compressed bytes written to the sink so far.
+    /// Uncompressed and compressed bytes of the blocks written to the sink so far. Input still
+    /// buffered is not counted, so both are exact only after [`Write::flush`].
     pub fn written(&self) -> Written {
         Written {
             uncompressed: self.uncomp_written,
