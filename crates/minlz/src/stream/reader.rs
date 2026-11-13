@@ -44,7 +44,7 @@ use super::format::{
 ///
 /// The slice is borrowed from the reader's internal buffer and must not be
 /// retained beyond the callback invocation.
-pub type UserChunkCb = Box<dyn FnMut(u8, &[u8]) -> io::Result<()>>;
+pub type UserChunkCb = Box<dyn FnMut(u8, &[u8]) -> io::Result<()> + Send>;
 
 const USER_CB_COUNT: usize = (MAX_USER_NON_SKIPPABLE_CHUNK - MIN_USER_SKIPPABLE_CHUNK + 1) as usize;
 
@@ -125,7 +125,7 @@ impl ReaderBuilder {
     /// Panics if `id` is outside the user-defined chunk range.
     pub fn user_chunk_callback<F>(mut self, id: u8, cb: F) -> Self
     where
-        F: FnMut(u8, &[u8]) -> io::Result<()> + 'static,
+        F: FnMut(u8, &[u8]) -> io::Result<()> + Send + 'static,
     {
         assert!(
             (MIN_USER_SKIPPABLE_CHUNK..=MAX_USER_NON_SKIPPABLE_CHUNK).contains(&id),

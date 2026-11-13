@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::RefCell;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use crate::Error as BlockError;
@@ -402,24 +400,24 @@ fn user_chunk_callback_receives_payload() {
     push_uncompressed_block(&mut s, payload);
     push_eof(&mut s, payload.len() as u64);
 
-    type Seen = Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
-    let seen: Seen = Rc::new(RefCell::new(Vec::new()));
+    type Seen = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let seen2 = seen.clone();
     let seen3 = seen.clone();
     let reader = ReaderBuilder::new()
         .user_chunk_callback(0x80, move |id, body| {
-            seen2.borrow_mut().push((id, body.to_vec()));
+            seen2.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .user_chunk_callback(0xc0, move |id, body| {
-            seen3.borrow_mut().push((id, body.to_vec()));
+            seen3.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .build(Cursor::new(&s))
         .unwrap();
     let got = decode_to_end(reader).unwrap();
     assert_eq!(got, payload);
-    let seen = seen.borrow();
+    let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[0], (0x80, b"hello-user".to_vec()));
     assert_eq!(seen[1], (0xc0, b"non-skippable-data".to_vec()));
@@ -2261,4 +2259,12 @@ fn rejects_chunk_with_zero_or_short_dlen() {
             "dlen={dlen}: index"
         );
     }
+}
+
+#[test]
+fn reader_types_are_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<ReaderBuilder>();
+    assert_send::<Reader<Cursor<Vec<u8>>>>();
+    assert_send::<ReadSeeker<Cursor<Vec<u8>>>>();
 }

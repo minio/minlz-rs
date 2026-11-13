@@ -117,8 +117,8 @@ fn flush_on_write_emits_one_chunk_per_write() {
 
 #[test]
 fn add_user_chunk_round_trips_via_callback() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::Mutex;
     let buf: Vec<u8> = Vec::new();
     let mut w = Writer::new(buf);
     w.write_all(b"prefix").unwrap();
@@ -128,18 +128,18 @@ fn add_user_chunk_round_trips_via_callback() {
     w.write_all(b"suffix").unwrap();
     let out = w.finish().unwrap();
 
-    type Seen = Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
-    let seen: Seen = Rc::new(RefCell::new(Vec::new()));
+    type Seen = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let s1 = seen.clone();
     let s2 = seen.clone();
     let mut decoded = Vec::new();
     crate::stream::ReaderBuilder::new()
         .user_chunk_callback(0x80, move |id, body| {
-            s1.borrow_mut().push((id, body.to_vec()));
+            s1.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .user_chunk_callback(0xc0, move |id, body| {
-            s2.borrow_mut().push((id, body.to_vec()));
+            s2.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .build(Cursor::new(&out))
@@ -147,7 +147,7 @@ fn add_user_chunk_round_trips_via_callback() {
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, b"prefixinfixsuffix");
-    let seen = seen.borrow();
+    let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[0], (0x80, b"meta-a".to_vec()));
     assert_eq!(seen[1], (0xc0, b"meta-b".to_vec()));
