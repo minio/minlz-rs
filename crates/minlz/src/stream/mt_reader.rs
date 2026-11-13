@@ -15,7 +15,7 @@
 //! Parallel-decode helper invoked by [`super::Reader::decode_concurrent`].
 //!
 //! The dispatcher (caller's thread) reads chunk headers serially.  Data
-//! chunks (0x01 / 0x02 / 0x03) are handed to a worker pool for parallel
+//! chunks (0x01 / 0x02 / 0x03 / 0x10) are handed to a worker pool for parallel
 //! decoding.  Metadata chunks (stream id, EOF, padding, user-chunk,
 //! skippables) are handled inline.  A dedicated writer thread drains
 //! the per-block result receivers in submission order so the decoded
@@ -33,16 +33,18 @@ use super::crc::masked_crc32c;
 use super::error::Error;
 use super::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
-    CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_STREAM_IDENTIFIER,
+    CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_MINLZ_SIMD, CHUNK_TYPE_STREAM_IDENTIFIER,
     CHUNK_TYPE_UNCOMPRESSED_DATA, MAGIC_BODY, MAGIC_BODY_LEN, MAX_BLOCK_SIZE,
     MAX_NON_SKIPPABLE_CHUNK, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64,
-    MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK, block_size_from_indicator, get_uvarint,
-    read_chunk_len, read_u32_le,
+    MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK, STREAM_FLAG_SIMD,
+    block_size_from_indicator, get_uvarint, read_chunk_len, read_u32_le,
 };
 use super::mt_pool::BufferPool;
-use super::reader::Reader;
+use super::reader::{
+    Reader, decode_simd_chunk, min_lz_chunk_len, read_uncompressed, simd_chunk_header,
+};
 
-/// Worker job: decode one compressed/uncompressed chunk body.
+/// Worker job: decode one compressed chunk body, or the payload of a SIMD chunk.
 struct DecodeJob {
     chunk_type: u8,
     body: Vec<u8>,
@@ -59,7 +61,7 @@ struct DecodeJob {
 /// Worker output sent to the writer thread: (decoded body, ok flag).
 /// The writer thread releases `body` back to its pool after writing.
 struct DecodeOutput {
-    result: Result<Vec<u8>, Error>,
+    result: io::Result<Vec<u8>>,
 }
 
 /// Result of [`super::Reader::decode_concurrent`]: the recovered sink plus the
@@ -73,12 +75,11 @@ pub struct ConcurrentDecode<W> {
     pub writer: W,
 }
 
-pub(super) fn decode_concurrent_into<R: Read, W: Write + Send + 'static>(
+pub(super) fn decode_concurrent_into<R: Read, W: Write + Send>(
     reader: &mut Reader<R>,
     w: W,
     threads: usize,
 ) -> io::Result<ConcurrentDecode<W>> {
-    let threads = threads.max(1);
     // One submit channel per worker (capacity 1) for round-robin
     // dispatch — no Mutex<Receiver> contention.
     let mut submit_txs = Vec::with_capacity(threads);
@@ -95,40 +96,48 @@ pub(super) fn decode_concurrent_into<R: Read, W: Write + Send + 'static>(
     let compressed_pool = Arc::new(BufferPool::new(pool_slots, reader.max_block / 8));
     let decoded_pool = Arc::new(BufferPool::new(pool_slots, reader.max_block));
 
-    let mut workers = Vec::with_capacity(threads);
-    for rx in submit_rxs {
-        workers.push(std::thread::spawn(move || worker_loop(rx)));
-    }
-    let err_writer = err.clone();
-    let decoded_pool_w = decoded_pool.clone();
-    let writer_handle = std::thread::spawn(move || {
-        writer_loop(w, order_rx, finish_tx, err_writer, decoded_pool_w);
+    // Scoped, so the sink may borrow from the caller; every thread is joined before returning.
+    let dispatch_res = std::thread::scope(|scope| {
+        // Owned by the scope, so a panicking dispatch drops the senders and the workers exit.
+        let mut submit_txs = submit_txs;
+        let mut workers = Vec::with_capacity(threads);
+        for rx in submit_rxs {
+            workers.push(scope.spawn(move || worker_loop(rx)));
+        }
+        let err_writer = err.clone();
+        let decoded_pool_w = decoded_pool.clone();
+        let writer_handle = scope.spawn(move || {
+            writer_loop(w, order_rx, finish_tx, err_writer, decoded_pool_w);
+        });
+
+        let dispatch_res = dispatch_loop(
+            reader,
+            &mut submit_txs,
+            &order_tx,
+            &err,
+            &compressed_pool,
+            &decoded_pool,
+        );
+
+        submit_txs.clear();
+        drop(order_tx);
+        for h in workers {
+            let _ = h.join();
+        }
+        let _ = writer_handle.join();
+        dispatch_res
     });
-
-    let dispatch_res = dispatch_loop(
-        reader,
-        &mut submit_txs,
-        &order_tx,
-        &err,
-        &compressed_pool,
-        &decoded_pool,
-    );
-
-    submit_txs.clear();
-    drop(order_tx);
-    for h in workers {
-        let _ = h.join();
-    }
-    let _ = writer_handle.join();
 
     let pipeline_res = finish_rx
         .recv()
         .unwrap_or_else(|_| Err(io::Error::other("MinLZ writer thread exited unexpectedly")));
 
+    // A pipeline error is from an earlier chunk than any dispatch error, and a
+    // failed pipeline makes the dispatcher fail with "writer thread closed".
     match (dispatch_res, pipeline_res) {
         (Ok(()), Ok(payload)) => Ok(payload),
-        (Err(e), _) => Err(e),
         (_, Err(e)) => Err(e),
+        (Err(e), _) => Err(e),
     }
 }
 
@@ -140,7 +149,9 @@ fn dispatch_loop<R: Read>(
     compressed_pool: &Arc<BufferPool>,
     decoded_pool: &Arc<BufferPool>,
 ) -> io::Result<()> {
-    let mut uncomp_emitted: u64 = 0;
+    // Go's streamSize: blocks a skip passed over count toward the EOF size.  Only an index jump
+    // makes it a range, and a ReadSeeker never decodes concurrently.
+    let mut uncomp_emitted = *reader.stream_size().start();
     let mut next_worker: usize = 0;
     loop {
         // Lock poison only panics if a worker thread already panicked while
@@ -166,15 +177,21 @@ fn dispatch_loop<R: Read>(
         }
 
         match chunk_type {
-            CHUNK_TYPE_MINLZ_COMPRESSED_DATA | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC
-                if chunk_len >= CHECKSUM_SIZE =>
+            CHUNK_TYPE_MINLZ_COMPRESSED_DATA
+            | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC
+            | CHUNK_TYPE_UNCOMPRESSED_DATA
+                if chunk_len < CHECKSUM_SIZE =>
             {
+                return Err(io::Error::from(Error::Corrupt));
+            }
+            CHUNK_TYPE_MINLZ_COMPRESSED_DATA | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC => {
                 if chunk_len > max_buf_size(reader.max_block) {
                     return Err(io::Error::from(Error::Corrupt));
                 }
                 // Acquire a pooled buffer, sized for the full chunk
                 // (incl. checksum prefix).  We strip the checksum below
-                // before the worker sees it.
+                // before the worker sees it.  Not `reuse`: skipping the
+                // zero-fill made 32-thread decode 6-14% slower (measured).
                 let mut buf = compressed_pool.acquire();
                 buf.resize(chunk_len, 0);
                 read_exact_or_corrupt(&mut reader.r, &mut buf)?;
@@ -185,8 +202,7 @@ fn dispatch_loop<R: Read>(
                 buf.copy_within(CHECKSUM_SIZE.., 0);
                 buf.truncate(chunk_len - CHECKSUM_SIZE);
                 let body = buf;
-                let dlen = block::decoded_len_chunk_body(&body)
-                    .map_err(|e| io::Error::from(Error::Block(e)))?;
+                let (dlen, _) = min_lz_chunk_len(&body)?;
                 uncomp_emitted += dlen as u64;
                 submit_compressed(
                     submit_txs,
@@ -201,7 +217,30 @@ fn dispatch_loop<R: Read>(
                     decoded_pool,
                 )?;
             }
-            CHUNK_TYPE_UNCOMPRESSED_DATA if chunk_len >= CHECKSUM_SIZE => {
+            CHUNK_TYPE_MINLZ_SIMD => {
+                if !reader.simd || chunk_len > max_buf_size(reader.max_block) {
+                    return Err(io::Error::from(Error::Corrupt));
+                }
+                let mut buf = compressed_pool.acquire();
+                buf.resize(chunk_len, 0);
+                read_exact_or_corrupt(&mut reader.r, &mut buf)?;
+                let (dlen, _) = simd_chunk_header(&buf, reader.max_block)?;
+                uncomp_emitted += dlen as u64;
+                // The worker reads the hash from the payload.
+                submit_compressed(
+                    submit_txs,
+                    &mut next_worker,
+                    order_tx,
+                    chunk_type,
+                    buf,
+                    0,
+                    reader.ignore_crc,
+                    reader.max_block,
+                    compressed_pool,
+                    decoded_pool,
+                )?;
+            }
+            CHUNK_TYPE_UNCOMPRESSED_DATA => {
                 if chunk_len > max_buf_size(reader.max_block) {
                     return Err(io::Error::from(Error::Corrupt));
                 }
@@ -212,13 +251,9 @@ fn dispatch_loop<R: Read>(
                 let mut cbuf = [0u8; CHECKSUM_SIZE];
                 read_exact_or_corrupt(&mut reader.r, &mut cbuf)?;
                 let checksum = read_u32_le(&cbuf);
-                let mut body = decoded_pool.acquire();
+                let mut body = decoded_pool.reuse();
                 body.resize(n, 0);
-                read_exact_or_corrupt(&mut reader.r, &mut body)?;
-                if !reader.ignore_crc && masked_crc32c(&body) != checksum {
-                    decoded_pool.release(body);
-                    return Err(io::Error::from(Error::Crc));
-                }
+                read_uncompressed(&mut reader.r, &mut body, checksum, reader.ignore_crc)?;
                 uncomp_emitted += n as u64;
                 let (tx, rx) = mpsc::sync_channel::<DecodeOutput>(1);
                 if order_tx.send(rx).is_err() {
@@ -236,7 +271,13 @@ fn dispatch_loop<R: Read>(
                     read_exact_or_corrupt(&mut reader.r, &mut tmp[..chunk_len])?;
                     if !reader.ignore_stream_id {
                         let (want, n) = get_uvarint(&tmp[..chunk_len]).ok_or(Error::Corrupt)?;
-                        if n != chunk_len || want != uncomp_emitted {
+                        // No stream identifier since the last EOF: an empty stream.
+                        let size = if reader.header_read {
+                            uncomp_emitted
+                        } else {
+                            0
+                        };
+                        if n != chunk_len || want != size {
                             return Err(io::Error::from(Error::Corrupt));
                         }
                     }
@@ -254,9 +295,11 @@ fn dispatch_loop<R: Read>(
                     return Err(io::Error::from(Error::Unsupported));
                 }
                 let indicator = tmp[MAGIC_BODY_LEN - 1];
-                if indicator & 0xc0 != 0 {
+                // Bit 7 must be 0.
+                if indicator & 0x80 != 0 {
                     return Err(io::Error::from(Error::Corrupt));
                 }
+                reader.simd = indicator & STREAM_FLAG_SIMD != 0;
                 let new_max = block_size_from_indicator(indicator).ok_or(Error::Corrupt)?;
                 if new_max > reader.max_block_user {
                     return Err(io::Error::from(Error::TooLarge));
@@ -380,13 +423,21 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
             compressed_pool,
             decoded_pool,
         } = job;
-        let mut decoded = decoded_pool.acquire();
-        let res: Result<Vec<u8>, Error> = (|| {
-            let dlen = block::decoded_len_chunk_body(&body)?;
-            if dlen > max_block {
-                return Err(Error::TooLarge);
+        let mut decoded = decoded_pool.reuse();
+        let res: io::Result<Vec<u8>> = (|| {
+            if chunk_type == CHUNK_TYPE_MINLZ_SIMD {
+                let (n, block) = simd_chunk_header(&body, max_block)?;
+                // The decoder writes every byte, so the bytes a reused buffer holds need no zeroing.
+                decoded.resize(n, 0);
+                decode_simd_chunk(&mut decoded, &body, block, ignore_crc)?;
+                return Ok(std::mem::take(&mut decoded));
             }
-            block::append_decoded_chunk_body(&mut decoded, &body)?;
+            let (dlen, _) = min_lz_chunk_len(&body)?;
+            if dlen > max_block {
+                return Err(Error::TooLarge.into());
+            }
+            decoded.clear();
+            block::append_decoded_chunk_body(&mut decoded, &body).map_err(Error::Block)?;
             if !ignore_crc {
                 let to_crc: &[u8] = if chunk_type == CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC {
                     let (_, n) = get_uvarint(&body).ok_or(Error::Corrupt)?;
@@ -395,7 +446,7 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
                     &decoded[..]
                 };
                 if masked_crc32c(to_crc) != checksum {
-                    return Err(Error::Crc);
+                    return Err(Error::Crc.into());
                 }
             }
             Ok(std::mem::take(&mut decoded))
@@ -411,7 +462,7 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
     }
 }
 
-fn writer_loop<W: Write + Send + 'static>(
+fn writer_loop<W: Write + Send>(
     mut w: W,
     order_rx: Receiver<Receiver<DecodeOutput>>,
     finish_tx: SyncSender<io::Result<ConcurrentDecode<W>>>,
@@ -428,7 +479,7 @@ fn writer_loop<W: Write + Send + 'static>(
                     decoded_pool.release(buf);
                     write_res?;
                 }
-                Ok(DecodeOutput { result: Err(e) }) => return Err(record(&err_slot, e.into())),
+                Ok(DecodeOutput { result: Err(e) }) => return Err(record(&err_slot, e)),
                 Err(_) => {
                     return Err(record(
                         &err_slot,

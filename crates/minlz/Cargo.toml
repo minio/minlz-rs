@@ -1,19 +1,50 @@
 [package]
-name = "minlz"
-version = "0.1.1"
+name = "minio-minlz"
+version = "1.3.0"
 description = "MinLZ compression"
+readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# The AVX-512 histogram is MIT licensed: src/pivco/kernel/LICENSE-histogram.
+license = "Apache-2.0 AND MIT"
 repository.workspace = true
 authors.workspace = true
 
 [lib]
+name = "minlz"
 path = "src/lib.rs"
+
+[features]
+# The clean-room reference decoder `minlz::reference`, an oracle for tests and fuzzing. Not covered
+# by semver.
+reference = []
+# Internals for the workspace's own tests, benches, fuzzers and `mz`: CPU tier switches and the
+# entropy coder and hash. Not covered by semver.
+unstable-internals = []
 
 [[example]]
 name = "bench"
 path = "examples/bench.rs"
+
+[[test]]
+name = "pivco_allocs"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "pivco_hist_4g"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "pivco_hist_fallback"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "simd_decode_allocs"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "simd_fixtures"
+required-features = ["unstable-internals"]
 
 [[bench]]
 name = "block"
@@ -23,13 +54,26 @@ harness = false
 name = "stream"
 harness = false
 
+[[bench]]
+name = "pivco"
+harness = false
+required-features = ["unstable-internals"]
+
+[[bench]]
+name = "xxh3"
+harness = false
+required-features = ["unstable-internals"]
+
 [dev-dependencies]
+minlz = { package = "minio-minlz", path = ".", features = ["unstable-internals"] }
 criterion = { version = "0.8.2", default-features = false, features = ["html_reports"] }
 ureq = "3.3.0"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(minlz_readme)", "cfg(fuzzing)"] }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

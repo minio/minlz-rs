@@ -23,8 +23,8 @@ use minlz::stream::{ConcurrentDecode, ReadSeeker, Reader};
 
 use crate::args::Options;
 use crate::io_util::{
-    CountingReader, CountingWriter, mb_per_sec, open_input, open_output, open_output_send,
-    resolve_threads,
+    CountingReader, CountingWriter, check_not_input, mb_per_sec, open_input, open_output,
+    open_output_send, resolve_threads, sync_output,
 };
 
 pub fn run(opts: Options, input: Option<PathBuf>) -> io::Result<()> {
@@ -66,7 +66,7 @@ fn decompress_stream(input: &Path, opts: &Options) -> io::Result<()> {
 /// `--offset` is supported (seek before following); `--tail` is
 /// rejected at parse time.
 fn decompress_stream_follow(input: &Path, opts: &Options) -> io::Result<()> {
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     if !opts.quiet {
         eprintln!("Following {} -> {}", input.display(), dst_path.display());
     }
@@ -76,7 +76,7 @@ fn decompress_stream_follow(input: &Path, opts: &Options) -> io::Result<()> {
     let mut counted_dst = CountingWriter::new(dst);
 
     if let Some(off) = opts.offset {
-        let mut rs = ReadSeeker::new(reader, &[])
+        let mut rs = ReadSeeker::new(reader)
             .map_err(|e| io::Error::other(format!("--follow --offset requires an index: {e}")))?;
         rs.seek(SeekFrom::Start(off))?;
         if opts.tail_next_nl {
@@ -100,13 +100,13 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
     let file = File::open(input)?;
     let src = BufReader::with_capacity(256 * 1024, file);
     let reader = Reader::new(src);
-    let mut rs = ReadSeeker::new(reader, &[]).map_err(|e| {
+    let mut rs = ReadSeeker::new(reader).map_err(|e| {
         io::Error::other(format!(
             "--offset / --tail require an index in the stream: {e}"
         ))
     })?;
 
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     if !opts.quiet {
         eprint!(
             "Decompressing {} -> {}",
@@ -119,18 +119,7 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
     let total = rs.index().total_uncompressed().ok_or_else(|| {
         io::Error::other("--offset / --tail require an index with known total size")
     })?;
-    let (start, limit) = match (opts.offset, opts.tail) {
-        (Some(off), None) => (off, total.saturating_sub(off)),
-        (None, Some(t)) => {
-            let t = t.min(total);
-            (total - t, t)
-        }
-        (Some(off), Some(t)) => {
-            let end = off.saturating_add(t).min(total);
-            (off, end.saturating_sub(off))
-        }
-        (None, None) => unreachable!("decompress_stream_seek called without offset/tail"),
-    };
+    let (start, limit) = seek_range(opts, total);
     rs.seek(SeekFrom::Start(start))?;
     if opts.tail_next_nl {
         advance_past_newline(&mut rs)?;
@@ -157,9 +146,25 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
     Ok(())
 }
 
+/// The start and length that `--offset` and `--tail` select from `total` bytes.
+fn seek_range(opts: &Options, total: u64) -> (u64, u64) {
+    match (opts.offset, opts.tail) {
+        (Some(off), None) => (off, total.saturating_sub(off)),
+        (None, Some(t)) => {
+            let t = t.min(total);
+            (total - t, t)
+        }
+        (Some(off), Some(t)) => {
+            let end = off.saturating_add(t).min(total);
+            (off, end.saturating_sub(off))
+        }
+        (None, None) => (0, total),
+    }
+}
+
 fn decompress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let (src, _) = open_input(input)?;
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     let mut counted_src = CountingReader::new(src);
 
     if !opts.quiet {
@@ -189,6 +194,7 @@ fn decompress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let elapsed = start.elapsed();
     print_decompress_summary(opts, counted_src.bytes, counted_dst.bytes, elapsed);
     if opts.remove && input != Path::new("-") {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -199,7 +205,7 @@ fn decompress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
 
 fn decompress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Result<()> {
     let (src, _) = open_input(input)?;
-    let dst_path = dest_path(input, opts);
+    let dst_path = dest_path(input, opts)?;
     let mut counted_src = CountingReader::new(src);
     let dst = open_output_send(&dst_path)?;
 
@@ -219,6 +225,7 @@ fn decompress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Res
     let elapsed = start.elapsed();
     print_decompress_summary(opts, counted_src.bytes, decoded_bytes, elapsed);
     if opts.remove && input != Path::new("-") {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -230,8 +237,18 @@ fn decompress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Res
 fn decompress_block(input: &Path, opts: &Options) -> io::Result<()> {
     let (mut src, _) = open_input(input)?;
     let mut buf = Vec::new();
-    src.read_to_end(&mut buf)?;
-    let dst_path = dest_path(input, opts);
+    if input == Path::new("-") {
+        // Go caps stdin at MaxEncodedLen(MaxBlockSize); one byte more turns its silent
+        // truncation into an error.
+        let max = minlz::MAX_BLOCK_SIZE + 2;
+        src.take(max as u64 + 1).read_to_end(&mut buf)?;
+        if buf.len() > max {
+            return Err(io::Error::other("maximum encoded block size exceeded"));
+        }
+    } else {
+        src.read_to_end(&mut buf)?;
+    }
+    let dst_path = dest_path(input, opts)?;
     if !opts.quiet {
         eprint!(
             "Decompressing {} -> {}",
@@ -243,16 +260,29 @@ fn decompress_block(input: &Path, opts: &Options) -> io::Result<()> {
     let mut dec = Vec::with_capacity(buf.len() * 2);
     minlz::decode(&mut dec, &buf).map_err(io::Error::other)?;
     let elapsed = start.elapsed();
+    // Go clamps block offsets, so an offset past the end gives no output; streams fail there.
+    let (off, n) = seek_range(opts, dec.len() as u64);
+    let mut out = &dec[off.min(dec.len() as u64) as usize..];
+    if opts.tail_next_nl {
+        out = out
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(&[], |i| &out[i + 1..]);
+    }
+    let out = &out[..out.len().min(n as usize)];
     if !opts.verify {
         let mut dst = open_output(&dst_path)?;
-        dst.write_all(&dec)?;
+        dst.write_all(out)?;
         dst.flush()?;
     }
-    print_decompress_summary(opts, buf.len() as u64, dec.len() as u64, elapsed);
+    print_decompress_summary(opts, buf.len() as u64, out.len() as u64, elapsed);
     if opts.verify && !opts.quiet {
         eprintln!("... Verified ok.");
     }
-    if opts.remove && input != Path::new("-") && !opts.verify {
+    // A range leaves no full copy of the data, so keep the input, as the stream seek path does.
+    let partial = opts.offset.is_some() || opts.tail.is_some();
+    if opts.remove && input != Path::new("-") && !opts.verify && !partial {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -265,29 +295,27 @@ fn extension_matches(p: &Path, ext: &str) -> bool {
     p.extension().and_then(|s| s.to_str()) == Some(ext)
 }
 
-fn dest_path(input: &Path, opts: &Options) -> PathBuf {
+fn dest_path(input: &Path, opts: &Options) -> io::Result<PathBuf> {
     if opts.verify {
-        return PathBuf::from("(verify)");
+        return Ok(PathBuf::from("(verify)"));
     }
-    if opts.stdout {
-        return PathBuf::from("-");
+    if opts.stdout || (opts.output.is_none() && input == Path::new("-")) {
+        return Ok(PathBuf::from("-"));
     }
-    if let Some(out) = opts.output.as_ref() {
-        return out.clone();
-    }
-    if input == Path::new("-") {
-        return PathBuf::from("-");
-    }
-    // Strip a recognized compression extension to get the destination name.
-    let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
-    if matches!(ext, "mz" | "mzb") {
-        input.with_extension("")
-    } else {
-        // Unrecognised extension — write to `<input>.out` to avoid clobbering.
-        let mut p = input.as_os_str().to_owned();
-        p.push(".out");
-        PathBuf::from(p)
-    }
+    let out = opts.output.clone().unwrap_or_else(|| {
+        // Strip a recognized compression extension to get the destination name.
+        let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if matches!(ext, "mz" | "mzb") {
+            input.with_extension("")
+        } else {
+            // Unrecognised extension — write to `<input>.out` to avoid clobbering.
+            let mut p = input.as_os_str().to_owned();
+            p.push(".out");
+            PathBuf::from(p)
+        }
+    });
+    check_not_input(input, &out)?;
+    Ok(out)
 }
 
 /// Consume bytes from `r` until just past the next `\n`, so that

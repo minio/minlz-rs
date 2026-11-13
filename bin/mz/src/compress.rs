@@ -16,15 +16,16 @@
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use minlz::Level;
-use minlz::stream::{MAX_BLOCK_SIZE, MtWriterBuilder, WriterBuilder};
+use minlz::stream::{MAX_BLOCK_SIZE, MtWriterBuilder, Reader, WriterBuilder};
 
 use crate::args::Options;
 use crate::io_util::{
-    CountingReader, CountingWriter, mb_per_sec, open_input, open_output, open_output_send,
-    resolve_threads,
+    CountingReader, CountingWriter, check_not_input, mb_per_sec, open_input, open_output,
+    open_output_send, resolve_threads, sync_output,
 };
 
 const EXT_STREAM: &str = "mz";
@@ -61,18 +62,17 @@ fn compress_stream(input: &Path, opts: &Options) -> io::Result<()> {
 
 fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     let (mut src, _src_size) = open_input(input)?;
-    let dst_path = dest_path(input, opts, EXT_STREAM);
-    let dst = open_output(&dst_path)?;
+    let dst_path = dest_path(input, opts, EXT_STREAM)?;
+    let (dst, verifier) = verify_to(open_output(&dst_path)?, opts.verify)?;
 
     let mut counted_src = CountingReader::new(&mut src);
     let mut counted_dst = CountingWriter::new(dst);
 
     let mut builder = WriterBuilder::new();
-    if opts.uncompressed {
-        builder = builder.uncompressed();
-    } else if let Some(lvl) = opts.level {
-        builder = builder.level(lvl);
-    }
+    builder = match opts.level {
+        Some(lvl) => builder.level(lvl),
+        None => builder.uncompressed(),
+    };
     builder = builder.block_size(opts.block_size.unwrap_or(CLI_DEFAULT_BLOCK_SIZE));
     if let Some(pad) = opts.padding {
         builder = builder.padding(pad);
@@ -93,8 +93,11 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
     counted_dst.flush()?;
     let elapsed = start.elapsed();
     print_compress_summary(opts, counted_src.bytes, counted_dst.bytes, elapsed);
+    drop(counted_dst);
+    check_verify(verifier, opts)?;
     if opts.remove && input != Path::new("-") {
         drop(src);
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -105,15 +108,14 @@ fn compress_stream_st(input: &Path, opts: &Options) -> io::Result<()> {
 
 fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Result<()> {
     let (mut src, _src_size) = open_input(input)?;
-    let dst_path = dest_path(input, opts, EXT_STREAM);
-    let dst = open_output_send(&dst_path)?;
+    let dst_path = dest_path(input, opts, EXT_STREAM)?;
+    let (dst, verifier) = verify_to(open_output_send(&dst_path)?, opts.verify)?;
 
     let mut builder = MtWriterBuilder::new();
-    if opts.uncompressed {
-        builder = builder.uncompressed();
-    } else if let Some(lvl) = opts.level {
-        builder = builder.level(lvl);
-    }
+    builder = match opts.level {
+        Some(lvl) => builder.level(lvl),
+        None => builder.uncompressed(),
+    };
     builder = builder
         .block_size(opts.block_size.unwrap_or(CLI_DEFAULT_BLOCK_SIZE))
         .concurrency(threads);
@@ -130,24 +132,18 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }
     let start = Instant::now();
-    let mut w = builder.build(dst)?;
-    // We can't wrap the underlying writer in a counter (it's owned by
-    // the MT writer thread); track input bytes via the reader-side.
+    let mut w = builder.build(CountingWriter::new(dst))?;
     let mut counted_src = CountingReader::new(&mut src);
     io::copy(&mut counted_src, &mut w)?;
     let mut out = w.finish()?;
     out.flush()?;
     let elapsed = start.elapsed();
-    // For output size, ask the filesystem (we wrote to a real file).
-    let out_size = if dst_path == Path::new("-") {
-        // stdout: best-effort approximation (unknown).
-        0
-    } else {
-        std::fs::metadata(&dst_path).map(|m| m.len()).unwrap_or(0)
-    };
-    print_compress_summary(opts, counted_src.bytes, out_size, elapsed);
+    print_compress_summary(opts, counted_src.bytes, out.bytes, elapsed);
+    drop(out);
+    check_verify(verifier, opts)?;
     if opts.remove && input != Path::new("-") {
         drop(src);
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -157,32 +153,35 @@ fn compress_stream_mt(input: &Path, opts: &Options, threads: usize) -> io::Resul
 }
 
 fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
-    let (mut src, src_size) = open_input(input)?;
-    if let Some(sz) = src_size {
-        if sz > MAX_BLOCK_SIZE as u64 {
-            return Err(io::Error::other("maximum block size of 8 MiB exceeded"));
-        }
+    let (src, src_size) = open_input(input)?;
+    if let Some(sz) = src_size
+        && sz > MAX_BLOCK_SIZE as u64
+    {
+        return Err(io::Error::other("maximum block size of 8 MiB exceeded"));
     }
     let mut buf = Vec::with_capacity(src_size.unwrap_or(0) as usize);
-    src.read_to_end(&mut buf)?;
+    // Stdin has no size to check up front; one byte past the limit is enough to reject it.
+    src.take(MAX_BLOCK_SIZE as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > MAX_BLOCK_SIZE {
         return Err(io::Error::other("maximum block size of 8 MiB exceeded"));
     }
-    let dst_path = dest_path(input, opts, EXT_BLOCK);
+    let dst_path = dest_path(input, opts, EXT_BLOCK)?;
     let mut dst = open_output(&dst_path)?;
-    let level = if opts.uncompressed {
-        Level::Fastest // block::encode has no uncompressed mode; the encoder
-    // will fall back to the inline literal block if the
-    // data doesn't compress, which is the closest analog.
-    } else {
-        opts.level.unwrap_or(Level::Balanced)
-    };
     if !opts.quiet {
         eprint!("Compressing {} -> {}", input.display(), dst_path.display());
     }
     let start = Instant::now();
-    let mut enc = Vec::with_capacity(minlz::max_encoded_len(buf.len()).unwrap_or(buf.len() + 16));
-    minlz::encode(&mut enc, &buf, level).map_err(io::Error::other)?;
+    // `encode` sizes `enc` with room past `max_encoded_len`, so pre-sizing to it reallocates.
+    let mut enc = Vec::new();
+    match opts.level {
+        Some(level) => minlz::encode(&mut enc, &buf, level).map_err(io::Error::other)?,
+        // Go's encodeUncompressed; `Level` has no uncompressed variant.
+        None if buf.is_empty() => enc.push(0),
+        None => {
+            enc.extend_from_slice(&[0, 0]);
+            enc.extend_from_slice(&buf);
+        }
+    }
     dst.write_all(&enc)?;
     dst.flush()?;
     let elapsed = start.elapsed();
@@ -198,6 +197,7 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
         }
     }
     if opts.remove && input != Path::new("-") {
+        sync_output(&dst_path)?;
         std::fs::remove_file(input)?;
         if !opts.quiet {
             eprintln!("Removing {}", input.display());
@@ -206,22 +206,83 @@ fn compress_block(input: &Path, opts: &Options) -> io::Result<()> {
     Ok(())
 }
 
+type Verifier = Option<JoinHandle<io::Result<u64>>>;
+
+/// Go's `verifyTo`: decodes the output on another thread while it is written. Every chunk
+/// carries a checksum of its input, so a clean decode verifies it.
+fn verify_to<W: Write>(out: W, verify: bool) -> io::Result<(Tee<W>, Verifier)> {
+    if !verify {
+        return Ok((Tee { out, pipe: None }, None));
+    }
+    let (mut r, w) = io::pipe()?;
+    let failed = Arc::new(OnceLock::new());
+    let f = failed.clone();
+    let h = thread::spawn(move || {
+        let res = io::copy(&mut Reader::new(&mut r), &mut io::sink());
+        if let Err(e) = &res {
+            let _ = f.set(e.to_string());
+        }
+        // Keep draining so the writer fails with the decode error from `failed`, not with a
+        // broken pipe.
+        io::copy(&mut r, &mut io::sink())?;
+        res
+    });
+    let pipe = Some((w, failed));
+    Ok((Tee { out, pipe }, Some(h)))
+}
+
+/// Waits for the decoder of [`verify_to`]. The output must be dropped first, to close the
+/// pipe.
+fn check_verify(verifier: Verifier, opts: &Options) -> io::Result<()> {
+    let Some(h) = verifier else { return Ok(()) };
+    h.join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+        .map_err(|e| io::Error::other(format!("verify: {e}")))?;
+    if !opts.quiet {
+        eprintln!("... Verified ok.");
+    }
+    Ok(())
+}
+
+/// Copies what is written to `out` into the verify pipe, if any. Once the decoder has
+/// failed, writes fail with its error, so compression stops early as with Go's
+/// `pr.CloseWithError`.
+struct Tee<W> {
+    out: W,
+    pipe: Option<(io::PipeWriter, Arc<OnceLock<String>>)>,
+}
+
+impl<W: Write> Write for Tee<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(e) = self.pipe.as_ref().and_then(|(_, f)| f.get()) {
+            return Err(io::Error::other(format!("verify: {e}")));
+        }
+        let n = self.out.write(buf)?;
+        if let Some((p, _)) = &mut self.pipe {
+            p.write_all(&buf[..n])?;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
 /// Decide the destination path given `input`, `--output`, `--stdout` and the
 /// target extension.
-pub fn dest_path(input: &Path, opts: &Options, ext: &str) -> PathBuf {
-    if opts.stdout {
-        return PathBuf::from("-");
+pub fn dest_path(input: &Path, opts: &Options, ext: &str) -> io::Result<PathBuf> {
+    if opts.stdout || (opts.output.is_none() && input == Path::new("-")) {
+        return Ok(PathBuf::from("-"));
     }
-    if let Some(out) = opts.output.as_ref() {
-        return out.clone();
-    }
-    if input == Path::new("-") {
-        return PathBuf::from("-");
-    }
-    let mut p = input.as_os_str().to_owned();
-    p.push(".");
-    p.push(ext);
-    PathBuf::from(p)
+    let out = opts.output.clone().unwrap_or_else(|| {
+        let mut p = input.as_os_str().to_owned();
+        p.push(".");
+        p.push(ext);
+        PathBuf::from(p)
+    });
+    check_not_input(input, &out)?;
+    Ok(out)
 }
 
 fn print_compress_summary(opts: &Options, input: u64, output: u64, elapsed: std::time::Duration) {
@@ -236,4 +297,22 @@ fn print_compress_summary(opts: &Options, input: u64, output: u64, elapsed: std:
     let ratio = input as f64 / output as f64;
     let mbps = mb_per_sec(input, elapsed);
     eprintln!(" {input} -> {output} [{pct:.02}% {ratio:.03}:1]; {mbps:.01}MB/s");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_error_stops_writes() {
+        let (mut tee, verifier) = verify_to(io::sink(), true).unwrap();
+        // Not a MinLZ stream, so the decoder fails on the first chunk.
+        let junk = [0u8; 64 << 10];
+        let err = (0..1024)
+            .find_map(|_| tee.write_all(&junk).err())
+            .expect("writes kept succeeding after the decoder failed");
+        assert!(err.to_string().starts_with("verify: "), "{err}");
+        drop(tee);
+        assert!(verifier.unwrap().join().unwrap().is_err());
+    }
 }
