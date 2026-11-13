@@ -1392,11 +1392,8 @@ fn simd_validation_65535_operations() {
     let coded = vec![CODE_LENS, CODE_LENS, CODE_LENS, STORED];
     let check = |name: &str, e: &TestEnc, want: &[u8], coded: bool| {
         assert_eq!(e.chunks[0].ops.len(), MAX_CHUNK, "{name}: first chunk");
-        for k in 0..ESC {
-            assert!(
-                !coded || e.chunks[0].s[k].mode != STORED,
-                "{name}: stream {k} is stored"
-            );
+        for (k, s) in e.chunks[0].s[..ESC].iter().enumerate() {
+            assert!(!coded || s.mode != STORED, "{name}: stream {k} is stored");
         }
         let block = e.bytes();
         simd_tiers(|_, _| test_decode(&block, want));
