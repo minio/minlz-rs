@@ -15,7 +15,8 @@ name = "minlz"
 path = "src/lib.rs"
 
 [features]
-# The clean-room reference decoder `minlz::reference`, an oracle for tests and fuzzing.
+# The clean-room reference decoder `minlz::reference`, an oracle for tests and fuzzing. Not covered
+# by semver.
 reference = []
 # Internals for the workspace's own tests, benches, fuzzers and `mz`: CPU tier switches and the
 # entropy coder and hash. Not covered by semver.

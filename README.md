@@ -823,8 +823,8 @@ cargo bench -p minio-minlz --bench xxh3    # criterion: XXH3
 ```
 
 The `reference` feature builds a clean-room reference decoder that the
-tests and fuzzers use as an oracle.  The SIMD encoders are checked
-against blocks written by the Go encoder, in
+tests and fuzzers use as an oracle; semver does not cover it.  The SIMD
+encoders are checked against blocks written by the Go encoder, in
 [`crates/minlz/tests/fixtures/simd.zip`](crates/minlz/tests/fixtures/simd.zip).
 Further cross checks against the Go package run when these are set,
 and are skipped otherwise:
