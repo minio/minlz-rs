@@ -37,7 +37,6 @@ use std::time::Duration;
 use crate::block;
 use crate::index::Index;
 
-use super::Concurrency;
 use super::error::Error;
 use super::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_PADDING, DEFAULT_BLOCK_SIZE,
@@ -239,8 +238,7 @@ pub struct MtWriterBuilder {
     level: block::Level,
     uncompressed: bool,
     padding: u32,
-    /// Requested worker count (raw); validated into a [`Concurrency`] at
-    /// [`build`](MtWriterBuilder::build). `0` is rejected there.
+    /// Requested worker count; `0` is the host's available parallelism.
     concurrency: usize,
     generate_index: bool,
     append_index: bool,
@@ -253,7 +251,7 @@ impl Default for MtWriterBuilder {
             level: block::Level::Balanced,
             uncompressed: false,
             padding: 0,
-            concurrency: Concurrency::available().get(),
+            concurrency: 0,
             generate_index: true,
             append_index: false,
         }
@@ -296,9 +294,9 @@ impl MtWriterBuilder {
         self
     }
 
-    /// Number of worker threads to spin up.  `0` is rejected by
-    /// [`build`](Self::build); `1` still uses the MT pipeline (one worker) —
-    /// for the lowest-overhead path use [`super::Writer`].
+    /// Number of worker threads to spin up; `0` (the default) uses the host's available
+    /// parallelism. `1` still uses the MT pipeline (one worker); for the lowest-overhead path use
+    /// [`super::Writer`].
     pub fn concurrency(mut self, n: usize) -> Self {
         self.concurrency = n;
         self
@@ -328,8 +326,7 @@ impl MtWriterBuilder {
     ///
     /// # Errors
     /// [`Error::Config`] if `block_size` is outside `[MIN_BLOCK_SIZE,
-    /// MAX_BLOCK_SIZE]`, `padding` exceeds `MAX_BLOCK_SIZE`, or `concurrency`
-    /// was set to `0`.
+    /// MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
     pub fn build<W: Write + Send + 'static>(self, w: W) -> Result<MtWriter<W>, Error> {
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&self.block_size) {
             return Err(Error::Config(
@@ -339,9 +336,7 @@ impl MtWriterBuilder {
         if self.padding as usize > MAX_BLOCK_SIZE {
             return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE"));
         }
-        let concurrency = Concurrency::new(self.concurrency)
-            .ok_or(Error::Config("concurrency must be ≥ 1"))?
-            .get();
+        let concurrency = super::worker_count(self.concurrency);
         Ok(MtWriter::with_builder(w, self, concurrency))
     }
 }
@@ -383,7 +378,7 @@ pub struct MtWriter<W: Write + Send + 'static> {
 }
 
 impl<W: Write + Send + 'static> MtWriter<W> {
-    /// Wrap `w` with default options + `available_parallelism()` workers.
+    /// Wrap `w` with default options and the host's available parallelism.
     pub fn new(w: W) -> Self {
         MtWriterBuilder::new()
             .build(w)

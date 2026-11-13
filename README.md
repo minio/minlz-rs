@@ -125,9 +125,9 @@ fn parallel_roundtrip(payload: &[u8]) -> std::io::Result<()> {
     w.write_all(payload)?;
     let compressed = w.finish()?;
 
-    let threads = std::thread::available_parallelism()?.get();
+    // 0 threads: one per available core.
     let mut reader = Reader::new(&compressed[..]);
-    let decoded = reader.decode_concurrent(Vec::<u8>::new(), threads)?;
+    let decoded = reader.decode_concurrent(Vec::<u8>::new(), 0)?;
     println!("decoded {} bytes", decoded.bytes_written);
     Ok(())
 }

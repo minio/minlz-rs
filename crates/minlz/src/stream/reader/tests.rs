@@ -1024,7 +1024,7 @@ fn decode_concurrent_uncompressed_crc() {
     let mut stream = write_stream(&data, WriterBuilder::new().block_size(16 << 10));
     let off = find_chunk(&stream, 3, |t| t == CHUNK_TYPE_UNCOMPRESSED_DATA);
     stream[off + CHUNK_HEADER_SIZE + CHECKSUM_SIZE + 10] ^= 1;
-    for c in [1, 2, 8] {
+    for c in [0, 1, 2, 8] {
         let e = Reader::new(Cursor::new(&stream))
             .decode_concurrent(io::sink(), c)
             .unwrap_err();

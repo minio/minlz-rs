@@ -110,10 +110,15 @@ fn uncompressed_mode_round_trip() {
 }
 
 #[test]
-fn concurrency_one_still_works() {
+fn concurrency_auto_and_one_work() {
     let payload = vec![b'q'; 8 << 10];
-    let got = round_trip_concurrency(&payload, 1);
-    assert_eq!(got, payload);
+    for n in [0, 1] {
+        assert_eq!(
+            round_trip_concurrency(&payload, n),
+            payload,
+            "concurrency {n}"
+        );
+    }
 }
 
 #[test]

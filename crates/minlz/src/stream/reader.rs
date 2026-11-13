@@ -424,9 +424,8 @@ impl<R: Read> Reader<R> {
     /// single-threaded path returns [`io::ErrorKind::InvalidInput`].
     /// An error from decoding or writing is sticky: later reads return it too.
     ///
-    /// `threads >= 1` is required; `1` still spins up the MT pipeline (one
-    /// worker) — use [`Read::read`] for the lowest-overhead single-threaded
-    /// path.
+    /// `threads == 0` uses the host's available parallelism. `1` still spins up the MT pipeline
+    /// (one worker); use [`Read::read`] for the lowest-overhead single-threaded path.
     ///
     /// The buffers of each thread are sized for the largest block the reader
     /// accepts, [`ReaderBuilder::max_block_size`] until it has read a stream
@@ -445,9 +444,7 @@ impl<R: Read> Reader<R> {
     where
         W: io::Write + Send + 'static,
     {
-        let threads = super::Concurrency::new(threads)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "concurrency must be ≥ 1"))?
-            .get();
+        let threads = super::worker_count(threads);
         if self.decoded_pos < self.decoded.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

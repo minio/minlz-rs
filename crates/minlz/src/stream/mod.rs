@@ -47,30 +47,12 @@ mod writer;
 
 use std::num::NonZeroUsize;
 
-/// Worker-thread count for the parallel codec paths
-/// ([`MtWriterBuilder::concurrency`], [`Reader::decode_concurrent`]).
-///
-/// The "at least one worker" invariant is encoded in the type, so a count can
-/// never be zero. Construct with [`Concurrency::new`], or
-/// [`available`](Concurrency::available) for the host CPU count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Concurrency(NonZeroUsize);
-
-impl Concurrency {
-    /// A count of `n` workers, or `None` if `n == 0`.
-    pub fn new(n: usize) -> Option<Self> {
-        NonZeroUsize::new(n).map(Self)
+/// `n` workers, or the host's available parallelism for `0`.
+pub(crate) fn worker_count(n: usize) -> usize {
+    if n > 0 {
+        return n;
     }
-
-    /// The host's available parallelism, or one worker if it can't be queried.
-    pub fn available() -> Self {
-        Self(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
-    }
-
-    /// The worker count as a `usize` (always ≥ 1).
-    pub fn get(self) -> usize {
-        self.0.get()
-    }
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
 }
 
 pub use error::{Error, Result};
