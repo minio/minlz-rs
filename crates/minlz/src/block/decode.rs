@@ -174,12 +174,7 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                         }
                         // Fast-path: write 4 bytes; unused trailing bytes
                         // will be overwritten by the next op.
-                        unsafe {
-                            ptr::write_unaligned(
-                                dst_ptr.add(d) as *mut u32,
-                                read_u32_le(src_ptr.add(s)),
-                            );
-                        }
+                        unsafe { ptr::copy_nonoverlapping(src_ptr.add(s), dst_ptr.add(d), 4) };
                         s += lit_len;
                         d += lit_len;
                     }

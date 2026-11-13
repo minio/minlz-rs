@@ -49,11 +49,18 @@ pub const CHUNK_TYPE_STREAM_IDENTIFIER: u8 = 0xff;
 pub(crate) const CHUNK_TYPE_UNCOMPRESSED_DATA: u8 = 0x01;
 pub(crate) const CHUNK_TYPE_MINLZ_COMPRESSED_DATA: u8 = 0x02;
 pub(crate) const CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC: u8 = 0x03;
+pub(crate) const CHUNK_TYPE_MINLZ_SIMD: u8 = 0x10;
 pub(crate) const CHUNK_TYPE_EOF: u8 = 0x20;
 pub(crate) const MAX_NON_SKIPPABLE_CHUNK: u8 = 0x3f;
 
 pub(crate) const CHECKSUM_SIZE: usize = 4;
 pub(crate) const CHUNK_HEADER_SIZE: usize = 4;
+
+/// The size of the XXH3 hash that starts a SIMD chunk.
+pub(crate) const SIMD_HASH_SIZE: usize = 8;
+
+/// The stream identifier flag of streams with SIMD chunks.
+pub(crate) const STREAM_FLAG_SIMD: u8 = 1 << 6;
 
 pub(crate) const MAGIC_BODY: &[u8] = b"MinLz";
 /// Magic body + 1-byte block-size indicator.
@@ -87,8 +94,9 @@ pub(crate) fn block_size_from_indicator(indicator: u8) -> Option<usize> {
     Some(1usize << n)
 }
 
-/// Build the 10-byte stream-identifier chunk for `block_size`.
-pub(crate) fn make_stream_header(block_size: usize) -> [u8; STREAM_HEADER_LEN] {
+/// Build the 10-byte stream-identifier chunk for `block_size`. `simd` sets the flag of streams
+/// with SIMD chunks.
+pub(crate) fn make_stream_header(block_size: usize, simd: bool) -> [u8; STREAM_HEADER_LEN] {
     // 4-byte chunk header: type=0xff, len=6 (little-endian 3 bytes).
     // 6-byte body: "MinLz" + block-size indicator.
     [
@@ -101,7 +109,7 @@ pub(crate) fn make_stream_header(block_size: usize) -> [u8; STREAM_HEADER_LEN] {
         MAGIC_BODY[2],
         MAGIC_BODY[3],
         MAGIC_BODY[4],
-        block_size_indicator(block_size),
+        block_size_indicator(block_size) | if simd { STREAM_FLAG_SIMD } else { 0 },
     ]
 }
 
@@ -174,11 +182,12 @@ mod tests {
     #[test]
     fn stream_header_matches_go() {
         // makeHeader(2<<20) in Go writes: ff 06 00 00 'M' 'i' 'n' 'L' 'z' 0x0b
-        let h = make_stream_header(DEFAULT_BLOCK_SIZE);
+        let h = make_stream_header(DEFAULT_BLOCK_SIZE, false);
         assert_eq!(
             &h,
             &[0xff, 0x06, 0x00, 0x00, b'M', b'i', b'n', b'L', b'z', 0x0b]
         );
+        assert_eq!(make_stream_header(DEFAULT_BLOCK_SIZE, true)[9], 0x4b);
     }
 
     #[test]

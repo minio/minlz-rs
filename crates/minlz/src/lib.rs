@@ -14,18 +14,26 @@
 
 //! MinLZ — Rust port of the Go reference (`github.com/minio/minlz`).
 //!
-//! Implements the MinLZ v1.0 specification.  See `SPEC.md` §1–§4 in the
-//! upstream Go repository for the wire format.
+//! Implements the MinLZ v1.1 specification: the v1.0 block and stream
+//! formats plus SIMD blocks.  See [`SPEC.md`] §1–§4 and [`SPEC_SIMD.md`]
+//! in the upstream Go repository for the wire format.
 //!
 //! # What's here
 //!
-//! * Block codec — encode at three compression levels
-//!   ([`Level::Fastest`], [`Level::Balanced`], [`Level::Smallest`]) and a
-//!   safe decoder.  See [`mod@block`].
+//! * Block codec — encode at four classic levels ([`Level::SuperFast`],
+//!   [`Level::Fastest`], [`Level::Balanced`], [`Level::Smallest`]) or as
+//!   SIMD blocks at the `*Simd` levels, and a safe decoder for both.  See
+//!   [`mod@block`], and [SIMD blocks](block#simd-blocks) for when the SIMD
+//!   levels pay off and who can read them.
+//! * SIMD decoding with AVX-512 or AVX2 on x86-64 and NEON on aarch64,
+//!   picked at runtime by CPU feature detection, with portable code
+//!   everywhere else.  The SIMD encoders write the same bytes as Go's.
 //! * Streaming codec — [`stream::Reader`] / [`stream::Writer`] over any
 //!   [`Read`](std::io::Read) / [`Write`](std::io::Write), with a
 //!   multi-threaded variant ([`stream::MtWriter`],
-//!   [`stream::Reader::decode_concurrent`]).
+//!   [`stream::Reader::decode_concurrent`]).  Each block is checked with
+//!   CRC32C, or with XXH3-64 for SIMD blocks (see
+//!   [SIMD chunks](stream#simd-chunks)).
 //! * Stream index — [`Index`] for random access; built incrementally by
 //!   the writer (`append_index()`) or recovered from the tail of an
 //!   existing stream.  [`stream::ReadSeeker`] is the seekable reader.
@@ -34,9 +42,12 @@
 //!
 //! # What's *not* here
 //!
-//! Dictionaries, `LevelSuperFast`, LZ4 conversion, and the Snappy/S2
-//! fallback decoder paths are explicitly out of scope.  Block search
-//! tables (`SPEC.md` §4.13) are not implemented in this crate.
+//! Dictionaries, LZ4 conversion, and the Snappy/S2 fallback decoder paths
+//! are explicitly out of scope.  Block search tables (`SPEC.md` §4.13) are
+//! not implemented in this crate.
+//!
+//! [`SPEC.md`]: https://github.com/minio/minlz/blob/main/SPEC.md
+//! [`SPEC_SIMD.md`]: https://github.com/minio/minlz/blob/main/SPEC_SIMD.md
 //!
 //! # Endianness
 //!
@@ -49,9 +60,33 @@
 #![deny(missing_docs)]
 
 pub mod block;
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub mod cpu;
+#[cfg(not(feature = "unstable-internals"))]
+mod cpu;
 mod error;
+#[cfg(test)]
+mod fuzz_seeds;
+#[cfg(test)]
+mod guard;
 pub mod index;
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub mod pivco;
+#[cfg(not(feature = "unstable-internals"))]
+mod pivco;
+#[cfg(any(test, feature = "reference"))]
+#[doc(hidden)]
+pub mod reference;
 pub mod stream;
+#[cfg(test)]
+mod unzip;
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub mod xxh3;
+#[cfg(not(feature = "unstable-internals"))]
+mod xxh3;
 
 pub use block::{
     Level, MAX_BLOCK_SIZE, append_decoded, append_encoded, decode, decoded_len, encode, is_minlz,
@@ -64,3 +99,10 @@ pub use index::{
 
 /// A specialized [`Result`] type for MinLZ operations.
 pub type Result<T> = core::result::Result<T, Error>;
+
+// Compiles the README's Rust examples as doctests, so they cannot rot. The path only
+// resolves in a repo checkout, not in the published crate, so the include is opt-in via
+// RUSTDOCFLAGS="--cfg minlz_readme", which CI's doctest step sets.
+#[cfg(all(doctest, minlz_readme))]
+#[doc = include_str!("../../../README.md")]
+pub struct ReadmeDoctests;

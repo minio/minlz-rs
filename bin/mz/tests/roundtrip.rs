@@ -16,8 +16,12 @@
 //! compress + decompress each level, assert byte-equality.
 
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file as symlink;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -119,6 +123,51 @@ fn block_round_trip() {
     assert_eq!(got, payload);
 }
 
+/// `--offset` and `--tail` select the same bytes from a block as from a stream. `--rm` keeps
+/// the input, as the output is only part of it.
+#[test]
+fn block_offset_tail() {
+    let dir = tmp_dir();
+    let src = dir.join("in.txt");
+    let payload = sample_payload(31, 64 * 1024);
+    fs::write(&src, &payload).unwrap();
+    run_ok(Command::new(mz_bin()).args(["c", "-q"]).arg(&src));
+    run_ok(
+        Command::new(mz_bin())
+            .args(["c", "-q", "--block"])
+            .arg(&src),
+    );
+    let n = payload.len();
+    let nl = |i: usize| i + payload[i..].iter().position(|&b| b == b'\n').unwrap() + 1;
+    for (args, want) in [
+        (&["d", "-c", "--offset=1000"][..], &payload[1000..]),
+        (&["d", "-c", "--offset=1000+nl"], &payload[nl(1000)..]),
+        (&["d", "-c", "--tail=1000"], &payload[n - 1000..]),
+        (
+            &["d", "-c", "--offset=1000", "--tail=500"],
+            &payload[1000..1500],
+        ),
+        (&["tail"], &payload[nl(n - 1024)..]),
+    ] {
+        for ext in ["mz", "mzb"] {
+            let input = dir.join(format!("in.txt.{ext}"));
+            let out = Command::new(mz_bin())
+                .args(args)
+                .arg("--rm")
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?} {ext}");
+            assert!(
+                out.stdout == want,
+                "{args:?} {ext}: {} bytes",
+                out.stdout.len()
+            );
+            assert!(input.exists(), "{args:?} {ext}: --rm removed the input");
+        }
+    }
+}
+
 #[test]
 fn verify_subcommand_succeeds_on_valid_mz() {
     let dir = tmp_dir();
@@ -211,4 +260,679 @@ fn auto_detect_decompress_from_extension() {
             .arg(&mz_file),
     );
     assert_eq!(fs::read(out).unwrap(), payload);
+}
+
+/// Runs `mz` with `input` on stdin and returns stdout.
+fn mz_pipe(bin: &std::path::Path, args: &[&str], input: &[u8]) -> Vec<u8> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let data = input.to_vec();
+    let feed = std::thread::spawn(move || stdin.write_all(&data));
+    let out = child.wait_with_output().unwrap();
+    feed.join().unwrap().unwrap();
+    assert!(
+        out.status.success(),
+        "{} {args:?}: {}",
+        bin.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// The stream identifier's flag byte has bit 6 set when the stream may hold SIMD chunks.
+fn simd_flag(stream: &[u8]) -> bool {
+    stream[9] & 1 << 6 != 0
+}
+
+/// Counts the 0x10 (SIMD) chunks of a stream.
+fn simd_chunks(stream: &[u8]) -> usize {
+    let (mut i, mut n) = (0, 0);
+    while i + 4 <= stream.len() {
+        n += usize::from(stream[i] == 0x10);
+        i += 4
+            + (usize::from(stream[i + 1])
+                | usize::from(stream[i + 2]) << 8
+                | usize::from(stream[i + 3]) << 16);
+    }
+    n
+}
+
+/// Reports whether `block` is a SIMD block: block type 1 in bits 24+ of the uvarint after the
+/// zero byte.
+fn simd_block(block: &[u8]) -> bool {
+    let mut v = 0u64;
+    for (i, &b) in block.iter().enumerate().skip(1).take(9) {
+        v |= u64::from(b & 0x7f) << (7 * (i - 1));
+        if b < 0x80 {
+            return block[0] == 0 && v >> 24 == 1;
+        }
+    }
+    false
+}
+
+/// Go mz's compress level flags and the level they write.
+const LEVEL_FLAGS: &[(&[&str], minlz::Level)] = {
+    use minlz::Level::*;
+    &[
+        (&[], BalancedSimd),
+        (&["-xfast"], SuperFastSimd),
+        (&["-1"], FastestSimd),
+        (&["-2"], BalancedSimd),
+        (&["-3"], SmallestSimd),
+        (&["-xfast", "--simd.delta"], SuperFastSimdDelta),
+        (&["-1", "--simd.delta"], FastestSimdDelta),
+        (&["--simd.delta"], BalancedSimdDelta),
+        (&["-xfast", "--classic"], SuperFast),
+        (&["-1", "--classic"], Fastest),
+        (&["--classic"], Balanced),
+        (&["-3", "--classic"], Smallest),
+    ]
+};
+
+/// Compress writes SIMD blocks unless `--classic`, at the levels Go's mz maps its flags to:
+/// streams (one thread) and blocks equal the library's output at that level and round-trip.
+#[test]
+fn simd_level_flags() {
+    use std::io::Write as _;
+    let payload = sample_payload(17, 300 << 10);
+    for &(flags, level) in LEVEL_FLAGS {
+        let classic = flags.contains(&"--classic");
+        let args = [
+            &["c", "-c", "-q", "--cpu", "1", "--block-size", "64K"],
+            flags,
+            &["-"],
+        ]
+        .concat();
+        let stream = mz_pipe(&mz_bin(), &args, &payload);
+        let mut want = Vec::new();
+        let mut w = minlz::stream::WriterBuilder::new()
+            .level(level)
+            .block_size(64 << 10)
+            .append_index()
+            .build(&mut want)
+            .unwrap();
+        w.write_all(&payload).unwrap();
+        w.finish().unwrap();
+        assert!(stream == want, "{flags:?}: stream differs from {level:?}");
+        assert_eq!(simd_flag(&stream), !classic, "{flags:?}");
+        if classic {
+            assert_eq!(simd_chunks(&stream), 0, "{flags:?}");
+        }
+        for cpu in ["1", "4"] {
+            let got = mz_pipe(&mz_bin(), &["d", "-c", "-q", "--cpu", cpu, "-"], &stream);
+            assert!(got == payload, "{flags:?}: stream round trip, cpu {cpu}");
+        }
+
+        let args = [&["c", "--block", "-c", "-q"], flags, &["-"]].concat();
+        let block = mz_pipe(&mz_bin(), &args, &payload);
+        let mut want = Vec::new();
+        minlz::encode(&mut want, &payload, level).unwrap();
+        assert!(block == want, "{flags:?}: block differs from {level:?}");
+        assert!(!classic || !simd_block(&block), "{flags:?}");
+        let got = mz_pipe(&mz_bin(), &["d", "--block", "-c", "-q", "-"], &block);
+        assert!(got == payload, "{flags:?}: block round trip");
+    }
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-1", "-"], &payload);
+    assert!(simd_chunks(&stream) > 0);
+    let block = mz_pipe(
+        &mz_bin(),
+        &["c", "--block", "-c", "-q", "-1", "-"],
+        &payload,
+    );
+    assert!(simd_block(&block));
+}
+
+#[test]
+fn simd_flag_conflicts_fail() {
+    for flags in [
+        &["--simd.delta", "--classic"][..],
+        &["--simd.delta", "-0"],
+        &["--simd.delta", "-3"],
+    ] {
+        let out = Command::new(mz_bin())
+            .args([&["c", "-c", "-q"], flags, &["-"]].concat())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{flags:?} should fail");
+    }
+}
+
+/// The hidden CPU toggles only pick lower tiers, so output and decoding stay the same.
+#[test]
+fn cpu_toggles() {
+    let payload = sample_payload(23, 200 << 10);
+    let want = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-1", "-"], &payload);
+    for off in [&["-avx512=false"][..], &["-avx2=false", "--neon=false"]] {
+        let got = mz_pipe(
+            &mz_bin(),
+            &[off, &["c", "-c", "-q", "-1", "-"]].concat(),
+            &payload,
+        );
+        assert!(got == want, "{off:?}: output differs");
+        let dec = mz_pipe(&mz_bin(), &[off, &["d", "-c", "-q", "-"]].concat(), &got);
+        assert!(dec == payload, "{off:?}: round trip");
+    }
+}
+
+/// Cross-impl: Rust mz and a Go `cmd/mz` of the simd-blocks branch (`MINLZ_GO_CMD`) decode
+/// each other's streams (one thread, 64 KiB blocks) and blocks, by default (SIMD) and with
+/// `--classic`. Once Rust writes SIMD chunks at a level, its output equals Go's. Classic
+/// output is not compared: it matches Go only when Go is built with `-tags=noasm`.
+#[test]
+fn go_mz_cross() {
+    let Some(go) = std::env::var_os("MINLZ_GO_CMD").map(PathBuf::from) else {
+        return;
+    };
+    let dir = tmp_dir();
+    let src = dir.join("input.bin");
+    let payload = sample_payload(29, 300 << 10);
+    fs::write(&src, &payload).unwrap();
+    for &(flags, _) in LEVEL_FLAGS {
+        for block in [false, true] {
+            // Go's flag package takes one or two dashes, so both get the same flags, except
+            // for the block size.
+            let (mode, bs, ext): (&[&str], &[&str], _) = if block {
+                (&["-block"], &[], "mzb")
+            } else {
+                (&["-cpu=1"], &["-bs=64K", "--block-size=64K"], "mz")
+            };
+            let (rust, gos) = (dir.join(format!("r.{ext}")), dir.join(format!("g.{ext}")));
+            for (bin, bs, out) in [(mz_bin(), bs.get(1), &rust), (go.clone(), bs.first(), &gos)] {
+                run_ok(
+                    Command::new(bin)
+                        .args([&["c", "-q"], mode, flags].concat())
+                        .args(bs)
+                        .arg("-o")
+                        .arg(out)
+                        .arg(&src),
+                );
+            }
+            let dec = dir.join("decoded.bin");
+            for (bin, file) in [(&go, &rust), (&mz_bin(), &gos)] {
+                run_ok(
+                    Command::new(bin)
+                        .args([&["d", "-q"], mode].concat())
+                        .arg("-o")
+                        .arg(&dec)
+                        .arg(file),
+                );
+                assert!(
+                    fs::read(&dec).unwrap() == payload,
+                    "{flags:?} block={block}: {} d {}",
+                    bin.display(),
+                    file.display()
+                );
+            }
+            let (rust, gos) = (fs::read(&rust).unwrap(), fs::read(&gos).unwrap());
+            if flags.contains(&"--classic") {
+                continue;
+            }
+            let rust_simd = if block {
+                simd_block(&rust)
+            } else {
+                assert_eq!(simd_flag(&rust), simd_flag(&gos), "{flags:?}");
+                simd_chunks(&rust) > 0
+            };
+            assert!(
+                !rust_simd || rust == gos,
+                "{flags:?} block={block}: Rust output differs from Go's"
+            );
+        }
+    }
+}
+
+#[test]
+fn output_same_as_input_is_rejected() {
+    let dir = tmp_dir();
+    let payload = sample_payload(11, 64 * 1024);
+    for args in [
+        &["c", "-q", "--cpu", "1"][..],
+        &["c", "-q", "--cpu", "2"],
+        &["c", "-q", "--block", "--rm"],
+        &["d", "-q", "--cpu", "1"],
+        &["d", "-q", "--cpu", "2"],
+    ] {
+        let src = dir.join("same.txt");
+        fs::write(&src, &payload).unwrap();
+        let alias = dir.join(".").join("same.txt");
+        let out = Command::new(mz_bin())
+            .args(args)
+            .arg("-o")
+            .arg(&alias)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}: accepted -o == input");
+        assert_eq!(fs::read(&src).unwrap(), payload, "{args:?}: input modified");
+    }
+}
+
+#[test]
+fn output_hard_link_to_input_is_rejected() {
+    let dir = tmp_dir();
+    let payload = sample_payload(12, 64 * 1024);
+    for args in [
+        &["c", "-q", "--cpu", "1"][..],
+        &["c", "-q", "--cpu", "2"],
+        &["c", "-q", "--block", "--rm"],
+        &["d", "-q", "--cpu", "1"],
+        &["d", "-q", "--cpu", "2"],
+    ] {
+        let src = dir.join("hl-src.txt");
+        let link = dir.join("hl-dst.txt");
+        let _ = fs::remove_file(&link);
+        fs::write(&src, &payload).unwrap();
+        fs::hard_link(&src, &link).unwrap();
+        let out = Command::new(mz_bin())
+            .args(args)
+            .arg("-o")
+            .arg(&link)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{args:?}: accepted -o == hard link of input"
+        );
+        assert_eq!(fs::read(&src).unwrap(), payload, "{args:?}: input modified");
+    }
+}
+
+/// An existing default output name gets the same check as `-o`.
+#[test]
+fn default_output_hard_link_to_input_is_rejected() {
+    let payload = sample_payload(13, 64 * 1024);
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-"], &payload);
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &payload);
+    for (args, src, dst, data) in [
+        (&["c", "-q", "--cpu", "1"][..], "x", "x.mz", &payload),
+        (&["c", "-q", "--cpu", "2", "--rm"], "x", "x.mz", &payload),
+        (&["c", "-q", "--block"], "x", "x.mzb", &payload),
+        (&["d", "-q", "--cpu", "1"], "x.mz", "x", &stream),
+        (&["d", "-q", "--cpu", "2", "--rm"], "x.mz", "x", &stream),
+        (&["d", "-q"], "x.mzb", "x", &block),
+        (&["d", "-q", "--block"], "x.bin", "x.bin.out", &block),
+    ] {
+        let dir = tmp_dir();
+        let (src, dst) = (dir.join(src), dir.join(dst));
+        fs::write(&src, data).unwrap();
+        fs::hard_link(&src, &dst).unwrap();
+        let out = Command::new(mz_bin())
+            .args(args)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}: accepted {dst:?}");
+        assert!(fs::read(&src).unwrap() == *data, "{args:?}: input modified");
+    }
+}
+
+/// A second name for the input of a [`same_file_output`] case.
+enum Alias {
+    No,
+    Hard(&'static str),
+    Sym(&'static str),
+    /// The input's name in another case: the same file only on case-insensitive file systems.
+    Case(&'static str),
+}
+
+/// Go's `TestSameFileOutput` (cmd/mz/mz_test.go): an output naming the input, in any
+/// spelling, is refused before anything is written. Go compresses in place through a temp
+/// file instead (its c-o-dot and c-hardlink cases). Rust has no --safe, --recomp, sidecars or
+/// --block-debug.
+#[test]
+fn same_file_output() {
+    let data = sample_payload(14, 64 * 1024);
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-"], &data);
+    // The last arg names the input.
+    for (alias, args) in [
+        (Alias::No, &["d", "-o", "x.mz", "x.mz"][..]),
+        (Alias::No, &["d", "-o", "./x.mz", "x.mz"]),
+        (Alias::No, &["d", "--rm", "-o", "./x.mz", "x.mz"]),
+        (Alias::Hard("y"), &["d", "-o", "y", "x.mz"]),
+        (Alias::Sym("y"), &["d", "-o", "y", "x.mz"]),
+        (Alias::Case("X.MZ"), &["d", "-o", "X.MZ", "x.mz"]),
+        (Alias::No, &["c", "--block", "--rm", "-o", "./x", "x"]),
+        (Alias::No, &["c", "--cpu", "1", "-o", "./x", "x"]),
+        (Alias::Hard("y"), &["c", "-o", "y", "x"]),
+        (Alias::Sym("x.mz"), &["c", "x"]),
+    ] {
+        let dir = tmp_dir();
+        let file = args[args.len() - 1];
+        let input = if file == "x" { &data } else { &stream };
+        fs::write(dir.join(file), input).unwrap();
+        let aliased = match alias {
+            Alias::No => Ok(()),
+            Alias::Hard(a) => fs::hard_link(dir.join(file), dir.join(a)),
+            Alias::Sym(a) => symlink(file, dir.join(a)),
+            Alias::Case(a) if dir.join(a).exists() => Ok(()),
+            Alias::Case(_) => Err(io::Error::other("case-sensitive file system")),
+        };
+        if let Err(e) = aliased {
+            eprintln!("{args:?}: skipped: {e}");
+            continue;
+        }
+        let names = || {
+            let mut v: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            v.sort();
+            v
+        };
+        let before = names();
+        let res = Command::new(mz_bin())
+            .arg("-q")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&res.stderr);
+        assert!(
+            stderr.contains("input and output are the same file"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            fs::read(dir.join(file)).unwrap() == *input,
+            "{args:?}: input changed"
+        );
+        assert_eq!(names(), before, "{args:?}");
+    }
+
+    // Go's default name for `d -block x.bin` is the input itself; Rust's is x.bin.out.
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &data);
+    let dir = tmp_dir();
+    fs::write(dir.join("x.bin"), &block).unwrap();
+    run_ok(
+        Command::new(mz_bin())
+            .args(["d", "-q", "--block", "x.bin"])
+            .current_dir(&dir),
+    );
+    assert!(fs::read(dir.join("x.bin")).unwrap() == block);
+    assert!(fs::read(dir.join("x.bin.out")).unwrap() == data);
+}
+
+/// Stdin redirected from the output (`mz c -o x - < x`) is refused like an `-o` naming the
+/// input file, as the output is truncated before stdin is read. Stdin from another file, a
+/// pipe or null still works.
+#[test]
+fn stdin_from_output_is_rejected() {
+    let data = sample_payload(15, 64 * 1024);
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "-q", "-"], &data);
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &data);
+    for (args, input) in [
+        (&["c", "--cpu=1"][..], &data),
+        (&["c", "--cpu=2"], &data),
+        (&["c", "--block"], &data),
+        (&["d", "--cpu=1"], &stream),
+        (&["d", "--cpu=2"], &stream),
+        (&["d", "--block"], &block),
+    ] {
+        let dir = tmp_dir();
+        let x = dir.join("x");
+        fs::write(&x, input).unwrap();
+        // Existing outputs, so they are compared with stdin.
+        for f in ["y", "z", "n"] {
+            fs::write(dir.join(f), "old").unwrap();
+        }
+        let mz = |out: &str, stdin: Stdio| {
+            Command::new(mz_bin())
+                .args(args)
+                .args(["-q", "-o", out, "-"])
+                .current_dir(&dir)
+                .stdin(stdin)
+                .output()
+                .unwrap()
+        };
+        let res = mz("x", fs::File::open(&x).unwrap().into());
+        let stderr = String::from_utf8_lossy(&res.stderr);
+        assert!(
+            stderr.contains("input and output are the same file"),
+            "{args:?}: {stderr}"
+        );
+        assert!(fs::read(&x).unwrap() == *input, "{args:?}: input changed");
+
+        let res = mz("y", fs::File::open(&x).unwrap().into());
+        assert!(res.status.success(), "{args:?}: {res:?}");
+        let z = dir.join("z");
+        let piped: Vec<_> = args
+            .iter()
+            .chain(&["-q", "-o", z.to_str().unwrap(), "-"])
+            .copied()
+            .collect();
+        mz_pipe(&mz_bin(), &piped, input);
+        assert!(
+            fs::read(&z).unwrap() == fs::read(dir.join("y")).unwrap(),
+            "{args:?}: pipe"
+        );
+        // An empty stream is valid, an empty block is not.
+        let res = mz("n", Stdio::null());
+        assert_eq!(
+            res.status.success(),
+            args != ["d", "--block"],
+            "{args:?}: {res:?}"
+        );
+    }
+}
+
+/// `--rm` removes the input once the output is written and synced.
+#[test]
+fn rm_removes_input_after_output() {
+    let dir = tmp_dir();
+    let src = dir.join("x");
+    let payload = sample_payload(37, 64 * 1024);
+    for (c, d, ext) in [
+        (&["c", "--cpu=1"][..], &["d", "--cpu=1"][..], "mz"),
+        (&["c", "--cpu=2"], &["d", "--cpu=2"], "mz"),
+        (&["c", "--block"], &["d"], "mzb"),
+    ] {
+        let mid = dir.join(format!("x.{ext}"));
+        fs::write(&src, &payload).unwrap();
+        run_ok(
+            Command::new(mz_bin())
+                .args(c)
+                .args(["-q", "--rm"])
+                .arg(&src),
+        );
+        assert!(!src.exists(), "{c:?}");
+        run_ok(
+            Command::new(mz_bin())
+                .args(d)
+                .args(["-q", "--rm"])
+                .arg(&mid),
+        );
+        assert!(!mid.exists(), "{d:?}");
+        assert!(fs::read(&src).unwrap() == payload, "{c:?} {d:?}");
+    }
+}
+
+/// Go's `TestOutputSafety` (cmd/mz/mz_test.go) without -safe and sidecars, which Rust lacks: a
+/// failed run removes the output it opened and keeps its input, and a run that succeeds keeps
+/// its output.
+#[test]
+fn failed_run_removes_output() {
+    // The input file and its content, the arguments before the input, whether the run
+    // succeeds, and the names left in the directory. An input file x/f makes x the input.
+    type Case<'a> = (&'a str, &'a [u8], &'a [&'a str], bool, &'a [&'a str]);
+    let data = sample_payload(16, 256 * 1024);
+    // Several blocks, so the decoders fail after writing some.
+    let stream = mz_pipe(&mz_bin(), &["c", "-c", "--block-size=64K", "-"], &data);
+    let corrupt = &stream[..stream.len() / 2];
+    let block = mz_pipe(&mz_bin(), &["c", "--block", "-c", "-q", "-"], &data);
+    let corrupt_block = &block[..block.len() / 2];
+    let mut cases: Vec<Case> = vec![
+        ("x.mz", corrupt, &["d", "--cpu=1"], false, &["x.mz"]),
+        ("x.mz", corrupt, &["d", "--cpu=2", "--rm"], false, &["x.mz"]),
+        ("x.mzb", corrupt_block, &["d"], false, &["x.mzb"]),
+        // Reading a directory fails after the output is opened, except on Windows.
+        ("x/f", b"", &["c", "--cpu=1", "-o", "y"], false, &["x"]),
+        ("x/f", b"", &["c", "--cpu=2", "-o", "y"], false, &["x"]),
+        ("x", &data, &["c", "--rm", "-o", "nodir/x"], false, &["x"]),
+        ("x.mz", &stream, &["d", "--rm"], true, &["x"]),
+        ("x", &data, &["c", "--rm"], true, &["x.mz"]),
+    ];
+    // Writes to /dev/full fail after the output is opened, and a device is never removed.
+    let full = Path::new("/dev/full").exists();
+    if full {
+        cases.push(("x", &data, &["c", "--rm", "-o", "/dev/full"], false, &["x"]));
+        cases.push(("x.mz", &stream, &["d", "-o", "/dev/full"], false, &["x.mz"]));
+    }
+    // Go's os.DevNull: a run to the null device succeeds, so --rm removes the input.
+    const NULL: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    cases.push(("x", &data, &["c", "--rm", "-o", NULL], true, &[]));
+    cases.push(("x.mz", &stream, &["d", "--rm", "-o", NULL], true, &[]));
+    for (file, content, args, ok, want) in cases {
+        let dir = tmp_dir();
+        let p = dir.join(file);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, content).unwrap();
+        let res = Command::new(mz_bin())
+            .arg("-q")
+            .args(args)
+            .arg(file.split('/').next().unwrap())
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(res.status.success(), ok, "{args:?}: {res:?}");
+        assert!(
+            ok || fs::read(&p).unwrap() == content,
+            "{args:?}: input changed"
+        );
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, want, "{args:?}");
+    }
+    assert!(!full || Path::new("/dev/full").exists());
+
+    // A symlink given as output is kept, with its target.
+    let dir = tmp_dir();
+    fs::write(dir.join("x.mz"), corrupt).unwrap();
+    fs::write(dir.join("t"), "old").unwrap();
+    if let Err(e) = symlink("t", dir.join("y")) {
+        eprintln!("symlink skipped: {e}");
+        return;
+    }
+    let res = Command::new(mz_bin())
+        .args(["d", "-q", "-o", "y", "x.mz"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!res.status.success());
+    assert!(fs::symlink_metadata(dir.join("y")).unwrap().is_symlink());
+    assert!(dir.join("t").exists());
+}
+
+/// `-0 --block` writes Go's uncompressed block (SPEC 1.1: size 0 means the rest is literals):
+/// `0x00` when empty, else `0x00 0x00` and the input.
+#[test]
+fn block_level_zero_is_uncompressed() {
+    let payload = sample_payload(9, 78_000);
+    for input in [&payload[..], &[]] {
+        let block = mz_pipe(&mz_bin(), &["c", "--block", "-0", "-c", "-q", "-"], input);
+        let want = if input.is_empty() {
+            vec![0]
+        } else {
+            [&[0, 0], input].concat()
+        };
+        assert!(
+            block == want,
+            "len {}: got {} bytes",
+            input.len(),
+            block.len()
+        );
+        let got = mz_pipe(&mz_bin(), &["d", "--block", "-c", "-q", "-"], &block);
+        assert!(got == input, "len {}: round trip", input.len());
+    }
+}
+
+#[test]
+fn mt_stdout_summary_counts_output() {
+    let dir = tmp_dir();
+    let src = dir.join("in.txt");
+    fs::write(&src, sample_payload(7, 100_000)).unwrap();
+    let out = Command::new(mz_bin())
+        .args(["c", "-c", "--threads", "2"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(&format!("-> {} [", out.stdout.len())), "{err}");
+}
+
+#[test]
+fn block_stdin_oversize_fails_without_buffering_all() {
+    let mut child = Command::new(mz_bin())
+        .args(["c", "--block", "-c", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mz");
+    let mut stdin = child.stdin.take().unwrap();
+    let chunk = vec![0u8; 1 << 20];
+    let mut written = 0usize;
+    while written < 128 << 20 && stdin.write_all(&chunk).is_ok() {
+        written += chunk.len();
+    }
+    drop(stdin);
+    assert!(!child.wait().unwrap().success());
+    assert!(
+        written < 32 << 20,
+        "mz consumed {written} bytes before rejecting"
+    );
+}
+
+#[test]
+fn block_decompress_stdin_oversize_fails_without_buffering_all() {
+    let mut child = Command::new(mz_bin())
+        .args(["d", "--block", "-c", "-q", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mz");
+    let mut stdin = child.stdin.take().unwrap();
+    // Zeros form a valid literal block (0x00, size 0), so only a read bound can stop it.
+    let chunk = vec![0u8; 1 << 20];
+    let mut written = 0usize;
+    while written < 128 << 20 && stdin.write_all(&chunk).is_ok() {
+        written += chunk.len();
+    }
+    drop(stdin);
+    assert!(!child.wait().unwrap().success());
+    assert!(
+        written < 32 << 20,
+        "mz consumed {written} bytes before rejecting"
+    );
+}
+
+#[test]
+fn compress_stream_verify() {
+    let dir = tmp_dir();
+    let src = dir.join("input.txt");
+    fs::write(&src, sample_payload(5, 64 * 1024)).unwrap();
+    for threads in ["1", "4"] {
+        let out = Command::new(mz_bin())
+            .args(["c", "--verify", "--threads", threads, "-o"])
+            .arg(dir.join("out.mz"))
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "threads={threads}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Verified ok"),
+            "threads={threads}: {stderr}"
+        );
+    }
 }

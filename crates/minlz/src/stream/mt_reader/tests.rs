@@ -89,9 +89,15 @@ fn decode_concurrent_matches_st_for_st_encoded() {
 
 #[test]
 fn cross_concurrency_round_trips() {
-    let payload: Vec<u8> = (0..64 * 1024).map(|i| (i & 0xff) as u8).collect();
-    for &enc_n in &[1, 2, 4, 8] {
-        for &dec_n in &[1, 2, 4, 8] {
+    // Miri: four blocks, and one worker or fewer workers than blocks.
+    let (size, ns): (usize, &[usize]) = if cfg!(miri) {
+        (16 << 10, &[1, 3])
+    } else {
+        (64 << 10, &[1, 2, 4, 8])
+    };
+    let payload: Vec<u8> = (0..size).map(|i| (i & 0xff) as u8).collect();
+    for &enc_n in ns {
+        for &dec_n in ns {
             let stream = encode_mt(&payload, enc_n, Some(4 << 10));
             let mut reader = Reader::new(Cursor::new(&stream));
             let ConcurrentDecode {
@@ -165,4 +171,30 @@ fn go_mt_encoded_decodes_in_rust_mt() {
         assert_eq!(n as usize, payload.len(), "cpu={cpu}");
         assert_eq!(dec, payload, "cpu={cpu}");
     }
+}
+
+#[test]
+fn decode_concurrent_error_is_sticky() {
+    use std::io::{ErrorKind, Read};
+    let payload: Vec<u8> = (0..8u32 << 10)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
+    let mut stream = encode_mt(&payload, 2, Some(4 << 10));
+    // The CRC of the first data chunk, after the 10-byte stream identifier.
+    stream[14] ^= 0xff;
+    let mut reader = Reader::new(Cursor::new(stream));
+    let err = reader.decode_concurrent(Vec::<u8>::new(), 4).unwrap_err();
+    assert_eq!(err.to_string(), "minlz: CRC mismatch");
+    // The dispatcher read past the bad chunk, so later calls must not resume.
+    assert_eq!(
+        reader.read(&mut [0; 1]).unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(
+        reader
+            .decode_concurrent(Vec::<u8>::new(), 4)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidData
+    );
 }

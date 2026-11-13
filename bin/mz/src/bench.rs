@@ -20,7 +20,6 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use minlz::Level;
 use minlz::stream::{ConcurrentDecode, MtWriterBuilder, Reader, WriterBuilder};
 
 use crate::args::Options;
@@ -49,11 +48,6 @@ enum BenchMode {
 fn run_inner(opts: &Options, input: Option<&std::path::Path>, mode: BenchMode) -> io::Result<()> {
     let input = input.ok_or_else(|| io::Error::other("no input file given"))?;
     let n = opts.bench_n.unwrap_or(5);
-    let level = if opts.uncompressed {
-        Level::Fastest
-    } else {
-        opts.level.unwrap_or(Level::Balanced)
-    };
     let (mut src, _) = open_input(input)?;
     let mut data = Vec::new();
     src.read_to_end(&mut data)?;
@@ -67,6 +61,22 @@ fn run_inner(opts: &Options, input: Option<&std::path::Path>, mode: BenchMode) -
     let block_size = opts
         .block_size
         .unwrap_or(crate::compress::CLI_DEFAULT_BLOCK_SIZE);
+    let st_builder = || {
+        let b = WriterBuilder::new().block_size(block_size);
+        match opts.level {
+            Some(level) => b.level(level),
+            None => b.uncompressed(),
+        }
+    };
+    let mt_builder = || {
+        let b = MtWriterBuilder::new()
+            .block_size(block_size)
+            .concurrency(threads);
+        match opts.level {
+            Some(level) => b.level(level),
+            None => b.uncompressed(),
+        }
+    };
 
     // For decompress-only mode, the input IS the compressed stream — skip
     // the pre-encode + verify-roundtrip step entirely.
@@ -79,16 +89,11 @@ fn run_inner(opts: &Options, input: Option<&std::path::Path>, mode: BenchMode) -
         // interleaving.
         verify_buf = Vec::with_capacity(data.len());
         if threads <= 1 {
-            let wb = WriterBuilder::new().level(level).block_size(block_size);
-            let mut w = wb.build(&mut verify_buf)?;
+            let mut w = st_builder().build(&mut verify_buf)?;
             w.write_all(&data)?;
             let _ = w.finish()?;
         } else {
-            let wb = MtWriterBuilder::new()
-                .level(level)
-                .block_size(block_size)
-                .concurrency(threads);
-            let mut w = wb.build(std::mem::take(&mut verify_buf))?;
+            let mut w = mt_builder().build(std::mem::take(&mut verify_buf))?;
             w.write_all(&data)?;
             verify_buf = w.finish()?;
         }
@@ -124,16 +129,11 @@ fn run_inner(opts: &Options, input: Option<&std::path::Path>, mode: BenchMode) -
             let start = Instant::now();
             if threads <= 1 {
                 buf = Vec::with_capacity(verify_buf.len());
-                let wb = WriterBuilder::new().level(level).block_size(block_size);
-                let mut w = wb.build(&mut buf)?;
+                let mut w = st_builder().build(&mut buf)?;
                 w.write_all(&data)?;
                 let _ = w.finish()?;
             } else {
-                let wb = MtWriterBuilder::new()
-                    .level(level)
-                    .block_size(block_size)
-                    .concurrency(threads);
-                let mut w = wb.build(Vec::with_capacity(verify_buf.len()))?;
+                let mut w = mt_builder().build(Vec::with_capacity(verify_buf.len()))?;
                 w.write_all(&data)?;
                 buf = w.finish()?;
             }

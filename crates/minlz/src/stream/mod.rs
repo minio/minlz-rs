@@ -24,6 +24,16 @@
 //!
 //! Block search tables (`SPEC.md` §4.13) are not implemented in this
 //! crate.
+//!
+//! # SIMD chunks
+//!
+//! At the SIMD [`Level`](crate::Level)s ([SIMD blocks](crate::block#simd-blocks)) the writers
+//! store SIMD blocks as chunk type 0x10 (`SPEC.md` §4.5B). Instead of a CRC32C, the chunk is
+//! checked with an XXH3-64 hash of the uncompressed data; [`ReaderBuilder::ignore_crc`] skips
+//! both checks. A stream written at a SIMD level sets a flag in its stream identifier, so
+//! decoders without SIMD support reject the stream at once, instead of failing at the first SIMD
+//! chunk. [`Reader`] rejects SIMD chunks in streams without the flag. Blocks that don't compress
+//! are stored uncompressed, as at the other levels.
 
 mod crc;
 mod error;
@@ -37,33 +47,15 @@ mod writer;
 
 use std::num::NonZeroUsize;
 
-/// Worker-thread count for the parallel codec paths
-/// ([`MtWriterBuilder::concurrency`], [`Reader::decode_concurrent`]).
-///
-/// The "at least one worker" invariant is encoded in the type, so a count can
-/// never be zero. Construct with [`Concurrency::new`], or
-/// [`available`](Concurrency::available) for the host CPU count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Concurrency(NonZeroUsize);
-
-impl Concurrency {
-    /// A count of `n` workers, or `None` if `n == 0`.
-    pub fn new(n: usize) -> Option<Self> {
-        NonZeroUsize::new(n).map(Self)
+/// `n` workers, or the host's available parallelism for `0`.
+pub(crate) fn worker_count(n: usize) -> usize {
+    if n > 0 {
+        return n;
     }
-
-    /// The host's available parallelism, or one worker if it can't be queried.
-    pub fn available() -> Self {
-        Self(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
-    }
-
-    /// The worker count as a `usize` (always ≥ 1).
-    pub fn get(self) -> usize {
-        self.0.get()
-    }
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
 }
 
-pub use error::{Error, Result};
+pub use error::Error;
 pub use format::{
     CHUNK_TYPE_PADDING, CHUNK_TYPE_STREAM_IDENTIFIER, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE,
     MAX_USER_CHUNK_SIZE, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_USER_SKIPPABLE_CHUNK, MIN_BLOCK_SIZE,
@@ -71,6 +63,15 @@ pub use format::{
 };
 pub use mt_reader::ConcurrentDecode;
 pub use mt_writer::{MtWriter, MtWriterBuilder};
+pub(crate) use reader::simd_chunk_header;
 pub use reader::{Reader, ReaderBuilder, UserChunkCb};
 pub use seek::ReadSeeker;
 pub use writer::{Writer, WriterBuilder, Written};
+
+#[cfg(test)]
+#[test]
+fn worker_count_zero_is_available_parallelism() {
+    let available = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    assert_eq!(worker_count(0), available);
+    assert_eq!(worker_count(3), 3);
+}

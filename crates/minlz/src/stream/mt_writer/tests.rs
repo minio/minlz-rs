@@ -12,10 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::collections::HashSet;
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::time::Instant;
 
+use super::{BlockJob, ENGINE_IDLE, Engine, IDLE, OrderItem};
 use crate::Index;
-use crate::stream::{ConcurrentDecode, MtWriter, MtWriterBuilder, ReadSeeker, Reader};
+use crate::stream::mt_pool::BufferPool;
+use crate::stream::{
+    ConcurrentDecode, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, MtWriter, MtWriterBuilder, ReadSeeker, Reader,
+};
 
 fn round_trip_concurrency(payload: &[u8], concurrency: usize) -> Vec<u8> {
     let n = concurrency;
@@ -103,10 +110,47 @@ fn uncompressed_mode_round_trip() {
 }
 
 #[test]
-fn concurrency_one_still_works() {
+fn concurrency_auto_and_one_work() {
     let payload = vec![b'q'; 8 << 10];
-    let got = round_trip_concurrency(&payload, 1);
-    assert_eq!(got, payload);
+    for n in [0, 1] {
+        assert_eq!(
+            round_trip_concurrency(&payload, n),
+            payload,
+            "concurrency {n}"
+        );
+    }
+}
+
+#[test]
+fn written_reports_byte_counts() {
+    let mut mt = MtWriterBuilder::new()
+        .block_size(64 << 10)
+        .concurrency(2)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    assert_eq!(mt.written(), Default::default());
+    let mut st = crate::stream::WriterBuilder::new()
+        .block_size(64 << 10)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    for w in [&mut mt as &mut dyn Write, &mut st] {
+        w.write_all(&payload).unwrap();
+        w.flush().unwrap();
+    }
+    let written = mt.written();
+    assert_eq!(written.uncompressed, payload.len() as u64);
+    assert_eq!(written, st.written());
+    // A user chunk last before the flush counts too.
+    mt.add_user_chunk(0x80, b"meta").unwrap();
+    st.add_user_chunk(0x80, b"meta").unwrap();
+    mt.flush().unwrap();
+    st.flush().unwrap();
+    let written = mt.written();
+    assert_eq!(written, st.written());
+    // After finish there's the EOF chunk too.
+    let out = mt.finish().unwrap();
+    assert!(out.len() as u64 > written.compressed);
 }
 
 #[test]
@@ -125,8 +169,6 @@ fn finish_returns_inner_writer() {
 
 #[test]
 fn add_user_chunk_round_trip_via_callback() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     let mut w = MtWriterBuilder::new()
         .concurrency(2)
         .build(Vec::<u8>::new())
@@ -138,18 +180,18 @@ fn add_user_chunk_round_trip_via_callback() {
     w.write_all(b"suffix").unwrap();
     let buf = w.finish().unwrap();
 
-    type Seen = Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
-    let seen: Seen = Rc::new(RefCell::new(Vec::new()));
+    type Seen = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let s1 = seen.clone();
     let s2 = seen.clone();
     let mut decoded = Vec::new();
     crate::stream::ReaderBuilder::new()
         .user_chunk_callback(0x80, move |id, body| {
-            s1.borrow_mut().push((id, body.to_vec()));
+            s1.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .user_chunk_callback(0xc0, move |id, body| {
-            s2.borrow_mut().push((id, body.to_vec()));
+            s2.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .build(Cursor::new(&buf))
@@ -157,7 +199,7 @@ fn add_user_chunk_round_trip_via_callback() {
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, b"prefixinfixsuffix");
-    let seen = seen.borrow();
+    let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[0], (0x80, b"meta-a".to_vec()));
     assert_eq!(seen[1], (0xc0, b"meta-b".to_vec()));
@@ -166,7 +208,9 @@ fn add_user_chunk_round_trip_via_callback() {
 #[test]
 fn cross_concurrency_round_trips() {
     let payload: Vec<u8> = (0..32 * 1024).map(|i| (i * 17) as u8).collect();
-    for &n in &[1, 2, 4, 8] {
+    // Miri: one worker and a pool of four.
+    let ns: &[usize] = if cfg!(miri) { &[1, 4] } else { &[1, 2, 4, 8] };
+    for &n in ns {
         let got = round_trip_concurrency(&payload, n);
         assert_eq!(got, payload, "concurrency = {n}");
     }
@@ -184,6 +228,38 @@ fn drop_without_finish_does_not_block() {
     w.write_all(&payload).unwrap();
     drop(w);
     // If we got here without hanging, the test passes.
+}
+
+#[test]
+fn drop_without_finish_writes_no_trailer() {
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+    impl Write for Shared {
+        fn write(&mut self, p: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(p);
+            Ok(p.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let out = Shared::default();
+    let mut w = MtWriterBuilder::new()
+        .block_size(4 << 10)
+        .concurrency(2)
+        .append_index()
+        .padding(1 << 10)
+        .build(out.clone())
+        .unwrap();
+    w.write_all(&[b'x'; 10 << 10]).unwrap();
+    drop(w);
+    let out = out.0.lock().unwrap();
+    assert!(!out.ends_with(b"\x00xdi2s"), "dropped stream got an index");
+    assert!(
+        Index::default()
+            .load_stream(&mut Cursor::new(&out[..]))
+            .is_err()
+    );
 }
 
 /// Determinism / stress: random PRNG inputs at varied sizes + cross
@@ -323,7 +399,7 @@ fn append_index_round_trips_via_read_seeker() {
 
         // Seek probes via ReadSeeker.
         let reader = Reader::new(Cursor::new(stream.clone()));
-        let mut rs = ReadSeeker::new(reader, &[])
+        let mut rs = ReadSeeker::new(reader)
             .unwrap_or_else(|e| panic!("ReadSeeker::new (n={concurrency}): {e}"));
         assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
 
@@ -445,7 +521,7 @@ fn mt_padding_plus_index_aligns_and_reads() {
     );
     // ReadSeeker still finds the index at the tail.
     let reader = Reader::new(Cursor::new(buf));
-    let mut rs = ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = ReadSeeker::new(reader).expect("ReadSeeker::new");
     assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
     // total_compressed must be unknown (None) when padding is in play.
     assert_eq!(rs.index().total_compressed(), None);
@@ -473,7 +549,7 @@ fn mt_index_offsets_match_st_index_offsets() {
         .build(Vec::<u8>::new())
         .unwrap();
     st.write_all(&payload).unwrap();
-    let st_idx = st.close_index().unwrap();
+    let (_, st_idx) = st.close_index().unwrap();
 
     let mut mt = MtWriterBuilder::new()
         .block_size(block_size)
@@ -486,7 +562,7 @@ fn mt_index_offsets_match_st_index_offsets() {
 
     // Extract the MT-emitted index by reading the tail.
     let reader = Reader::new(Cursor::new(mt_stream.clone()));
-    let rs = ReadSeeker::new(reader, &[]).unwrap();
+    let rs = ReadSeeker::new(reader).unwrap();
     let mt_idx = rs.index().clone();
 
     let mut parsed_st = Index::default();
@@ -509,4 +585,370 @@ fn mt_index_offsets_match_st_index_offsets() {
         assert_eq!(a.uncompressed, b.uncompressed, "uncomp offset");
         assert_eq!(a.compressed, b.compressed, "comp offset");
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "1 MiB stream is impractical under miri")]
+fn mt_close_index_matches_st_close_index() {
+    let payload: Vec<u8> = (0..(1 << 20))
+        .map(|i| ((i * 17) ^ (i >> 4)) as u8)
+        .collect();
+    let mut st = crate::stream::WriterBuilder::new()
+        .block_size(64 << 10)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    st.write_all(&payload).unwrap();
+    let (_, st_idx) = st.close_index().unwrap();
+    let build = || {
+        MtWriterBuilder::new()
+            .block_size(64 << 10)
+            .concurrency(4)
+            .build(Vec::<u8>::new())
+            .unwrap()
+    };
+    let mut mt = build();
+    mt.write_all(&payload).unwrap();
+    let (stream, mt_idx) = mt.close_index().unwrap();
+    assert_eq!(mt_idx, st_idx);
+    let mut plain = build();
+    plain.write_all(&payload).unwrap();
+    assert_eq!(
+        plain.finish().unwrap(),
+        stream,
+        "close_index changed the stream"
+    );
+
+    let off = MtWriterBuilder::new()
+        .concurrency(1)
+        .generate_index(false)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    assert_eq!(
+        off.close_index().unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+// -------------------- engine reuse --------------------
+// Each test uses its own block size, so parallel tests never share an engine.
+
+fn idle_ids() -> Vec<u64> {
+    IDLE.lock().unwrap().iter().map(|e| e.id).collect()
+}
+
+/// The writer's engine id, and a handle that dies with the engine.
+fn engine_of<W: Write + Send + 'static>(w: &MtWriter<W>) -> (u64, Weak<BufferPool>) {
+    (w.engine().id, Arc::downgrade(&w.engine().input_pool))
+}
+
+fn shaped(block_size: usize) -> MtWriter<Vec<u8>> {
+    MtWriterBuilder::new()
+        .block_size(block_size)
+        .concurrency(2)
+        .build(Vec::new())
+        .unwrap()
+}
+
+fn decode(stream: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::new();
+    Reader::new(stream).read_to_end(&mut decoded).unwrap();
+    decoded
+}
+
+/// Alive while `token` has more than one strong count.
+struct Sink {
+    fail: bool,
+    _token: Arc<()>,
+}
+
+impl Write for Sink {
+    fn write(&mut self, p: &[u8]) -> io::Result<usize> {
+        if self.fail {
+            return Err(io::Error::other("sink failed"));
+        }
+        Ok(p.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Queues a job for worker 0 the way `submit_block` does.
+fn inject(w: &mut MtWriter<Vec<u8>>, uncompressed: Vec<u8>, obuf_pool: Arc<BufferPool>) {
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    w.order_tx
+        .as_ref()
+        .unwrap()
+        .send(OrderItem::Block(result_rx))
+        .unwrap();
+    let job = BlockJob {
+        uncompressed,
+        level: crate::block::Level::Balanced,
+        uncompressed_mode: false,
+        result_tx,
+        obuf_pool,
+    };
+    w.engine().submit_txs[0].send(job).unwrap();
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "Miri never parks engines")]
+fn engine_reused_by_same_shape() {
+    const BS: usize = MIN_BLOCK_SIZE + 1;
+    let payload: Vec<u8> = (0..3 * BS + 5).map(|i| (i / 7) as u8).collect();
+    let mut w = shaped(BS);
+    let (id, _) = engine_of(&w);
+    w.write_all(&payload).unwrap();
+    assert_eq!(decode(&w.finish().unwrap()), payload);
+    assert!(idle_ids().contains(&id), "finished engine not parked");
+
+    let mut w = shaped(BS);
+    assert_eq!(engine_of(&w).0, id);
+    assert!(!idle_ids().contains(&id));
+    w.write_all(&payload).unwrap();
+    assert_eq!(decode(&w.finish().unwrap()), payload);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "Miri never parks engines")]
+fn idle_engine_expires() {
+    const BS: usize = MIN_BLOCK_SIZE + 2;
+    let mut w = shaped(BS);
+    let (id, pool) = engine_of(&w);
+    w.write_all(b"expire").unwrap();
+    w.finish().unwrap();
+    assert!(idle_ids().contains(&id), "finished engine not parked");
+    let start = Instant::now();
+    while pool.strong_count() > 0 {
+        assert!(start.elapsed() < 10 * ENGINE_IDLE, "engine never expired");
+        std::thread::sleep(ENGINE_IDLE / 20);
+    }
+    assert!(!idle_ids().contains(&id));
+}
+
+#[test]
+fn failing_writer_drops_engine() {
+    const BS: usize = MIN_BLOCK_SIZE + 3;
+    let token = Arc::new(());
+    let sink = Sink {
+        fail: true,
+        _token: token.clone(),
+    };
+    let mut w = MtWriterBuilder::new()
+        .block_size(BS)
+        .concurrency(2)
+        .build(sink)
+        .unwrap();
+    let (id, pool) = engine_of(&w);
+    let _ = w.write_all(&vec![b'f'; 2 * BS]);
+    assert!(w.finish().is_err());
+    assert_eq!(Arc::strong_count(&token), 1, "W outlived finish");
+    assert_eq!(pool.strong_count(), 0, "engine still alive");
+    assert!(!idle_ids().contains(&id));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "an 8 MiB block is impractical under miri")]
+fn worker_error_drops_engine() {
+    const BS: usize = MIN_BLOCK_SIZE + 4;
+    let mut w = shaped(BS);
+    let (id, pool) = engine_of(&w);
+    w.write_all(b"before").unwrap();
+    w.flush().unwrap();
+    // Too large to encode: the worker reports an error.
+    let obuf_pool = w.engine().obuf_pool.clone();
+    inject(&mut w, vec![0; MAX_BLOCK_SIZE + 1], obuf_pool);
+    let err = w.finish().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert!(err.to_string().starts_with("encode: "), "{err}");
+    assert_eq!(pool.strong_count(), 0, "engine still alive");
+    assert!(!idle_ids().contains(&id));
+}
+
+#[test]
+fn worker_panic_drops_engine() {
+    const BS: usize = MIN_BLOCK_SIZE + 5;
+    let mut w = shaped(BS);
+    let (id, pool) = engine_of(&w);
+    // Allocating an obuf of this capacity panics in the worker.
+    inject(
+        &mut w,
+        b"boom".to_vec(),
+        Arc::new(BufferPool::new(0, usize::MAX)),
+    );
+    let _ = w.write_all(&vec![b'p'; 2 * BS]);
+    assert!(w.finish().is_err());
+    assert_eq!(pool.strong_count(), 0, "engine still alive");
+    assert!(!idle_ids().contains(&id));
+
+    let mut w = shaped(BS);
+    assert_ne!(engine_of(&w).0, id);
+    w.write_all(b"after").unwrap();
+    assert_eq!(decode(&w.finish().unwrap()), b"after");
+}
+
+#[test]
+fn drop_without_finish_drops_engine_and_writer() {
+    const BS: usize = MIN_BLOCK_SIZE + 6;
+    let token = Arc::new(());
+    let sink = Sink {
+        fail: false,
+        _token: token.clone(),
+    };
+    let mut w = MtWriterBuilder::new()
+        .block_size(BS)
+        .concurrency(2)
+        .build(sink)
+        .unwrap();
+    let (id, pool) = engine_of(&w);
+    w.write_all(&vec![b'd'; 5 * BS + 7]).unwrap();
+    drop(w);
+    assert_eq!(Arc::strong_count(&token), 1, "W outlived the writer");
+    assert_eq!(pool.strong_count(), 0, "engine still alive");
+    assert!(!idle_ids().contains(&id));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "Miri never parks engines")]
+fn concurrent_writers_share_bounded_engines() {
+    const BS: usize = MIN_BLOCK_SIZE + 7;
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 4;
+    let ids = Mutex::new(HashSet::new());
+    std::thread::scope(|s| {
+        for t in 0..THREADS {
+            let ids = &ids;
+            s.spawn(move || {
+                for r in 0..ROUNDS {
+                    let payload: Vec<u8> = (0..3 * BS + 100 * t + r)
+                        .map(|i| (i * 7 / (t + 1)) as u8)
+                        .collect();
+                    let mut w = shaped(BS);
+                    ids.lock().unwrap().insert(engine_of(&w).0);
+                    w.write_all(&payload).unwrap();
+                    assert_eq!(decode(&w.finish().unwrap()), payload, "t={t} r={r}");
+                }
+            });
+        }
+    });
+    // Writers only build an engine when none is parked, so at most one per
+    // concurrent writer exists.
+    let ids = ids.into_inner().unwrap();
+    assert!(
+        ids.len() <= THREADS,
+        "{} engines for {THREADS} writers",
+        ids.len()
+    );
+    let parked = IDLE
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.key == (2, BS))
+        .count();
+    assert!(parked <= THREADS, "{parked} parked engines");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "leaks the inherited engine's threads")]
+fn forked_child_skips_inherited_engines() {
+    const BS: usize = MIN_BLOCK_SIZE + 8;
+    let mut inherited = Engine::new((2, BS));
+    inherited.pid = std::process::id().wrapping_add(1);
+    let id = inherited.id;
+    IDLE.lock().unwrap().push(inherited);
+    let mut w = shaped(BS);
+    assert_ne!(engine_of(&w).0, id);
+    assert!(!idle_ids().contains(&id));
+    w.write_all(b"child").unwrap();
+    assert_eq!(decode(&w.finish().unwrap()), b"child");
+}
+
+/// The parked engines of one shape keep at most one worker per CPU: with one worker per CPU,
+/// a second engine of the shape drops when its writer finishes.
+#[test]
+#[cfg_attr(miri, ignore = "Miri never parks engines")]
+fn surplus_engine_drops_at_park() {
+    const BS: usize = MIN_BLOCK_SIZE + 10;
+    let all = crate::stream::worker_count(0);
+    let writer = || {
+        MtWriterBuilder::new()
+            .block_size(BS)
+            .concurrency(all)
+            .build(Vec::new())
+            .unwrap()
+    };
+    let (mut a, mut b) = (writer(), writer());
+    let (ida, _) = engine_of(&a);
+    let (idb, pool_b) = engine_of(&b);
+    a.write_all(b"a").unwrap();
+    b.write_all(b"b").unwrap();
+    assert_eq!(decode(&a.finish().unwrap()), b"a");
+    assert_eq!(decode(&b.finish().unwrap()), b"b");
+    assert!(
+        idle_ids().contains(&ida),
+        "the first engine of the shape is not parked"
+    );
+    assert!(
+        !idle_ids().contains(&idb),
+        "a second engine of {all} workers is parked"
+    );
+    assert_eq!(
+        pool_b.strong_count(),
+        0,
+        "the surplus engine is still alive"
+    );
+}
+
+// -------------------- flush --------------------
+
+/// Records what reached it and how often it was flushed; each write is slow.
+struct SlowSink(Arc<Mutex<(Vec<u8>, usize)>>);
+
+impl Write for SlowSink {
+    fn write(&mut self, p: &[u8]) -> io::Result<usize> {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        self.0.lock().unwrap().0.extend_from_slice(p);
+        Ok(p.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.lock().unwrap().1 += 1;
+        Ok(())
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "300 KiB stream is impractical under miri")]
+fn flush_reaches_sink() {
+    let state = Arc::new(Mutex::new((Vec::new(), 0)));
+    let mut w = MtWriterBuilder::new()
+        .block_size(64 << 10)
+        .concurrency(2)
+        .generate_index(false)
+        .build(SlowSink(state.clone()))
+        .unwrap();
+    let data: Vec<u8> = (0..300u32 << 10).map(|i| (i * 7 / 13) as u8).collect();
+    w.write_all(&data).unwrap();
+    w.flush().unwrap();
+    let (at_flush, flushes) = {
+        let s = state.lock().unwrap();
+        (s.0.len(), s.1)
+    };
+    assert!(flushes >= 1, "W::flush not called");
+    w.finish().unwrap();
+    // finish only adds the EOF chunk: a 4-byte header and uvarint(300 KiB).
+    assert_eq!(state.lock().unwrap().0.len() - at_flush, 7);
+}
+
+#[test]
+fn flush_reports_sink_error() {
+    let mut w = MtWriterBuilder::new()
+        .block_size(MIN_BLOCK_SIZE + 9)
+        .concurrency(2)
+        .build(Sink {
+            fail: true,
+            _token: Arc::new(()),
+        })
+        .unwrap();
+    w.write_all(b"data").unwrap();
+    assert!(w.flush().is_err());
 }
