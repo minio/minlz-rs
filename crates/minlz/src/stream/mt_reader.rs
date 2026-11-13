@@ -80,7 +80,6 @@ pub(super) fn decode_concurrent_into<R: Read, W: Write + Send>(
     w: W,
     threads: usize,
 ) -> io::Result<ConcurrentDecode<W>> {
-    let threads = threads.max(1);
     // One submit channel per worker (capacity 1) for round-robin
     // dispatch — no Mutex<Receiver> contention.
     let mut submit_txs = Vec::with_capacity(threads);
@@ -99,6 +98,8 @@ pub(super) fn decode_concurrent_into<R: Read, W: Write + Send>(
 
     // Scoped, so the sink may borrow from the caller; every thread is joined before returning.
     let dispatch_res = std::thread::scope(|scope| {
+        // Owned by the scope, so a panicking dispatch drops the senders and the workers exit.
+        let mut submit_txs = submit_txs;
         let mut workers = Vec::with_capacity(threads);
         for rx in submit_rxs {
             workers.push(scope.spawn(move || worker_loop(rx)));

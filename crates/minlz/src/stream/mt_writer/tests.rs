@@ -123,19 +123,26 @@ fn concurrency_auto_and_one_work() {
 
 #[test]
 fn written_reports_byte_counts() {
-    let mut w = MtWriterBuilder::new()
+    let mut mt = MtWriterBuilder::new()
+        .block_size(64 << 10)
         .concurrency(2)
         .build(Vec::<u8>::new())
         .unwrap();
-    assert_eq!(w.written(), Default::default());
-    let payload = vec![b'q'; 8 << 10];
-    w.write_all(&payload).unwrap();
-    w.flush().unwrap();
-    let written = w.written();
+    assert_eq!(mt.written(), Default::default());
+    let mut st = crate::stream::WriterBuilder::new()
+        .block_size(64 << 10)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    for w in [&mut mt as &mut dyn Write, &mut st] {
+        w.write_all(&payload).unwrap();
+        w.flush().unwrap();
+    }
+    let written = mt.written();
     assert_eq!(written.uncompressed, payload.len() as u64);
-    assert!(written.compressed > 0);
+    assert_eq!(written, st.written());
     // After finish there's the EOF chunk too.
-    let out = w.finish().unwrap();
+    let out = mt.finish().unwrap();
     assert!(out.len() as u64 > written.compressed);
 }
 

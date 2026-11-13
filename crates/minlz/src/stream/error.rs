@@ -42,8 +42,8 @@ pub enum Error {
     Block(BlockError),
     /// An underlying I/O error from the wrapped reader/writer.
     Io(io::Error),
-    /// A builder was given an invalid option (block size, padding,
-    /// concurrency, …). Returned by the `build` methods; carries a short,
+    /// A builder was given an invalid option (block size, padding, user chunk id). The `build`
+    /// methods return it inside an [`io::ErrorKind::InvalidInput`] error; carries a short,
     /// stable reason for diagnostics — do not match on its exact text.
     Config(&'static str),
 }

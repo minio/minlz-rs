@@ -2322,3 +2322,30 @@ fn builder_rejects_bad_config() {
         ReaderBuilder::new().max_block_size(0).build(empty())
     ));
 }
+
+#[test]
+fn decode_concurrent_callback_panic_returns() {
+    let mut w = crate::stream::Writer::new(Vec::new());
+    w.write_all(&[7u8; 100_000]).unwrap();
+    w.add_user_chunk(0x80, b"boom").unwrap();
+    w.write_all(&[8u8; 100_000]).unwrap();
+    let stream = w.finish().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ReaderBuilder::new()
+                .user_chunk_callback(0x80, |_, _| panic!("callback panic"))
+                .build(Cursor::new(&stream))
+                .unwrap()
+                .decode_concurrent(Vec::new(), 2)
+                .map(drop)
+        }));
+        let _ = tx.send(res.is_err());
+    });
+    let panicked = rx.recv_timeout(std::time::Duration::from_secs(10));
+    assert_eq!(
+        panicked,
+        Ok(true),
+        "decode_concurrent must unwind, not hang"
+    );
+}

@@ -64,8 +64,8 @@ pub struct ReaderBuilder {
     ignore_stream_id: bool,
     ignore_crc: bool,
     callbacks: [Option<UserChunkCb>; USER_CB_COUNT],
-    /// A callback id outside the user chunk range, reported by `build`.
-    bad_callback_id: Option<u8>,
+    /// A callback was registered for an id outside the user chunk range, reported by `build`.
+    bad_callback_id: bool,
 }
 
 impl Default for ReaderBuilder {
@@ -75,7 +75,7 @@ impl Default for ReaderBuilder {
             ignore_stream_id: false,
             ignore_crc: false,
             callbacks: std::array::from_fn(|_| None),
-            bad_callback_id: None,
+            bad_callback_id: false,
         }
     }
 }
@@ -131,7 +131,7 @@ impl ReaderBuilder {
             Some(i) if id <= MAX_USER_NON_SKIPPABLE_CHUNK => {
                 self.callbacks[i as usize] = Some(Box::new(cb));
             }
-            _ => self.bad_callback_id = Some(id),
+            _ => self.bad_callback_id = true,
         }
         self
     }
@@ -143,7 +143,7 @@ impl ReaderBuilder {
     /// exceeds `MAX_BLOCK_SIZE`, or a user chunk callback was registered for an id outside
     /// `0x80..=0xfd`.
     pub fn build<R: Read>(self, r: R) -> io::Result<Reader<R>> {
-        if self.bad_callback_id.is_some() {
+        if self.bad_callback_id {
             return Err(Error::Config("user chunk callback id must be in 0x80..=0xfd").into());
         }
         if self.max_block_size == 0 || self.max_block_size > MAX_BLOCK_SIZE {

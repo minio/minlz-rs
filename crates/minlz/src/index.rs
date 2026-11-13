@@ -37,9 +37,6 @@ pub(crate) enum Error {
     /// A decoded field violated an invariant: out of range, non-monotonic,
     /// negative, or too many entries.
     Invalid(&'static str),
-    /// An I/O error from the underlying reader/seeker (only from
-    /// [`Index::load_stream`] and [`index_stream`]).
-    Io(io::Error),
 }
 
 impl fmt::Display for Error {
@@ -48,30 +45,15 @@ impl fmt::Display for Error {
             Error::Truncated => f.write_str("minlz index: truncated"),
             Error::BadFormat(m) => write!(f, "minlz index: {m}"),
             Error::Invalid(m) => write!(f, "minlz index: {m}"),
-            Error::Io(e) => write!(f, "minlz index: I/O error: {e}"),
         }
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Self {
-        Error::Io(e)
-    }
-}
+impl std::error::Error for Error {}
 
 impl From<Error> for io::Error {
     fn from(e: Error) -> io::Error {
         match e {
-            Error::Io(inner) => inner,
             Error::Truncated => {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "minlz index: truncated")
             }
@@ -527,7 +509,7 @@ impl Index {
     /// Load an index by seeking to the end of `rs`, finding the trailer,
     /// then reading the index chunk.  Matches Go `Index.LoadStream`.
     pub fn load_stream<R: Read + Seek>(&mut self, rs: &mut R) -> io::Result<()> {
-        rs.seek(SeekFrom::End(-10))?; // io::Error -> Error::Io
+        rs.seek(SeekFrom::End(-10))?;
         let mut tail = [0u8; 10];
         rs.read_exact(&mut tail)?;
         if &tail[4..4 + INDEX_TRAILER.len()] != INDEX_TRAILER.as_slice() {
