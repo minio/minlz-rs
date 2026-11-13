@@ -141,6 +141,13 @@ fn written_reports_byte_counts() {
     let written = mt.written();
     assert_eq!(written.uncompressed, payload.len() as u64);
     assert_eq!(written, st.written());
+    // A user chunk last before the flush counts too.
+    mt.add_user_chunk(0x80, b"meta").unwrap();
+    st.add_user_chunk(0x80, b"meta").unwrap();
+    mt.flush().unwrap();
+    st.flush().unwrap();
+    let written = mt.written();
+    assert_eq!(written, st.written());
     // After finish there's the EOF chunk too.
     let out = mt.finish().unwrap();
     assert!(out.len() as u64 > written.compressed);

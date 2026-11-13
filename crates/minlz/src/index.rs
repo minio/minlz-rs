@@ -49,8 +49,6 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
-
 impl From<Error> for io::Error {
     fn from(e: Error) -> io::Error {
         match e {

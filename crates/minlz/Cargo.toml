@@ -25,6 +25,26 @@ unstable-internals = []
 name = "bench"
 path = "examples/bench.rs"
 
+[[test]]
+name = "pivco_allocs"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "pivco_hist_4g"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "pivco_hist_fallback"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "simd_decode_allocs"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "simd_fixtures"
+required-features = ["unstable-internals"]
+
 [[bench]]
 name = "block"
 harness = false
@@ -36,10 +56,12 @@ harness = false
 [[bench]]
 name = "pivco"
 harness = false
+required-features = ["unstable-internals"]
 
 [[bench]]
 name = "xxh3"
 harness = false
+required-features = ["unstable-internals"]
 
 [dev-dependencies]
 minlz = { package = "minio-minlz", path = ".", features = ["unstable-internals"] }
