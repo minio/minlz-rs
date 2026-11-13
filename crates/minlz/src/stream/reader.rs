@@ -94,7 +94,7 @@ impl ReaderBuilder {
     /// chunk of that block size is [`Error::Corrupt`].
     ///
     /// `n` must be in `(0, MAX_BLOCK_SIZE]`; an out-of-range value is
-    /// reported as [`Error::Config`] by [`ReaderBuilder::build`].
+    /// reported by [`ReaderBuilder::build`].
     pub fn max_block_size(mut self, n: usize) -> Self {
         self.max_block_size = n;
         self
@@ -139,18 +139,15 @@ impl ReaderBuilder {
     /// Consume the builder and wrap `r` in a [`Reader`].
     ///
     /// # Errors
-    /// [`Error::Config`] if `max_block_size` is `0` or exceeds `MAX_BLOCK_SIZE`, or a user chunk
-    /// callback was registered for an id outside `0x80..=0xfd`.
-    pub fn build<R: Read>(self, r: R) -> Result<Reader<R>> {
+    /// [`io::ErrorKind::InvalidInput`] carrying an [`Error::Config`] if `max_block_size` is `0` or
+    /// exceeds `MAX_BLOCK_SIZE`, or a user chunk callback was registered for an id outside
+    /// `0x80..=0xfd`.
+    pub fn build<R: Read>(self, r: R) -> io::Result<Reader<R>> {
         if self.bad_callback_id.is_some() {
-            return Err(Error::Config(
-                "user chunk callback id must be in 0x80..=0xfd",
-            ));
+            return Err(Error::Config("user chunk callback id must be in 0x80..=0xfd").into());
         }
         if self.max_block_size == 0 || self.max_block_size > MAX_BLOCK_SIZE {
-            return Err(Error::Config(
-                "max_block_size must be in (0, MAX_BLOCK_SIZE]",
-            ));
+            return Err(Error::Config("max_block_size must be in (0, MAX_BLOCK_SIZE]").into());
         }
         Ok(Reader::with_builder(r, self))
     }

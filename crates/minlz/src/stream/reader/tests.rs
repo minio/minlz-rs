@@ -1524,7 +1524,7 @@ fn reader_simd_chunks() {
             }
         }),
         ("IndexStream", false, |s, _| {
-            crate::index::index_stream(s).map(drop).map_err(Into::into)
+            crate::index::index_stream(s).map(drop)
         }),
     ];
     for (name, stream, ok, want) in &tests {
@@ -1686,9 +1686,7 @@ fn reader_block_type_mismatch() {
                 let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(s)), &index)?;
                 rs.read_at(&mut [0; 10], off).map(drop)
             }),
-            ("IndexStream", &|s| {
-                crate::index::index_stream(s).map(drop).map_err(Into::into)
-            }),
+            ("IndexStream", &|s| crate::index::index_stream(s).map(drop)),
         ];
         for (r, read) in readers {
             read(&good).unwrap_or_else(|e| panic!("{name}/{r}: valid stream: {e}"));
@@ -2299,12 +2297,20 @@ fn decode_concurrent_into_borrowed_sink() {
 #[test]
 fn builder_rejects_bad_config() {
     let empty = || Cursor::new(Vec::<u8>::new());
+    let is_config = |res: io::Result<Reader<Cursor<Vec<u8>>>>| {
+        let e = res.err().expect("config error");
+        e.kind() == io::ErrorKind::InvalidInput
+            && matches!(
+                e.get_ref().and_then(|e| e.downcast_ref()),
+                Some(Error::Config(_))
+            )
+    };
     let cb = |_: u8, _: &[u8]| Ok(());
     for id in [0x00, 0x7f, 0xfe, 0xff] {
         let res = ReaderBuilder::new()
             .user_chunk_callback(id, cb)
             .build(empty());
-        assert!(matches!(res, Err(Error::Config(_))), "id 0x{id:02x}");
+        assert!(is_config(res), "id 0x{id:02x}");
     }
     for id in [0x80, 0xfd] {
         let res = ReaderBuilder::new()
@@ -2312,6 +2318,7 @@ fn builder_rejects_bad_config() {
             .build(empty());
         assert!(res.is_ok(), "id 0x{id:02x}");
     }
-    let res = ReaderBuilder::new().max_block_size(0).build(empty());
-    assert!(matches!(res, Err(Error::Config(_))));
+    assert!(is_config(
+        ReaderBuilder::new().max_block_size(0).build(empty())
+    ));
 }

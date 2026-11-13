@@ -14,7 +14,7 @@
 
 //! Tests ported from Go `index_test.go` plus Rust-specific edge cases.
 
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 
 use super::*;
 use crate::stream::Reader as StreamReader;
@@ -106,7 +106,7 @@ fn add_rejects_decreasing_offset() {
     idx.reset(1 << 20);
     idx.add(100, 1 << 20).unwrap();
     let err = idx.add(99, 2 << 20).unwrap_err();
-    assert!(matches!(err, Error::Invalid(_)));
+    assert!(matches!(err.kind(), io::ErrorKind::InvalidData));
 }
 
 #[test]
@@ -118,7 +118,10 @@ fn add_rejects_decreasing_uncompressed_offset() {
         }
         idx.add(0, 2 << 20).unwrap();
         let res = idx.add(10, 1 << 20);
-        assert!(matches!(res, Err(Error::Invalid(_))), "est {est}: {res:?}");
+        assert!(
+            matches!(err_kind(&res), Some(io::ErrorKind::InvalidData)),
+            "est {est}: {res:?}"
+        );
         let mut buf = Vec::new();
         idx.append_to(&mut buf, Some(3 << 20), None).unwrap();
         Index::default().load(&buf).unwrap();
@@ -164,7 +167,10 @@ fn find_big_index_binary_search() {
 #[test]
 fn load_rejects_short_buffer() {
     let mut idx = Index::default();
-    assert!(matches!(idx.load(&[0; 8]).unwrap_err(), Error::Truncated));
+    assert!(matches!(
+        idx.load(&[0; 8]).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    ));
 }
 
 #[test]
@@ -175,7 +181,10 @@ fn load_rejects_wrong_chunk_type() {
         .append_to(&mut buf, Some(0), Some(0))
         .unwrap();
     buf[0] = 0x80;
-    assert!(matches!(idx.load(&buf).unwrap_err(), Error::BadFormat(_)));
+    assert!(matches!(
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    ));
 }
 
 #[test]
@@ -199,7 +208,10 @@ fn load_rejects_bad_trailer() {
     let last = buf.len() - 1;
     buf[last] ^= 0xFF;
     let mut idx = Index::default();
-    assert!(matches!(idx.load(&buf).unwrap_err(), Error::BadFormat(_)));
+    assert!(matches!(
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    ));
 }
 
 #[test]
@@ -211,8 +223,8 @@ fn load_rejects_truncated_chunk() {
     buf.truncate(buf.len() - 1);
     let mut idx = Index::default();
     assert!(matches!(
-        idx.load(&buf).unwrap_err(),
-        Error::Truncated | Error::BadFormat(_)
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::Unsupported
     ));
 }
 
@@ -300,8 +312,8 @@ fn load_stream_rejects_when_trailer_missing() {
     let mut cur = Cursor::new(stream);
     let mut idx = Index::default();
     assert!(matches!(
-        idx.load_stream(&mut cur).unwrap_err(),
-        Error::BadFormat(_)
+        idx.load_stream(&mut cur).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
     ));
 }
 
@@ -535,7 +547,10 @@ fn add_rejects_decreasing_compressed_offset() {
     // 51ce6ee).
     for u in [(1 << 20) + 100, 2 << 20] {
         let res = idx.add(999, u);
-        assert!(matches!(res, Err(Error::Invalid(_))), "{u}: {res:?}");
+        assert!(
+            matches!(err_kind(&res), Some(io::ErrorKind::InvalidData)),
+            "{u}: {res:?}"
+        );
     }
     assert_eq!(idx.offsets.len(), 1);
 }
@@ -573,7 +588,10 @@ fn add_same_uncompressed_rejects_decreasing_compressed() {
     idx.reset(1 << 20);
     idx.add(100, 0).unwrap();
     idx.add(5000, 1 << 20).unwrap();
-    assert!(matches!(idx.add(50, 1 << 20), Err(Error::Invalid(_))));
+    assert!(matches!(
+        err_kind(&idx.add(50, 1 << 20)),
+        Some(io::ErrorKind::InvalidData)
+    ));
     let mut buf = Vec::new();
     idx.append_to(&mut buf, Some(2 << 20), None).unwrap();
     Index::default().load(&buf).unwrap();
@@ -584,7 +602,10 @@ fn add_new_entry_rejects_equal_compressed() {
     let mut idx = Index::default();
     idx.reset(1 << 20);
     idx.add(100, 0).unwrap();
-    assert!(matches!(idx.add(100, 1 << 20), Err(Error::Invalid(_))));
+    assert!(matches!(
+        err_kind(&idx.add(100, 1 << 20)),
+        Some(io::ErrorKind::InvalidData)
+    ));
     assert_eq!(idx.offsets.len(), 1);
     let mut buf = Vec::new();
     idx.append_to(&mut buf, Some(2 << 20), None).unwrap();
@@ -766,7 +787,10 @@ fn load_rejects_entries_above_max() {
     buf[2] = (chunk_len >> 8) as u8;
     buf[3] = (chunk_len >> 16) as u8;
     let mut idx = Index::default();
-    assert!(matches!(idx.load(&buf).unwrap_err(), Error::Invalid(_)));
+    assert!(matches!(
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    ));
 }
 
 #[test]
@@ -779,7 +803,10 @@ fn load_rejects_negative_total_uncompressed() {
     // The first varint sits at offset 4 + INDEX_HEADER.len() = 10.
     buf[10] = 1; // zigzag(-1) = 1 → decoded as -1
     let mut idx2 = Index::default();
-    assert!(matches!(idx2.load(&buf).unwrap_err(), Error::Invalid(_)));
+    assert!(matches!(
+        idx2.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    ));
 }
 
 #[test]
@@ -789,10 +816,13 @@ fn load_stream_short_file_errors() {
     let mut cur = Cursor::new(stream);
     let mut idx = Index::default();
     let err = idx.load_stream(&mut cur).unwrap_err();
-    // No trailer (BadFormat) or a seek/read I/O error — both acceptable;
+    // No trailer (Unsupported) or a seek/read I/O error — both acceptable;
     // just ensure it doesn't panic.
     assert!(
-        matches!(err, Error::BadFormat(_) | Error::Io(_)),
+        matches!(
+            err.kind(),
+            io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof
+        ),
         "err={err:?}"
     );
 }
@@ -1154,8 +1184,14 @@ fn add_rejects_offset_beyond_i64_range() {
     // `add` must reject them instead of wrapping at encode time.
     let too_big = i64::MAX as u64 + 1;
     let mut idx = Index::default();
-    assert!(matches!(idx.add(0, too_big), Err(Error::Invalid(_))));
-    assert!(matches!(idx.add(too_big, 0), Err(Error::Invalid(_))));
+    assert!(matches!(
+        err_kind(&idx.add(0, too_big)),
+        Some(io::ErrorKind::InvalidData)
+    ));
+    assert!(matches!(
+        err_kind(&idx.add(too_big, 0)),
+        Some(io::ErrorKind::InvalidData)
+    ));
     // A value exactly at the boundary is accepted.
     assert!(idx.add(0, i64::MAX as u64).is_ok());
 }
@@ -1167,12 +1203,12 @@ fn append_to_rejects_total_beyond_i64_range() {
     idx.add(0, 0).unwrap();
     let mut buf = Vec::new();
     assert!(matches!(
-        idx.append_to(&mut buf, Some(too_big), Some(0)),
-        Err(Error::Invalid(_))
+        err_kind(&idx.append_to(&mut buf, Some(too_big), Some(0))),
+        Some(io::ErrorKind::InvalidData)
     ));
     assert!(matches!(
-        idx.append_to(&mut buf, Some(0), Some(too_big)),
-        Err(Error::Invalid(_))
+        err_kind(&idx.append_to(&mut buf, Some(0), Some(too_big))),
+        Some(io::ErrorKind::InvalidData)
     ));
     // Known-good totals still encode.
     buf.clear();
@@ -1205,4 +1241,8 @@ fn index_max_entries() {
             i.offsets().len()
         );
     }
+}
+
+fn err_kind<T>(res: &io::Result<T>) -> Option<io::ErrorKind> {
+    res.as_ref().err().map(io::Error::kind)
 }

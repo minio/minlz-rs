@@ -144,16 +144,16 @@ impl WriterBuilder {
     /// Consume the builder and wrap `w` in a [`Writer`].
     ///
     /// # Errors
-    /// [`Error::Config`] if `block_size` is outside `[MIN_BLOCK_SIZE,
-    /// MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
-    pub fn build<W: Write>(self, w: W) -> Result<Writer<W>, Error> {
+    /// [`io::ErrorKind::InvalidInput`] carrying an [`Error::Config`] if `block_size` is outside
+    /// `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
+    pub fn build<W: Write>(self, w: W) -> io::Result<Writer<W>> {
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&self.block_size) {
-            return Err(Error::Config(
-                "block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]",
-            ));
+            return Err(
+                Error::Config("block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]").into(),
+            );
         }
         if self.padding as usize > MAX_BLOCK_SIZE {
-            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE"));
+            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE").into());
         }
         Ok(Writer::with_builder(w, self))
     }

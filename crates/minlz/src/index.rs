@@ -26,14 +26,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::stream::{MAX_BLOCK_SIZE, MAX_USER_CHUNK_SIZE};
 
-/// Errors from index parsing, construction, and seeking.
-///
-/// Carries a description and maps onto a sensible [`io::ErrorKind`] when
-/// converted to [`io::Error`] (`Truncated` → `UnexpectedEof`, `BadFormat` →
-/// `Unsupported`, `Invalid` → `InvalidData`).
+/// Errors from index parsing and construction. The public API returns them as [`io::Error`]s:
+/// `Truncated` → `UnexpectedEof`, `BadFormat` → `Unsupported`, `Invalid` → `InvalidData`.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum Error {
+pub(crate) enum Error {
     /// The index data ended mid-parse (truncated chunk, varint, or trailer).
     Truncated,
     /// Not a MinLZ index: wrong chunk type, header, or trailer.
@@ -90,7 +86,7 @@ impl From<Error> for io::Error {
 }
 
 /// Specialized [`Result`] for index operations.
-pub type Result<T> = core::result::Result<T, Error>;
+pub(crate) type Result<T> = core::result::Result<T, Error>;
 
 /// MinLZ index chunk ID.
 pub const CHUNK_TYPE_INDEX: u8 = 0x40;
@@ -198,30 +194,30 @@ impl Index {
     /// order.
     ///
     /// Matches Go `Index.add`:
-    /// * An offset below the last entry's is rejected ([`Error::Invalid`]),
+    /// * An offset below the last entry's is rejected ([`io::ErrorKind::InvalidData`]),
     ///   even where the entry would be skipped.
     /// * An entry at the last entry's uncompressed offset replaces its compressed
     ///   offset, so the index points at the block after the chunks before it.
     /// * If the uncompressed gap from the last entry is `< est_block_uncomp`,
     ///   the call is a no-op — used to thin the index during writing.
     /// * Otherwise a compressed offset equal to the last entry's is rejected
-    ///   ([`Error::Invalid`]), where Go accepts it.
+    ///   ([`io::ErrorKind::InvalidData`]), where Go accepts it.
     /// * After insertion, if the entry count would exceed 65 535, the
     ///   internal `reduce_light` shrinker doubles `est_block_uncomp` and
     ///   re-thins entries in place.
-    pub fn add(&mut self, compressed: u64, uncompressed: u64) -> Result<()> {
+    pub fn add(&mut self, compressed: u64, uncompressed: u64) -> io::Result<()> {
         // The wire format encodes offsets as signed (zigzag) varints, so a
         // value past `i64::MAX` cannot round-trip. Reject it here rather than
         // silently wrapping at encode time.
         if compressed > i64::MAX as u64 || uncompressed > i64::MAX as u64 {
-            return Err(Error::Invalid("offset exceeds i64 wire range"));
+            return Err(Error::Invalid("offset exceeds i64 wire range").into());
         }
         if let Some(latest) = self.offsets.last_mut() {
             if latest.uncompressed > uncompressed {
-                return Err(Error::Invalid("uncompressed offset decreased"));
+                return Err(Error::Invalid("uncompressed offset decreased").into());
             }
             if latest.compressed > compressed {
-                return Err(Error::Invalid("compressed offset decreased"));
+                return Err(Error::Invalid("compressed offset decreased").into());
             }
             if uncompressed == latest.uncompressed {
                 latest.compressed = compressed;
@@ -231,7 +227,7 @@ impl Index {
                 return Ok(());
             }
             if latest.compressed == compressed {
-                return Err(Error::Invalid("compressed offset not increasing"));
+                return Err(Error::Invalid("compressed offset not increasing").into());
             }
         }
         self.offsets.push(OffsetPair {
@@ -330,7 +326,7 @@ impl Index {
     /// Matches Go `Index.appendTo`.
     ///
     /// # Errors
-    /// [`Error::Invalid`] if either total exceeds `i64::MAX`; the signed wire
+    /// [`io::ErrorKind::InvalidData`] if either total exceeds `i64::MAX`; the signed wire
     /// format cannot represent it. (Stored offsets are already bounded by
     /// [`add`](Self::add).)
     pub fn append_to(
@@ -338,10 +334,10 @@ impl Index {
         buf: &mut Vec<u8>,
         total_uncomp: Option<u64>,
         total_comp: Option<u64>,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         for t in [total_uncomp, total_comp].into_iter().flatten() {
             if t > i64::MAX as u64 {
-                return Err(Error::Invalid("index total exceeds i64 wire range"));
+                return Err(Error::Invalid("index total exceeds i64 wire range").into());
             }
         }
         self.reduce();
@@ -410,28 +406,28 @@ impl Index {
     /// chunk and the legacy 0x99 chunk; matches Go `Index.Load`.
     ///
     /// Returns the unconsumed tail (bytes after the chunk's trailer).
-    pub fn load<'a>(&mut self, bytes: &'a [u8]) -> Result<&'a [u8]> {
+    pub fn load<'a>(&mut self, bytes: &'a [u8]) -> io::Result<&'a [u8]> {
         if bytes.len() <= 4 + INDEX_HEADER.len() + INDEX_TRAILER.len() {
-            return Err(Error::Truncated);
+            return Err(Error::Truncated.into());
         }
         if bytes[0] != CHUNK_TYPE_INDEX && bytes[0] != LEGACY_INDEX_CHUNK {
-            return Err(Error::BadFormat("bad chunk type"));
+            return Err(Error::BadFormat("bad chunk type").into());
         }
         let chunk_len =
             (bytes[1] as usize) | ((bytes[2] as usize) << 8) | ((bytes[3] as usize) << 16);
         let mut b = &bytes[4..];
         if b.len() < chunk_len {
-            return Err(Error::Truncated);
+            return Err(Error::Truncated.into());
         }
         if &b[..INDEX_HEADER.len()] != INDEX_HEADER.as_slice() {
-            return Err(Error::BadFormat("bad header"));
+            return Err(Error::BadFormat("bad header").into());
         }
         b = &b[INDEX_HEADER.len()..];
 
         let (v, n) = read_varint(b)?;
         if v < 0 {
             // The uncompressed total is always known in a valid index.
-            return Err(Error::Invalid("negative total uncompressed"));
+            return Err(Error::Invalid("negative total uncompressed").into());
         }
         self.total_uncompressed = Some(v as u64);
         b = &b[n..];
@@ -442,14 +438,14 @@ impl Index {
 
         let (v, n) = read_varint(b)?;
         if v < 0 {
-            return Err(Error::Invalid("negative est_block"));
+            return Err(Error::Invalid("negative est_block").into());
         }
         self.est_block_uncomp = v as u64;
         b = &b[n..];
 
         let (v, n) = read_varint(b)?;
         if v < 0 || v > MAX_INDEX_ENTRIES as i64 {
-            return Err(Error::Invalid("entry count out of range"));
+            return Err(Error::Invalid("entry count out of range").into());
         }
         let entries = v as usize;
         b = &b[n..];
@@ -462,12 +458,12 @@ impl Index {
         self.offsets.resize(entries, OffsetPair::default());
 
         if b.is_empty() {
-            return Err(Error::Truncated);
+            return Err(Error::Truncated.into());
         }
         let has_uncomp = b[0];
         b = &b[1..];
         if has_uncomp > 1 {
-            return Err(Error::BadFormat("invalid has_uncompressed byte"));
+            return Err(Error::BadFormat("invalid has_uncompressed byte").into());
         }
 
         let est = self.est_block_uncomp as i64;
@@ -485,11 +481,11 @@ impl Index {
                     .and_then(|s| u_off.checked_add(s))
                     .ok_or(Error::Invalid("uncompressed offset overflow"))?;
                 if u_off <= prev {
-                    return Err(Error::Invalid("non-monotonic uncompressed offset"));
+                    return Err(Error::Invalid("non-monotonic uncompressed offset").into());
                 }
             }
             if u_off < 0 {
-                return Err(Error::Invalid("negative uncompressed offset"));
+                return Err(Error::Invalid("negative uncompressed offset").into());
             }
             self.offsets[idx].uncompressed = u_off as u64;
         }
@@ -508,38 +504,38 @@ impl Index {
                     .and_then(|s| c_off.checked_add(s))
                     .ok_or(Error::Invalid("compressed offset overflow"))?;
                 if c_off <= prev {
-                    return Err(Error::Invalid("non-monotonic compressed offset"));
+                    return Err(Error::Invalid("non-monotonic compressed offset").into());
                 }
                 c_predict = predict_next;
             }
             if c_off < 0 {
-                return Err(Error::Invalid("negative compressed offset"));
+                return Err(Error::Invalid("negative compressed offset").into());
             }
             self.offsets[idx].compressed = c_off as u64;
         }
 
         if b.len() < 4 + INDEX_TRAILER.len() {
-            return Err(Error::Truncated);
+            return Err(Error::Truncated.into());
         }
         b = &b[4..]; // stored size, redundant with chunk header
         if &b[..INDEX_TRAILER.len()] != INDEX_TRAILER.as_slice() {
-            return Err(Error::BadFormat("bad trailer"));
+            return Err(Error::BadFormat("bad trailer").into());
         }
         Ok(&b[INDEX_TRAILER.len()..])
     }
 
     /// Load an index by seeking to the end of `rs`, finding the trailer,
     /// then reading the index chunk.  Matches Go `Index.LoadStream`.
-    pub fn load_stream<R: Read + Seek>(&mut self, rs: &mut R) -> Result<()> {
+    pub fn load_stream<R: Read + Seek>(&mut self, rs: &mut R) -> io::Result<()> {
         rs.seek(SeekFrom::End(-10))?; // io::Error -> Error::Io
         let mut tail = [0u8; 10];
         rs.read_exact(&mut tail)?;
         if &tail[4..4 + INDEX_TRAILER.len()] != INDEX_TRAILER.as_slice() {
-            return Err(Error::BadFormat("trailer not found"));
+            return Err(Error::BadFormat("trailer not found").into());
         }
         let sz = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
         if sz as usize > MAX_USER_CHUNK_SIZE + SKIPPABLE_FRAME_HEADER {
-            return Err(Error::Invalid("size exceeds maximum"));
+            return Err(Error::Invalid("size exceeds maximum").into());
         }
         rs.seek(SeekFrom::End(-(sz as i64)))?;
         let mut buf = vec![0u8; sz as usize];
@@ -593,7 +589,7 @@ impl Index {
 /// separately).
 ///
 /// Matches Go `IndexStream`.
-pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
+pub fn index_stream<R: Read>(mut r: R) -> io::Result<Vec<u8>> {
     let mut idx = Index::new();
     let mut comp_pos: u64 = 0;
     let mut uncomp_pos: u64 = 0;
@@ -617,7 +613,7 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
         let chunk_type = hdr[0];
         if !read_header {
             if chunk_type != CHUNK_TYPE_STREAM_IDENTIFIER && chunk_type != CHUNK_TYPE_EOF {
-                return Err(Error::BadFormat("missing stream identifier"));
+                return Err(Error::BadFormat("missing stream identifier").into());
             }
             read_header = true;
         }
@@ -633,13 +629,13 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
             | CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC
             | CHUNK_TYPE_MINLZ_SIMD => {
                 if chunk_len < CHECKSUM_SIZE {
-                    return Err(Error::Invalid("data chunk shorter than CRC"));
+                    return Err(Error::Invalid("data chunk shorter than CRC").into());
                 }
                 let block = &body[CHECKSUM_SIZE..];
                 let d_len = match chunk_type {
                     CHUNK_TYPE_MINLZ_SIMD => {
                         if !simd {
-                            return Err(Error::Invalid("SIMD chunk without the stream flag"));
+                            return Err(Error::Invalid("SIMD chunk without the stream flag").into());
                         }
                         crate::stream::simd_chunk_header(body, MAX_BLOCK_SIZE)
                             .map_err(|_| Error::Invalid("bad SIMD block header"))?
@@ -655,7 +651,7 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
                         .map_err(|_| Error::Invalid("bad block size header"))?,
                 };
                 if d_len > MAX_BLOCK_SIZE {
-                    return Err(Error::Invalid("block exceeds max size"));
+                    return Err(Error::Invalid("block exceeds max size").into());
                 }
                 // An empty chunk would add an entry at the same offset, and
                 // while est_block_uncomp is 0 nothing thins those out.
@@ -670,11 +666,11 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
             }
             CHUNK_TYPE_UNCOMPRESSED_DATA => {
                 if chunk_len < CHECKSUM_SIZE {
-                    return Err(Error::Invalid("uncompressed chunk shorter than CRC"));
+                    return Err(Error::Invalid("uncompressed chunk shorter than CRC").into());
                 }
                 let n2 = chunk_len - CHECKSUM_SIZE;
                 if n2 > MAX_BLOCK_SIZE {
-                    return Err(Error::Invalid("uncompressed block exceeds max size"));
+                    return Err(Error::Invalid("uncompressed block exceeds max size").into());
                 }
                 if n2 == 0 {
                     continue;
@@ -687,21 +683,21 @@ pub fn index_stream<R: Read>(mut r: R) -> Result<Vec<u8>> {
             }
             CHUNK_TYPE_STREAM_IDENTIFIER => {
                 if chunk_len != MAGIC_BODY_LEN {
-                    return Err(Error::BadFormat("bad stream identifier length"));
+                    return Err(Error::BadFormat("bad stream identifier length").into());
                 }
                 let magic = &body[..MAGIC_BODY_LEN];
                 if !magic.starts_with(MAGIC_BODY_MINLZ)
                     && magic != MAGIC_BODY_S2
                     && magic != MAGIC_BODY_SNAPPY
                 {
-                    return Err(Error::BadFormat("unknown stream magic"));
+                    return Err(Error::BadFormat("unknown stream magic").into());
                 }
                 simd = magic.starts_with(MAGIC_BODY_MINLZ)
                     && magic[MAGIC_BODY_LEN - 1] & STREAM_FLAG_SIMD != 0;
             }
             CHUNK_TYPE_EOF => {}
             t if t <= MAX_NON_SKIPPABLE_CHUNK => {
-                return Err(Error::BadFormat("reserved unskippable chunk"));
+                return Err(Error::BadFormat("reserved unskippable chunk").into());
             }
             _ => {} // skippable / padding / user chunks
         }

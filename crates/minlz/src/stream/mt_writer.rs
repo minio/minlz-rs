@@ -325,16 +325,16 @@ impl MtWriterBuilder {
     /// Consume the builder and wrap `w`.
     ///
     /// # Errors
-    /// [`Error::Config`] if `block_size` is outside `[MIN_BLOCK_SIZE,
-    /// MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
-    pub fn build<W: Write + Send + 'static>(self, w: W) -> Result<MtWriter<W>, Error> {
+    /// [`io::ErrorKind::InvalidInput`] carrying an [`Error::Config`] if `block_size` is outside
+    /// `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
+    pub fn build<W: Write + Send + 'static>(self, w: W) -> io::Result<MtWriter<W>> {
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&self.block_size) {
-            return Err(Error::Config(
-                "block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]",
-            ));
+            return Err(
+                Error::Config("block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]").into(),
+            );
         }
         if self.padding as usize > MAX_BLOCK_SIZE {
-            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE"));
+            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE").into());
         }
         let concurrency = super::worker_count(self.concurrency);
         Ok(MtWriter::with_builder(w, self, concurrency))
@@ -828,7 +828,7 @@ fn writer_loop<W: Write + Send + 'static>(
                     // Index entries are the offsets at the start of the chunk.
                     if let Some(idx) = index.as_mut() {
                         idx.add(comp_written, uncomp_written)
-                            .map_err(|e| record(&err_slot, e.into()))?;
+                            .map_err(|e| record(&err_slot, e))?;
                     }
                     let (res, chunk_len, input) = match out {
                         Encoded::Chunk { buf, len, input } => {
@@ -865,7 +865,7 @@ fn writer_loop<W: Write + Send + 'static>(
                 None
             };
             idx.append_to(&mut idx_bytes, Some(uncomp_written), comp_total)
-                .map_err(|e| record(&err_slot, e.into()))?;
+                .map_err(|e| record(&err_slot, e))?;
             if append_index {
                 comp_written += idx_bytes.len() as u64;
             }

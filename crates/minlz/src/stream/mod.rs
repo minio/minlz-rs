@@ -55,7 +55,7 @@ pub(crate) fn worker_count(n: usize) -> usize {
     std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
 }
 
-pub use error::{Error, Result};
+pub use error::Error;
 pub use format::{
     CHUNK_TYPE_PADDING, CHUNK_TYPE_STREAM_IDENTIFIER, DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE,
     MAX_USER_CHUNK_SIZE, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_USER_SKIPPABLE_CHUNK, MIN_BLOCK_SIZE,
