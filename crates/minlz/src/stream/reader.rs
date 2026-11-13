@@ -44,7 +44,7 @@ use super::format::{
 ///
 /// The slice is borrowed from the reader's internal buffer and must not be
 /// retained beyond the callback invocation.
-pub type UserChunkCb = Box<dyn FnMut(u8, &[u8]) -> io::Result<()>>;
+pub type UserChunkCb = Box<dyn FnMut(u8, &[u8]) -> io::Result<()> + Send>;
 
 const USER_CB_COUNT: usize = (MAX_USER_NON_SKIPPABLE_CHUNK - MIN_USER_SKIPPABLE_CHUNK + 1) as usize;
 
@@ -64,6 +64,8 @@ pub struct ReaderBuilder {
     ignore_stream_id: bool,
     ignore_crc: bool,
     callbacks: [Option<UserChunkCb>; USER_CB_COUNT],
+    /// A callback was registered for an id outside the user chunk range, reported by `build`.
+    bad_callback_id: bool,
 }
 
 impl Default for ReaderBuilder {
@@ -73,6 +75,7 @@ impl Default for ReaderBuilder {
             ignore_stream_id: false,
             ignore_crc: false,
             callbacks: std::array::from_fn(|_| None),
+            bad_callback_id: false,
         }
     }
 }
@@ -91,7 +94,7 @@ impl ReaderBuilder {
     /// chunk of that block size is [`Error::Corrupt`].
     ///
     /// `n` must be in `(0, MAX_BLOCK_SIZE]`; an out-of-range value is
-    /// reported as [`Error::Config`] by [`ReaderBuilder::build`].
+    /// reported by [`ReaderBuilder::build`].
     pub fn max_block_size(mut self, n: usize) -> Self {
         self.max_block_size = n;
         self
@@ -119,31 +122,32 @@ impl ReaderBuilder {
     ///
     /// The callback receives `(id, payload)` and returns an [`io::Result`].
     /// An `Err` aborts decoding and is surfaced via the next read.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `id` is outside the user-defined chunk range.
+    /// An `id` outside `0x80..=0xfd` makes [`build`](Self::build) fail.
     pub fn user_chunk_callback<F>(mut self, id: u8, cb: F) -> Self
     where
-        F: FnMut(u8, &[u8]) -> io::Result<()> + 'static,
+        F: FnMut(u8, &[u8]) -> io::Result<()> + Send + 'static,
     {
-        assert!(
-            (MIN_USER_SKIPPABLE_CHUNK..=MAX_USER_NON_SKIPPABLE_CHUNK).contains(&id),
-            "user-chunk callback id must be in 0x80..=0xfd, got 0x{id:02x}"
-        );
-        self.callbacks[(id - MIN_USER_SKIPPABLE_CHUNK) as usize] = Some(Box::new(cb));
+        match id.checked_sub(MIN_USER_SKIPPABLE_CHUNK) {
+            Some(i) if id <= MAX_USER_NON_SKIPPABLE_CHUNK => {
+                self.callbacks[i as usize] = Some(Box::new(cb));
+            }
+            _ => self.bad_callback_id = true,
+        }
         self
     }
 
     /// Consume the builder and wrap `r` in a [`Reader`].
     ///
     /// # Errors
-    /// [`Error::Config`] if `max_block_size` is `0` or exceeds `MAX_BLOCK_SIZE`.
-    pub fn build<R: Read>(self, r: R) -> Result<Reader<R>> {
+    /// [`io::ErrorKind::InvalidInput`] carrying an [`Error::Config`] if `max_block_size` is `0` or
+    /// exceeds `MAX_BLOCK_SIZE`, or a user chunk callback was registered for an id outside
+    /// `0x80..=0xfd`.
+    pub fn build<R: Read>(self, r: R) -> io::Result<Reader<R>> {
+        if self.bad_callback_id {
+            return Err(Error::Config("user chunk callback id must be in 0x80..=0xfd").into());
+        }
         if self.max_block_size == 0 || self.max_block_size > MAX_BLOCK_SIZE {
-            return Err(Error::Config(
-                "max_block_size must be in (0, MAX_BLOCK_SIZE]",
-            ));
+            return Err(Error::Config("max_block_size must be in (0, MAX_BLOCK_SIZE]").into());
         }
         Ok(Reader::with_builder(r, self))
     }
@@ -228,6 +232,21 @@ impl<R: Read> Reader<R> {
         self.expect_eof = false;
         self.stream_start = 0..=0;
         self.err = None;
+    }
+
+    /// Borrow the underlying source.
+    pub fn get_ref(&self) -> &R {
+        &self.r
+    }
+
+    /// Mutably borrow the underlying source. Reading from it directly desynchronizes the reader.
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.r
+    }
+
+    /// Unwrap the underlying source. Decoded data not yet read is lost.
+    pub fn into_inner(self) -> R {
+        self.r
     }
 
     /// Uncompressed offset at the start of the block currently being drained,
@@ -417,37 +436,31 @@ impl<R: Read> Reader<R> {
     }
 
     /// Drain the rest of the stream into `w` using `threads` worker threads
-    /// for parallel block decoding.  Returns `(bytes_written, w)`.
+    /// for parallel block decoding.  Returns the sink and the bytes written to it.
     ///
     /// Must not be mixed with [`Read::read`] / [`std::io::BufRead::fill_buf`]
     /// on the same reader — calling this after consuming bytes via the
     /// single-threaded path returns [`io::ErrorKind::InvalidInput`].
     /// An error from decoding or writing is sticky: later reads return it too.
     ///
-    /// `threads >= 1` is required; `1` still spins up the MT pipeline (one
-    /// worker) — use [`Read::read`] for the lowest-overhead single-threaded
-    /// path.
+    /// `threads == 0` uses the host's available parallelism. `1` still spins up the MT pipeline
+    /// (one worker); use [`Read::read`] for the lowest-overhead single-threaded path.
     ///
     /// The buffers of each thread are sized for the largest block the reader
     /// accepts, [`ReaderBuilder::max_block_size`] until it has read a stream
     /// identifier. Setting that to the stream's block size uses less memory
     /// with small blocks.
     ///
-    /// `W: Send + 'static` is required because the writer thread spawned
-    /// inside outlives any caller-stack borrow.  Borrowed sinks
-    /// (`&mut Vec<u8>`) are not supported; wrap them in an owned adapter
-    /// (e.g. pass `Vec::new()` and copy back from the returned `W`).
+    /// `w` is written from a scoped thread, so it may be borrowed, such as `&mut Vec<u8>`.
     pub fn decode_concurrent<W>(
         &mut self,
         w: W,
         threads: usize,
     ) -> io::Result<super::ConcurrentDecode<W>>
     where
-        W: io::Write + Send + 'static,
+        W: io::Write + Send,
     {
-        let threads = super::Concurrency::new(threads)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "concurrency must be ≥ 1"))?
-            .get();
+        let threads = super::worker_count(threads);
         if self.decoded_pos < self.decoded.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

@@ -75,12 +75,11 @@ pub struct ConcurrentDecode<W> {
     pub writer: W,
 }
 
-pub(super) fn decode_concurrent_into<R: Read, W: Write + Send + 'static>(
+pub(super) fn decode_concurrent_into<R: Read, W: Write + Send>(
     reader: &mut Reader<R>,
     w: W,
     threads: usize,
 ) -> io::Result<ConcurrentDecode<W>> {
-    let threads = threads.max(1);
     // One submit channel per worker (capacity 1) for round-robin
     // dispatch — no Mutex<Receiver> contention.
     let mut submit_txs = Vec::with_capacity(threads);
@@ -97,31 +96,37 @@ pub(super) fn decode_concurrent_into<R: Read, W: Write + Send + 'static>(
     let compressed_pool = Arc::new(BufferPool::new(pool_slots, reader.max_block / 8));
     let decoded_pool = Arc::new(BufferPool::new(pool_slots, reader.max_block));
 
-    let mut workers = Vec::with_capacity(threads);
-    for rx in submit_rxs {
-        workers.push(std::thread::spawn(move || worker_loop(rx)));
-    }
-    let err_writer = err.clone();
-    let decoded_pool_w = decoded_pool.clone();
-    let writer_handle = std::thread::spawn(move || {
-        writer_loop(w, order_rx, finish_tx, err_writer, decoded_pool_w);
+    // Scoped, so the sink may borrow from the caller; every thread is joined before returning.
+    let dispatch_res = std::thread::scope(|scope| {
+        // Owned by the scope, so a panicking dispatch drops the senders and the workers exit.
+        let mut submit_txs = submit_txs;
+        let mut workers = Vec::with_capacity(threads);
+        for rx in submit_rxs {
+            workers.push(scope.spawn(move || worker_loop(rx)));
+        }
+        let err_writer = err.clone();
+        let decoded_pool_w = decoded_pool.clone();
+        let writer_handle = scope.spawn(move || {
+            writer_loop(w, order_rx, finish_tx, err_writer, decoded_pool_w);
+        });
+
+        let dispatch_res = dispatch_loop(
+            reader,
+            &mut submit_txs,
+            &order_tx,
+            &err,
+            &compressed_pool,
+            &decoded_pool,
+        );
+
+        submit_txs.clear();
+        drop(order_tx);
+        for h in workers {
+            let _ = h.join();
+        }
+        let _ = writer_handle.join();
+        dispatch_res
     });
-
-    let dispatch_res = dispatch_loop(
-        reader,
-        &mut submit_txs,
-        &order_tx,
-        &err,
-        &compressed_pool,
-        &decoded_pool,
-    );
-
-    submit_txs.clear();
-    drop(order_tx);
-    for h in workers {
-        let _ = h.join();
-    }
-    let _ = writer_handle.join();
 
     let pipeline_res = finish_rx
         .recv()
@@ -457,7 +462,7 @@ fn worker_loop(submit_rx: Receiver<DecodeJob>) {
     }
 }
 
-fn writer_loop<W: Write + Send + 'static>(
+fn writer_loop<W: Write + Send>(
     mut w: W,
     order_rx: Receiver<Receiver<DecodeOutput>>,
     finish_tx: SyncSender<io::Result<ConcurrentDecode<W>>>,

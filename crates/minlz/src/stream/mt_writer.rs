@@ -37,7 +37,6 @@ use std::time::Duration;
 use crate::block;
 use crate::index::Index;
 
-use super::Concurrency;
 use super::error::Error;
 use super::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_PADDING, DEFAULT_BLOCK_SIZE,
@@ -45,7 +44,7 @@ use super::format::{
     MIN_BLOCK_SIZE, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, make_stream_header, put_uvarint,
 };
 use super::mt_pool::BufferPool;
-use super::writer::{encode_block, put_uncompressed_header, simd_stream};
+use super::writer::{Written, encode_block, put_uncompressed_header, simd_stream};
 
 /// One item in the per-stream order queue.  The writer thread drains
 /// this in submission order and writes the bytes to `W`.
@@ -239,8 +238,7 @@ pub struct MtWriterBuilder {
     level: block::Level,
     uncompressed: bool,
     padding: u32,
-    /// Requested worker count (raw); validated into a [`Concurrency`] at
-    /// [`build`](MtWriterBuilder::build). `0` is rejected there.
+    /// Requested worker count; `0` is the host's available parallelism.
     concurrency: usize,
     generate_index: bool,
     append_index: bool,
@@ -253,7 +251,7 @@ impl Default for MtWriterBuilder {
             level: block::Level::Balanced,
             uncompressed: false,
             padding: 0,
-            concurrency: Concurrency::available().get(),
+            concurrency: 0,
             generate_index: true,
             append_index: false,
         }
@@ -296,9 +294,9 @@ impl MtWriterBuilder {
         self
     }
 
-    /// Number of worker threads to spin up.  `0` is rejected by
-    /// [`build`](Self::build); `1` still uses the MT pipeline (one worker) —
-    /// for the lowest-overhead path use [`super::Writer`].
+    /// Number of worker threads to spin up; `0` (the default) uses the host's available
+    /// parallelism. `1` still uses the MT pipeline (one worker); for the lowest-overhead path use
+    /// [`super::Writer`].
     pub fn concurrency(mut self, n: usize) -> Self {
         self.concurrency = n;
         self
@@ -327,21 +325,18 @@ impl MtWriterBuilder {
     /// Consume the builder and wrap `w`.
     ///
     /// # Errors
-    /// [`Error::Config`] if `block_size` is outside `[MIN_BLOCK_SIZE,
-    /// MAX_BLOCK_SIZE]`, `padding` exceeds `MAX_BLOCK_SIZE`, or `concurrency`
-    /// was set to `0`.
-    pub fn build<W: Write + Send + 'static>(self, w: W) -> Result<MtWriter<W>, Error> {
+    /// [`io::ErrorKind::InvalidInput`] carrying an [`Error::Config`] if `block_size` is outside
+    /// `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
+    pub fn build<W: Write + Send + 'static>(self, w: W) -> io::Result<MtWriter<W>> {
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&self.block_size) {
-            return Err(Error::Config(
-                "block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]",
-            ));
+            return Err(
+                Error::Config("block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]").into(),
+            );
         }
         if self.padding as usize > MAX_BLOCK_SIZE {
-            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE"));
+            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE").into());
         }
-        let concurrency = Concurrency::new(self.concurrency)
-            .ok_or(Error::Config("concurrency must be ≥ 1"))?
-            .get();
+        let concurrency = super::worker_count(self.concurrency);
         Ok(MtWriter::with_builder(w, self, concurrency))
     }
 }
@@ -378,12 +373,14 @@ pub struct MtWriter<W: Write + Send + 'static> {
     /// write fails.  Read by [`MtWriter::write`] and [`finish`].
     err: Arc<Mutex<Option<io::Error>>>,
     uncomp_written: u64,
+    /// Compressed bytes written to `W`, updated by the writer thread.
+    comp_written: Arc<AtomicU64>,
     wrote_header: bool,
     _w: PhantomData<fn() -> W>,
 }
 
 impl<W: Write + Send + 'static> MtWriter<W> {
-    /// Wrap `w` with default options + `available_parallelism()` workers.
+    /// Wrap `w` with default options and the host's available parallelism.
     pub fn new(w: W) -> Self {
         MtWriterBuilder::new()
             .build(w)
@@ -397,6 +394,8 @@ impl<W: Write + Send + 'static> MtWriter<W> {
         let err: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
 
         let err_writer = err.clone();
+        let comp_written = Arc::new(AtomicU64::new(0));
+        let comp_counter = comp_written.clone();
         let input_pool_w = engine.input_pool.clone();
         let obuf_pool_w = engine.obuf_pool.clone();
         let writer_index = if b.generate_index || b.append_index {
@@ -416,6 +415,7 @@ impl<W: Write + Send + 'static> MtWriter<W> {
                 order_rx,
                 finish_tx,
                 err_writer,
+                comp_counter,
                 input_pool_w,
                 obuf_pool_w,
                 writer_index,
@@ -436,14 +436,19 @@ impl<W: Write + Send + 'static> MtWriter<W> {
             engine: Some(engine),
             err,
             uncomp_written: 0,
+            comp_written,
             wrote_header: false,
             _w: PhantomData,
         }
     }
 
-    /// Total uncompressed bytes accepted.
-    pub fn uncompressed_written(&self) -> u64 {
-        self.uncomp_written
+    /// Total uncompressed bytes accepted, and compressed bytes the writer thread has written to
+    /// the sink. The compressed count lags behind the input until [`Write::flush`].
+    pub fn written(&self) -> Written {
+        Written {
+            uncompressed: self.uncomp_written,
+            compressed: self.comp_written.load(Ordering::Relaxed),
+        }
     }
 
     /// Flush pending input, then encode `buf` as whole blocks.  Like Go's
@@ -784,6 +789,7 @@ fn writer_loop<W: Write + Send + 'static>(
     order_rx: Receiver<OrderItem>,
     finish_tx: SyncSender<io::Result<(W, Vec<u8>)>>,
     err_slot: Arc<Mutex<Option<io::Error>>>,
+    comp_counter: Arc<AtomicU64>,
     input_pool: Arc<BufferPool>,
     obuf_pool: Arc<BufferPool>,
     mut index: Option<Index>,
@@ -803,6 +809,7 @@ fn writer_loop<W: Write + Send + 'static>(
                 OrderItem::Raw(bytes) => {
                     w.write_all(&bytes).map_err(|e| record(&err_slot, e))?;
                     comp_written += bytes.len() as u64;
+                    comp_counter.store(comp_written, Ordering::Relaxed);
                 }
                 OrderItem::Flush(done) => {
                     w.flush().map_err(|e| record(&err_slot, e))?;
@@ -821,7 +828,7 @@ fn writer_loop<W: Write + Send + 'static>(
                     // Index entries are the offsets at the start of the chunk.
                     if let Some(idx) = index.as_mut() {
                         idx.add(comp_written, uncomp_written)
-                            .map_err(|e| record(&err_slot, e.into()))?;
+                            .map_err(|e| record(&err_slot, e))?;
                     }
                     let (res, chunk_len, input) = match out {
                         Encoded::Chunk { buf, len, input } => {
@@ -838,6 +845,7 @@ fn writer_loop<W: Write + Send + 'static>(
                     input_pool.release(input);
                     res.map_err(|e| record(&err_slot, e))?;
                     comp_written += chunk_len as u64;
+                    comp_counter.store(comp_written, Ordering::Relaxed);
                 }
             }
         };
@@ -857,7 +865,7 @@ fn writer_loop<W: Write + Send + 'static>(
                 None
             };
             idx.append_to(&mut idx_bytes, Some(uncomp_written), comp_total)
-                .map_err(|e| record(&err_slot, e.into()))?;
+                .map_err(|e| record(&err_slot, e))?;
             if append_index {
                 comp_written += idx_bytes.len() as u64;
             }

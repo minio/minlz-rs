@@ -34,7 +34,7 @@ use super::format::{
     MIN_BLOCK_SIZE, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, make_stream_header, put_uvarint,
 };
 
-/// Byte counts reported by [`Writer::written`].
+/// Byte counts reported by [`Writer::written`] and [`MtWriter::written`](super::MtWriter::written).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Written {
     /// Uncompressed bytes accepted via [`std::io::Write::write`].
@@ -144,16 +144,16 @@ impl WriterBuilder {
     /// Consume the builder and wrap `w` in a [`Writer`].
     ///
     /// # Errors
-    /// [`Error::Config`] if `block_size` is outside `[MIN_BLOCK_SIZE,
-    /// MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
-    pub fn build<W: Write>(self, w: W) -> Result<Writer<W>, Error> {
+    /// [`io::ErrorKind::InvalidInput`] carrying an [`Error::Config`] if `block_size` is outside
+    /// `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]` or `padding` exceeds `MAX_BLOCK_SIZE`.
+    pub fn build<W: Write>(self, w: W) -> io::Result<Writer<W>> {
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&self.block_size) {
-            return Err(Error::Config(
-                "block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]",
-            ));
+            return Err(
+                Error::Config("block_size must be in [MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]").into(),
+            );
         }
         if self.padding as usize > MAX_BLOCK_SIZE {
-            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE"));
+            return Err(Error::Config("padding must be ≤ MAX_BLOCK_SIZE").into());
         }
         Ok(Writer::with_builder(w, self))
     }
@@ -244,6 +244,16 @@ impl<W: Write> Writer<W> {
         }
     }
 
+    /// Borrow the underlying sink.
+    pub fn get_ref(&self) -> &W {
+        &self.w
+    }
+
+    /// Mutably borrow the underlying sink. Writing to it directly corrupts the stream.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.w
+    }
+
     /// Add a user chunk (`id` in `0x80..=0xfd`) to the stream.  Any pending
     /// buffered input is flushed first so that user chunks appear in the
     /// stream at the position the caller invoked the method.
@@ -296,8 +306,7 @@ impl<W: Write> Writer<W> {
 
     /// Like [`Self::finish`] but also returns the encoded index bytes.
     /// Requires `generate_index` (the default) to have been left enabled.
-    /// Inner writer is dropped.
-    pub fn close_index(mut self) -> io::Result<Vec<u8>> {
+    pub fn close_index(mut self) -> io::Result<(W, Vec<u8>)> {
         if let Some(e) = self.err.take() {
             return Err(e);
         }
@@ -307,7 +316,8 @@ impl<W: Write> Writer<W> {
                 "minlz: close_index called but generate_index is false",
             ));
         }
-        self.close_inner(true)
+        let index = self.close_inner(true)?;
+        Ok((self.w, index))
     }
 
     /// Shared close path used by both [`Self::finish`] and

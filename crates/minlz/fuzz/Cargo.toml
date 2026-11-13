@@ -18,7 +18,7 @@ libfuzzer-sys = "0.4"
 [dependencies.minlz]
 package = "minio-minlz"
 path = ".."
-features = ["reference"]
+features = ["reference", "unstable-internals"]
 
 [profile.release]
 debug = 1

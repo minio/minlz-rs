@@ -117,8 +117,8 @@ fn flush_on_write_emits_one_chunk_per_write() {
 
 #[test]
 fn add_user_chunk_round_trips_via_callback() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::Mutex;
     let buf: Vec<u8> = Vec::new();
     let mut w = Writer::new(buf);
     w.write_all(b"prefix").unwrap();
@@ -128,18 +128,18 @@ fn add_user_chunk_round_trips_via_callback() {
     w.write_all(b"suffix").unwrap();
     let out = w.finish().unwrap();
 
-    type Seen = Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
-    let seen: Seen = Rc::new(RefCell::new(Vec::new()));
+    type Seen = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let s1 = seen.clone();
     let s2 = seen.clone();
     let mut decoded = Vec::new();
     crate::stream::ReaderBuilder::new()
         .user_chunk_callback(0x80, move |id, body| {
-            s1.borrow_mut().push((id, body.to_vec()));
+            s1.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .user_chunk_callback(0xc0, move |id, body| {
-            s2.borrow_mut().push((id, body.to_vec()));
+            s2.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .build(Cursor::new(&out))
@@ -147,7 +147,7 @@ fn add_user_chunk_round_trips_via_callback() {
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, b"prefixinfixsuffix");
-    let seen = seen.borrow();
+    let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[0], (0x80, b"meta-a".to_vec()));
     assert_eq!(seen[1], (0xc0, b"meta-b".to_vec()));
@@ -244,6 +244,16 @@ fn written_reports_byte_counts() {
     // After finish there's the EOF chunk too.
     let out = w.finish().unwrap();
     assert!(out.len() as u64 > written.compressed);
+}
+
+#[test]
+fn accessors_reach_the_sink() {
+    let mut w = Writer::new(Vec::new());
+    w.write_all(b"accessors").unwrap();
+    w.flush().unwrap();
+    let len = w.get_ref().len();
+    assert!(len > 0);
+    assert_eq!(w.get_mut().len(), len);
 }
 
 #[test]
@@ -525,7 +535,7 @@ impl AnyWriter {
                 (w.finish().unwrap(), n)
             }
             Self::Mt(w) => {
-                let n = w.uncompressed_written();
+                let n = w.written().uncompressed;
                 (w.finish().unwrap(), n)
             }
         }
@@ -567,7 +577,7 @@ fn test_simd_stream_read(comp: &[u8], want: &[u8]) {
     let idx = index_stream(comp).expect("index_stream");
     let mut index = Index::default();
     index.load(&idx).unwrap();
-    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(comp)), &[]).expect("ReadSeeker");
+    let mut rs = ReadSeeker::new(Reader::new(Cursor::new(comp))).expect("ReadSeeker");
     let mut tmp = [0u8; 1000];
     let n = want.len();
     for off in [0, n / 3 + 7, n / 2, n - 100] {

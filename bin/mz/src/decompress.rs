@@ -76,7 +76,7 @@ fn decompress_stream_follow(input: &Path, opts: &Options) -> io::Result<()> {
     let mut counted_dst = CountingWriter::new(dst);
 
     if let Some(off) = opts.offset {
-        let mut rs = ReadSeeker::new(reader, &[])
+        let mut rs = ReadSeeker::new(reader)
             .map_err(|e| io::Error::other(format!("--follow --offset requires an index: {e}")))?;
         rs.seek(SeekFrom::Start(off))?;
         if opts.tail_next_nl {
@@ -100,7 +100,7 @@ fn decompress_stream_seek(input: &Path, opts: &Options) -> io::Result<()> {
     let file = File::open(input)?;
     let src = BufReader::with_capacity(256 * 1024, file);
     let reader = Reader::new(src);
-    let mut rs = ReadSeeker::new(reader, &[]).map_err(|e| {
+    let mut rs = ReadSeeker::new(reader).map_err(|e| {
         io::Error::other(format!(
             "--offset / --tail require an index in the stream: {e}"
         ))

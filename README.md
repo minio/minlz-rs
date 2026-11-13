@@ -125,9 +125,9 @@ fn parallel_roundtrip(payload: &[u8]) -> std::io::Result<()> {
     w.write_all(payload)?;
     let compressed = w.finish()?;
 
-    let threads = std::thread::available_parallelism()?.get();
+    // 0 threads: one per available core.
     let mut reader = Reader::new(&compressed[..]);
-    let decoded = reader.decode_concurrent(Vec::<u8>::new(), threads)?;
+    let decoded = reader.decode_concurrent(Vec::<u8>::new(), 0)?;
     println!("decoded {} bytes", decoded.bytes_written);
     Ok(())
 }
@@ -147,9 +147,9 @@ fn random_read(payload: &[u8], offset: u64) -> std::io::Result<Vec<u8>> {
     w.write_all(payload)?;
     w.finish()?;
 
-    // Empty slice → ReadSeeker loads the index from the tail itself.
+    // ReadSeeker::new loads the index from the end of the stream.
     let reader = Reader::new(Cursor::new(compressed));
-    let mut rs = ReadSeeker::new(reader, &[])?;
+    let mut rs = ReadSeeker::new(reader)?;
     rs.seek(SeekFrom::Start(offset))?;
     let mut buf = vec![0u8; 4096];
     rs.read_exact(&mut buf)?;

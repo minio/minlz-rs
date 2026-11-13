@@ -110,10 +110,47 @@ fn uncompressed_mode_round_trip() {
 }
 
 #[test]
-fn concurrency_one_still_works() {
+fn concurrency_auto_and_one_work() {
     let payload = vec![b'q'; 8 << 10];
-    let got = round_trip_concurrency(&payload, 1);
-    assert_eq!(got, payload);
+    for n in [0, 1] {
+        assert_eq!(
+            round_trip_concurrency(&payload, n),
+            payload,
+            "concurrency {n}"
+        );
+    }
+}
+
+#[test]
+fn written_reports_byte_counts() {
+    let mut mt = MtWriterBuilder::new()
+        .block_size(64 << 10)
+        .concurrency(2)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    assert_eq!(mt.written(), Default::default());
+    let mut st = crate::stream::WriterBuilder::new()
+        .block_size(64 << 10)
+        .build(Vec::<u8>::new())
+        .unwrap();
+    let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    for w in [&mut mt as &mut dyn Write, &mut st] {
+        w.write_all(&payload).unwrap();
+        w.flush().unwrap();
+    }
+    let written = mt.written();
+    assert_eq!(written.uncompressed, payload.len() as u64);
+    assert_eq!(written, st.written());
+    // A user chunk last before the flush counts too.
+    mt.add_user_chunk(0x80, b"meta").unwrap();
+    st.add_user_chunk(0x80, b"meta").unwrap();
+    mt.flush().unwrap();
+    st.flush().unwrap();
+    let written = mt.written();
+    assert_eq!(written, st.written());
+    // After finish there's the EOF chunk too.
+    let out = mt.finish().unwrap();
+    assert!(out.len() as u64 > written.compressed);
 }
 
 #[test]
@@ -132,8 +169,6 @@ fn finish_returns_inner_writer() {
 
 #[test]
 fn add_user_chunk_round_trip_via_callback() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     let mut w = MtWriterBuilder::new()
         .concurrency(2)
         .build(Vec::<u8>::new())
@@ -145,18 +180,18 @@ fn add_user_chunk_round_trip_via_callback() {
     w.write_all(b"suffix").unwrap();
     let buf = w.finish().unwrap();
 
-    type Seen = Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
-    let seen: Seen = Rc::new(RefCell::new(Vec::new()));
+    type Seen = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let s1 = seen.clone();
     let s2 = seen.clone();
     let mut decoded = Vec::new();
     crate::stream::ReaderBuilder::new()
         .user_chunk_callback(0x80, move |id, body| {
-            s1.borrow_mut().push((id, body.to_vec()));
+            s1.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .user_chunk_callback(0xc0, move |id, body| {
-            s2.borrow_mut().push((id, body.to_vec()));
+            s2.lock().unwrap().push((id, body.to_vec()));
             Ok(())
         })
         .build(Cursor::new(&buf))
@@ -164,7 +199,7 @@ fn add_user_chunk_round_trip_via_callback() {
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, b"prefixinfixsuffix");
-    let seen = seen.borrow();
+    let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[0], (0x80, b"meta-a".to_vec()));
     assert_eq!(seen[1], (0xc0, b"meta-b".to_vec()));
@@ -364,7 +399,7 @@ fn append_index_round_trips_via_read_seeker() {
 
         // Seek probes via ReadSeeker.
         let reader = Reader::new(Cursor::new(stream.clone()));
-        let mut rs = ReadSeeker::new(reader, &[])
+        let mut rs = ReadSeeker::new(reader)
             .unwrap_or_else(|e| panic!("ReadSeeker::new (n={concurrency}): {e}"));
         assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
 
@@ -486,7 +521,7 @@ fn mt_padding_plus_index_aligns_and_reads() {
     );
     // ReadSeeker still finds the index at the tail.
     let reader = Reader::new(Cursor::new(buf));
-    let mut rs = ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = ReadSeeker::new(reader).expect("ReadSeeker::new");
     assert_eq!(rs.index().total_uncompressed(), Some(payload.len() as u64));
     // total_compressed must be unknown (None) when padding is in play.
     assert_eq!(rs.index().total_compressed(), None);
@@ -514,7 +549,7 @@ fn mt_index_offsets_match_st_index_offsets() {
         .build(Vec::<u8>::new())
         .unwrap();
     st.write_all(&payload).unwrap();
-    let st_idx = st.close_index().unwrap();
+    let (_, st_idx) = st.close_index().unwrap();
 
     let mut mt = MtWriterBuilder::new()
         .block_size(block_size)
@@ -527,7 +562,7 @@ fn mt_index_offsets_match_st_index_offsets() {
 
     // Extract the MT-emitted index by reading the tail.
     let reader = Reader::new(Cursor::new(mt_stream.clone()));
-    let rs = ReadSeeker::new(reader, &[]).unwrap();
+    let rs = ReadSeeker::new(reader).unwrap();
     let mt_idx = rs.index().clone();
 
     let mut parsed_st = Index::default();
@@ -563,7 +598,7 @@ fn mt_close_index_matches_st_close_index() {
         .build(Vec::<u8>::new())
         .unwrap();
     st.write_all(&payload).unwrap();
-    let st_idx = st.close_index().unwrap();
+    let (_, st_idx) = st.close_index().unwrap();
     let build = || {
         MtWriterBuilder::new()
             .block_size(64 << 10)

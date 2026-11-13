@@ -161,7 +161,7 @@ fuzz_target!(|data: &[u8]| {
         let mut w = b.build(Vec::<u8>::new()).unwrap();
         write(&mut w, payload, method, |w, third| w.encode_buffer(third)).expect("MT write");
         w.flush().expect("MT flush");
-        assert_eq!(w.uncompressed_written(), payload.len() as u64, "MT written");
+        assert_eq!(w.written().uncompressed, payload.len() as u64, "MT written");
         let stream = w.finish().expect("MT finish");
         check_padding(&stream);
         let mut reader = Reader::new(&stream[..]);

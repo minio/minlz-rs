@@ -262,7 +262,7 @@ fn bench_index_seek_random(c: &mut Criterion) {
             let mut buf = vec![0u8; READ_BYTES];
             b.iter(|| {
                 let reader = Reader::new(Cursor::new(compressed.as_slice()));
-                let mut rs = ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+                let mut rs = ReadSeeker::new(reader).expect("ReadSeeker::new");
                 for &off in &offsets {
                     let n = rs.read_at(&mut buf, off).expect("read_at");
                     std::hint::black_box(&buf[..n]);
