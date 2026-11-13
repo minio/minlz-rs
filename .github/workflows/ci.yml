@@ -26,6 +26,9 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: cargo clippy (lib as published)
+        # Workspace builds get `unstable-internals` from `mz`; the lib alone builds without it.
+        run: cargo clippy -p minio-minlz -- -D warnings
 
   # ---- Cross-platform build + test matrix ---------------------------------
   test:
