@@ -25,7 +25,7 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo clippy (lib as published)
         # Workspace builds get `unstable-internals` from `mz`; the lib alone builds without it.
         run: cargo clippy -p minio-minlz -- -D warnings
@@ -41,7 +41,7 @@ jobs:
         rust: [stable, "1.89"]   # 1.89 = workspace MSRV (rust-version in Cargo.toml)
     runs-on: ${{ matrix.os }}
     env:
-      # rust-toolchain.toml pins stable and outranks `rustup default`;
+      # rust-toolchain.toml pins the toolchain and outranks `rustup default`;
       # this variable, like `cargo +toolchain` or `rustup override set`, outranks the file.
       RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
     steps:
