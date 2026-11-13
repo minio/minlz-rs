@@ -432,7 +432,7 @@ impl<R: Read> Reader<R> {
     }
 
     /// Drain the rest of the stream into `w` using `threads` worker threads
-    /// for parallel block decoding.  Returns `(bytes_written, w)`.
+    /// for parallel block decoding.  Returns the sink and the bytes written to it.
     ///
     /// Must not be mixed with [`Read::read`] / [`std::io::BufRead::fill_buf`]
     /// on the same reader — calling this after consuming bytes via the
@@ -447,17 +447,14 @@ impl<R: Read> Reader<R> {
     /// identifier. Setting that to the stream's block size uses less memory
     /// with small blocks.
     ///
-    /// `W: Send + 'static` is required because the writer thread spawned
-    /// inside outlives any caller-stack borrow.  Borrowed sinks
-    /// (`&mut Vec<u8>`) are not supported; wrap them in an owned adapter
-    /// (e.g. pass `Vec::new()` and copy back from the returned `W`).
+    /// `w` is written from a scoped thread, so it may be borrowed, such as `&mut Vec<u8>`.
     pub fn decode_concurrent<W>(
         &mut self,
         w: W,
         threads: usize,
     ) -> io::Result<super::ConcurrentDecode<W>>
     where
-        W: io::Write + Send + 'static,
+        W: io::Write + Send,
     {
         let threads = super::worker_count(threads);
         if self.decoded_pos < self.decoded.len() {

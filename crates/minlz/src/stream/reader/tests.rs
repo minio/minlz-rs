@@ -2282,3 +2282,16 @@ fn accessors_reach_the_source() {
     rs.get_mut().set_position(0);
     assert_eq!(rs.into_inner().into_inner(), stream);
 }
+
+#[test]
+fn decode_concurrent_into_borrowed_sink() {
+    let data = rand_bytes(2, 40 << 10);
+    let stream = write_stream(&data, WriterBuilder::new().block_size(16 << 10));
+    let mut out = Vec::new();
+    let n = Reader::new(Cursor::new(&stream))
+        .decode_concurrent(&mut out, 2)
+        .unwrap()
+        .bytes_written;
+    assert_eq!(n, data.len() as u64);
+    assert_eq!(out, data);
+}
