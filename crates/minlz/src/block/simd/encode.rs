@@ -37,8 +37,10 @@ pub(crate) const LEVEL_SMALLEST: i32 = 7;
 pub(crate) const LEVEL_DELTA: i32 = 256;
 
 /// The chunk limit value of the header flags.
-const CHUNK_LIMIT: u8 = 4;
+const CHUNK_LIMIT: u8 = 5;
 pub(super) const CHUNK_OPS: usize = 1024 << CHUNK_LIMIT;
+/// A power of 2 that holds the raw offset bits of a chunk, at most 20 per operation.
+const RAW_SIZE: usize = 1 << 17;
 /// The longest literal run or match of an operation, with an escape.
 pub(super) const MAX_LONG: usize = MAX_LEN + 1 + 255;
 /// Estimates the overhead of a pivco block.
@@ -147,8 +149,8 @@ pub(super) struct Scratch {
     ll: Box<[u8; CHUNK_OPS]>,
     offc: Box<[u8; CHUNK_OPS]>,
     esc: Box<[u8; 2 * CHUNK_OPS]>,
-    /// Room for a 4 byte store at any u16 index. An offset has at most 20 raw bits.
-    raw: Box<[u8; (1 << 16) + 3]>,
+    /// Room for a 4 byte store at any index below RAW_SIZE.
+    raw: Box<[u8; RAW_SIZE + 3]>,
     /// The literals of the block, then, with plain and delta literals, the delta literals.
     buf: Vec<u8>,
     /// The literal positions where plain and delta literals take turns, starting with plain.
@@ -531,7 +533,7 @@ impl<'a> Encoder<'a> {
         // raw has room, as the offsets of a chunk have at most 20 raw bits each.
         let acc = self.acc | v << (self.nacc & 63);
         let n = n + self.nacc;
-        let i = self.n_raw as u16 as usize;
+        let i = self.n_raw & (RAW_SIZE - 1);
         self.s.raw[i..i + 4].copy_from_slice(&(acc as u32).to_le_bytes());
         let k = n >> 5;
         self.n_raw += k << 2;
@@ -1114,8 +1116,8 @@ impl Coder {
         } else {
             BLOCK_BITS
         };
-        // As MIN_CODED, for block_bits.
-        if v.len() > block_bits / 7 {
+        // As MIN_CODED, for block_bits. The escapes of a chunk can be more than a pivco block holds.
+        if v.len() > block_bits / 7 && v.len() <= pivco::MAX_BLOCK_SIZE {
             self.histogram(v, syms);
             if self.have[k] && take(&self.cur[k], &self.hist, syms, block_bits, &mut best_bits) {
                 best = Some(Pick::Cur);

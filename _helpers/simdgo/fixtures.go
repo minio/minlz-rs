@@ -32,7 +32,7 @@ func fixtureNames() (names []string) {
 	add("period31", 65536)
 	add("period33", 65536)
 	add("textlike", 2048, 2049, 4095, 4096, 4097, 65535, 65536, 65537)
-	add("sparse", 512<<10)
+	add("sparse", 1<<20)
 	add("sawyer", 1024, 2048, 2049, 4095, 4096, 4097, 16384, 65536, 409600)
 	add("mixed", 1100<<10)
 	return names

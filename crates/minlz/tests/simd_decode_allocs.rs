@@ -80,7 +80,7 @@ fn fixture(name: &str) -> Vec<u8> {
 fn simd_decode_allocs() {
     let blocks: Vec<Vec<u8>> = [
         "mixed-1126400.L262.mzb",
-        "sparse-524288.L5.mzb",
+        "sparse-1048576.L5.mzb",
         "sawyer-65536.L7.mzb",
         "textlike-4096.L260.mzb",
     ]
