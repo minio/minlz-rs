@@ -851,6 +851,28 @@ targets: block (`roundtrip`, `decode_arbitrary`, `simd_decode`), stream
 `write_fuzz_seeds` tests.  See its [`README.md`](crates/minlz/fuzz/README.md)
 and [`RUNBOOK.md`](crates/minlz/fuzz/RUNBOOK.md) for setup.
 
+Pick the benchmark tool by what you want to know:
+
+| To                                       | Use                                              |
+| ---------------------------------------- | ------------------------------------------------ |
+| Check whether a change is faster         | `cargo xtask bench <rev>`                        |
+| Study one build in detail                | `cargo bench -p minio-minlz --bench <name>`      |
+| Compare MinLZ with other codecs          | [`_helpers/cross_codec/`](_helpers/cross_codec/) |
+| Time one file, or compare with Go's `mz` | `mz bench`                                       |
+
+`cargo xtask bench <rev>` builds [`crates/minlz-bench`](crates/minlz-bench/)
+against commit `rev` and against the working tree. It runs the two builds
+in turn and keeps the fastest sample of each run. Other programs on the
+machine then hardly affect the result. For a run pinned to one core, add
+`--target <triple>`: the task then builds both binaries and prints their
+paths. Run `<this> compare <base>` under `taskset -c 5` on Linux or
+`start /affinity 20` on Windows. The doc comment in
+`crates/minlz-bench/src/main.rs` lists the options.
+
+Criterion runs one build at a time. A change in machine load between two
+runs then lands in a comparison. Use it for cases that `minlz-bench` does
+not have.
+
 MSRV: **Rust 1.89**.
 
 ## License
