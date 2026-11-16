@@ -1263,7 +1263,7 @@ unsafe fn vert_dec<W: Lanes, const D: usize>(
                     W::srl16(c[j], off)
                 } else {
                     // Bits off..7 of column j, then bits 0..off+D-9 of column j+1: the 16-bit
-                    // shifts leave the neighbour byte's bits where the other column's go, so
+                    // shifts leave the neighbor byte's bits where the other column's go, so
                     // select per bit (0xE4: mask ? a : b) with the mask 0xFF>>off.
                     let (a, b) = (W::srl16(c[j], off), W::sll16(c[j + 1], 8 - off));
                     W::tern::<0xE4>(a, b, W::splat(0xFF >> off))

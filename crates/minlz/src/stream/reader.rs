@@ -656,21 +656,9 @@ impl<R: Read> Reader<R> {
     }
 
     fn handle_eof_chunk(&mut self, chunk_len: usize) -> Result<()> {
-        if chunk_len > MAX_VARINT_LEN_64 {
+        let want = read_eof_size(&mut self.r, chunk_len, self.ignore_stream_id)?;
+        if want.is_some_and(|w| !self.stream_size().contains(&w)) {
             return Err(Error::Corrupt.into());
-        }
-        if chunk_len != 0 {
-            let mut tmp = [0u8; MAX_VARINT_LEN_64];
-            read_exact_or_corrupt(&mut self.r, &mut tmp[..chunk_len])?;
-            if !self.ignore_stream_id {
-                let (want_size, n) = get_uvarint(&tmp[..chunk_len]).ok_or(Error::Corrupt)?;
-                if n != chunk_len {
-                    return Err(Error::Corrupt.into());
-                }
-                if !self.stream_size().contains(&want_size) {
-                    return Err(Error::Corrupt.into());
-                }
-            }
         }
         self.expect_eof = false;
         self.header_read = false;
@@ -688,26 +676,10 @@ impl<R: Read> Reader<R> {
     }
 
     fn handle_stream_identifier(&mut self, chunk_len: usize) -> Result<()> {
-        if chunk_len != MAGIC_BODY_LEN {
-            return Err(Error::Corrupt.into());
-        }
-        let mut tmp = [0u8; MAGIC_BODY_LEN];
-        read_exact_or_corrupt(&mut self.r, &mut tmp)?;
-        if &tmp[..MAGIC_BODY.len()] != MAGIC_BODY {
-            // Snappy/S2 fallback is out of scope.
-            return Err(Error::Unsupported.into());
-        }
-        let indicator = tmp[MAGIC_BODY_LEN - 1];
-        // Bit 7 must be 0.
-        if indicator & 0x80 != 0 {
-            return Err(Error::Corrupt.into());
-        }
-        self.simd = indicator & STREAM_FLAG_SIMD != 0;
-        let new_max = block_size_from_indicator(indicator).ok_or(Error::Corrupt)?;
-        if new_max > self.max_block_user {
-            return Err(Error::TooLarge.into());
-        }
-        self.max_block = new_max;
+        let (simd, max_block) =
+            read_stream_identifier(&mut self.r, chunk_len, self.max_block_user)?;
+        self.simd = simd;
+        self.max_block = max_block;
         self.block_start += self.decoded.len() as u64;
         self.stream_start = self.block_start..=self.block_start;
         self.decoded.clear();
@@ -899,6 +871,61 @@ pub(super) fn read_uncompressed<R: Read>(
         return Err(Error::Crc.into());
     }
     Ok(())
+}
+
+/// Reads the body of a stream identifier chunk of chunk_len bytes, and returns whether the stream
+/// holds SIMD chunks and its largest block size. It fails unless the body is the MinLZ magic with
+/// bit 7 of the block size indicator clear and a block size of at most max_block_user.
+pub(super) fn read_stream_identifier<R: Read>(
+    r: &mut R,
+    chunk_len: usize,
+    max_block_user: usize,
+) -> Result<(bool, usize)> {
+    if chunk_len != MAGIC_BODY_LEN {
+        return Err(Error::Corrupt.into());
+    }
+    let mut tmp = [0u8; MAGIC_BODY_LEN];
+    read_exact_or_corrupt(r, &mut tmp)?;
+    if &tmp[..MAGIC_BODY.len()] != MAGIC_BODY {
+        // Snappy/S2 fallback is out of scope.
+        return Err(Error::Unsupported.into());
+    }
+    let indicator = tmp[MAGIC_BODY_LEN - 1];
+    // Bit 7 must be 0.
+    if indicator & 0x80 != 0 {
+        return Err(Error::Corrupt.into());
+    }
+    let max_block = block_size_from_indicator(indicator).ok_or(Error::Corrupt)?;
+    if max_block > max_block_user {
+        return Err(Error::TooLarge.into());
+    }
+    Ok((indicator & STREAM_FLAG_SIMD != 0, max_block))
+}
+
+/// Reads the body of an EOF chunk of chunk_len bytes, and returns the decoded stream size it
+/// declares: None for an empty body, or when ignore_stream_id skips the check. It fails unless
+/// the body is one varint.
+pub(super) fn read_eof_size<R: Read>(
+    r: &mut R,
+    chunk_len: usize,
+    ignore_stream_id: bool,
+) -> Result<Option<u64>> {
+    if chunk_len > MAX_VARINT_LEN_64 {
+        return Err(Error::Corrupt.into());
+    }
+    if chunk_len == 0 {
+        return Ok(None);
+    }
+    let mut tmp = [0u8; MAX_VARINT_LEN_64];
+    read_exact_or_corrupt(r, &mut tmp[..chunk_len])?;
+    if ignore_stream_id {
+        return Ok(None);
+    }
+    let (size, n) = get_uvarint(&tmp[..chunk_len]).ok_or(Error::Corrupt)?;
+    if n != chunk_len {
+        return Err(Error::Corrupt.into());
+    }
+    Ok(Some(size))
 }
 
 /// `Read::read_exact` mapped to stream errors: `UnexpectedEof` becomes

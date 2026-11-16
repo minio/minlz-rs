@@ -308,7 +308,7 @@ fn dest_path(input: &Path, opts: &Options) -> io::Result<PathBuf> {
         if matches!(ext, "mz" | "mzb") {
             input.with_extension("")
         } else {
-            // Unrecognised extension — write to `<input>.out` to avoid clobbering.
+            // Unrecognized extension — write to `<input>.out` to avoid clobbering.
             let mut p = input.as_os_str().to_owned();
             p.push(".out");
             PathBuf::from(p)

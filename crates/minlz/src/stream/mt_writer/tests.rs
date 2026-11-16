@@ -863,6 +863,42 @@ fn forked_child_skips_inherited_engines() {
     assert_eq!(decode(&w.finish().unwrap()), b"child");
 }
 
+/// The parked engines of one shape keep at most one worker per CPU: with one worker per CPU,
+/// a second engine of the shape drops when its writer finishes.
+#[test]
+#[cfg_attr(miri, ignore = "Miri never parks engines")]
+fn surplus_engine_drops_at_park() {
+    const BS: usize = MIN_BLOCK_SIZE + 10;
+    let all = crate::stream::worker_count(0);
+    let writer = || {
+        MtWriterBuilder::new()
+            .block_size(BS)
+            .concurrency(all)
+            .build(Vec::new())
+            .unwrap()
+    };
+    let (mut a, mut b) = (writer(), writer());
+    let (ida, _) = engine_of(&a);
+    let (idb, pool_b) = engine_of(&b);
+    a.write_all(b"a").unwrap();
+    b.write_all(b"b").unwrap();
+    assert_eq!(decode(&a.finish().unwrap()), b"a");
+    assert_eq!(decode(&b.finish().unwrap()), b"b");
+    assert!(
+        idle_ids().contains(&ida),
+        "the first engine of the shape is not parked"
+    );
+    assert!(
+        !idle_ids().contains(&idb),
+        "a second engine of {all} workers is parked"
+    );
+    assert_eq!(
+        pool_b.strong_count(),
+        0,
+        "the surplus engine is still alive"
+    );
+}
+
 // -------------------- flush --------------------
 
 /// Records what reached it and how often it was flushed; each write is slow.

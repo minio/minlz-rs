@@ -34,14 +34,14 @@ use super::error::Error;
 use super::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
     CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_MINLZ_SIMD, CHUNK_TYPE_STREAM_IDENTIFIER,
-    CHUNK_TYPE_UNCOMPRESSED_DATA, MAGIC_BODY, MAGIC_BODY_LEN, MAX_BLOCK_SIZE,
-    MAX_NON_SKIPPABLE_CHUNK, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64,
-    MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK, STREAM_FLAG_SIMD,
-    block_size_from_indicator, get_uvarint, read_chunk_len, read_u32_le,
+    CHUNK_TYPE_UNCOMPRESSED_DATA, MAX_BLOCK_SIZE, MAX_NON_SKIPPABLE_CHUNK,
+    MAX_USER_NON_SKIPPABLE_CHUNK, MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK,
+    get_uvarint, read_chunk_len, read_u32_le,
 };
 use super::mt_pool::BufferPool;
 use super::reader::{
-    Reader, decode_simd_chunk, min_lz_chunk_len, read_uncompressed, simd_chunk_header,
+    Reader, decode_simd_chunk, min_lz_chunk_len, read_eof_size, read_stream_identifier,
+    read_uncompressed, simd_chunk_header,
 };
 
 /// Worker job: decode one compressed chunk body, or the payload of a SIMD chunk.
@@ -263,48 +263,24 @@ fn dispatch_loop<R: Read>(
                 let _ = tx.send(DecodeOutput { result: Ok(body) });
             }
             CHUNK_TYPE_EOF => {
-                if chunk_len > MAX_VARINT_LEN_64 {
+                // No stream identifier since the last EOF: an empty stream.
+                let size = if reader.header_read {
+                    uncomp_emitted
+                } else {
+                    0
+                };
+                let want = read_eof_size(&mut reader.r, chunk_len, reader.ignore_stream_id)?;
+                if want.is_some_and(|w| w != size) {
                     return Err(io::Error::from(Error::Corrupt));
-                }
-                if chunk_len > 0 {
-                    let mut tmp = [0u8; MAX_VARINT_LEN_64];
-                    read_exact_or_corrupt(&mut reader.r, &mut tmp[..chunk_len])?;
-                    if !reader.ignore_stream_id {
-                        let (want, n) = get_uvarint(&tmp[..chunk_len]).ok_or(Error::Corrupt)?;
-                        // No stream identifier since the last EOF: an empty stream.
-                        let size = if reader.header_read {
-                            uncomp_emitted
-                        } else {
-                            0
-                        };
-                        if n != chunk_len || want != size {
-                            return Err(io::Error::from(Error::Corrupt));
-                        }
-                    }
                 }
                 reader.expect_eof = false;
                 reader.header_read = false;
             }
             CHUNK_TYPE_STREAM_IDENTIFIER => {
-                if chunk_len != MAGIC_BODY_LEN {
-                    return Err(io::Error::from(Error::Corrupt));
-                }
-                let mut tmp = [0u8; MAGIC_BODY_LEN];
-                read_exact_or_corrupt(&mut reader.r, &mut tmp)?;
-                if &tmp[..MAGIC_BODY.len()] != MAGIC_BODY {
-                    return Err(io::Error::from(Error::Unsupported));
-                }
-                let indicator = tmp[MAGIC_BODY_LEN - 1];
-                // Bit 7 must be 0.
-                if indicator & 0x80 != 0 {
-                    return Err(io::Error::from(Error::Corrupt));
-                }
-                reader.simd = indicator & STREAM_FLAG_SIMD != 0;
-                let new_max = block_size_from_indicator(indicator).ok_or(Error::Corrupt)?;
-                if new_max > reader.max_block_user {
-                    return Err(io::Error::from(Error::TooLarge));
-                }
-                reader.max_block = new_max;
+                let (simd, max_block) =
+                    read_stream_identifier(&mut reader.r, chunk_len, reader.max_block_user)?;
+                reader.simd = simd;
+                reader.max_block = max_block;
                 uncomp_emitted = 0;
                 reader.expect_eof = true;
             }
