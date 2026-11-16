@@ -274,6 +274,11 @@ pub(crate) struct Encoder<'a> {
     /// When set, makes put build one table at most: code lengths for at least fast_code values,
     /// else class lengths. Building tables dominates the encoding of small blocks.
     fast_code: usize,
+    /// When set, makes put store a literal block unless coding it saves more than
+    /// 1/(1<<lit_save) of its size, on top of the cost of its table. Literals that hardly
+    /// compress take the longest to decode for the least gain, and stored literals are read in
+    /// place.
+    lit_save: u32,
     /// Delta literals must save 1/delta_div of a chunk; 0 disables them, -1 uses only them.
     delta_div: isize,
     /// no_overlap splits the matches of up to 32 bytes that overlap their output, so every chunk
@@ -385,6 +390,7 @@ impl<'a> Encoder<'a> {
             chunk_lits: 0,
             split_lits: false,
             fast_code: 0,
+            lit_save: 0,
             delta_div: 0,
             no_overlap: false,
             budget: false,
@@ -406,11 +412,11 @@ impl<'a> Encoder<'a> {
         assert!(src.len() > MIN_SAVING);
         let delta = if level & LEVEL_DELTA != 0 { -1 } else { 0 };
         self.split_lits = level == LEVEL_SMALLEST;
-        self.fast_code = 0;
+        (self.fast_code, self.lit_save) = (0, 0);
         (self.no_overlap, self.budget) = (self.knobs.no_overlap, false);
         match level & !LEVEL_DELTA {
             LEVEL_SUPER_FAST => {
-                self.fast_code = 1;
+                (self.fast_code, self.lit_save) = (1, 4);
                 if delta == 0 {
                     (self.no_overlap, self.budget) = (true, !self.knobs.no_overlap);
                 }
@@ -422,7 +428,7 @@ impl<'a> Encoder<'a> {
                 }
             }
             LEVEL_FASTEST => {
-                self.fast_code = 4096;
+                (self.fast_code, self.lit_save) = (4096, 5);
                 self.reset(src, delta, src.len() >> 5);
                 if src.len() <= 64 << 10 {
                     self.encode_block_64k(src);
@@ -829,10 +835,10 @@ impl<'a> Encoder<'a> {
             let (rec, size) = (s.chunk_recs.len(), self.out.n + s.chunk_recs.len());
             let (out, recs, fc) = (&mut self.out, &mut s.chunk_recs, self.fast_code);
             recs.push(flags);
-            s.c.put(out, recs, TOK, &s.tok[..self.n_tok], fc);
-            s.c.put(out, recs, LL, &s.ll[..self.n_ll], fc);
-            s.c.put(out, recs, OFFC, &s.offc[..self.n_offc], fc);
-            s.c.put(out, recs, ESC, &s.esc[..self.n_esc], fc);
+            s.c.put(out, recs, TOK, &s.tok[..self.n_tok], fc, 0);
+            s.c.put(out, recs, LL, &s.ll[..self.n_ll], fc, 0);
+            s.c.put(out, recs, OFFC, &s.offc[..self.n_offc], fc, 0);
+            s.c.put(out, recs, ESC, &s.esc[..self.n_esc], fc, 0);
             if out.room() < self.n_raw {
                 out.limit = -1;
             } else {
@@ -894,7 +900,14 @@ impl<'a> Encoder<'a> {
                 (LITS, 0)
             };
             let v = &s.buf[at + c[0]..at + c[1]];
-            s.c.put(&mut self.out, &mut s.lit_recs, k, v, self.fast_code);
+            s.c.put(
+                &mut self.out,
+                &mut s.lit_recs,
+                k,
+                v,
+                self.fast_code,
+                self.lit_save,
+            );
             if !self.out.fits(s.lit_recs.len()) {
                 return 0;
             }
@@ -1102,15 +1115,30 @@ impl Coder {
 
     /// put appends the values v of stream k to out, and their entry to recs. k is DELTA for delta
     /// literals. It takes the smallest of storing v, the current table and new tables for v.
+    /// With lit_save, literals are stored unless coding them saves more than that part of their
+    /// size (see Encoder::lit_save).
     /// With fast_code, it takes the current table when that is smaller than storing,
     /// and otherwise only tries one new table.
     /// If v doesn't fit, the block fails.
-    fn put(&mut self, out: &mut Out, recs: &mut Vec<u8>, k: usize, v: &[u8], fast_code: usize) {
+    fn put(
+        &mut self,
+        out: &mut Out,
+        recs: &mut Vec<u8>,
+        k: usize,
+        v: &[u8],
+        fast_code: usize,
+        lit_save: u32,
+    ) {
         let layout = k;
         let k = k.min(LITS);
         // The values of the stream are below syms.
         let syms = 2 * CODE_BYTES[k];
-        let (mut best, mut best_bits) = (None, 8 * v.len());
+        // Coding v must take fewer bytes than limit.
+        let mut limit = v.len();
+        if k == LITS && lit_save > 0 {
+            limit -= v.len() >> lit_save;
+        }
+        let (mut best, mut best_bits) = (None, 8 * limit);
         let block_bits = if fast_code != 0 {
             FAST_BLOCK_BITS
         } else {
@@ -1169,7 +1197,7 @@ impl Coder {
             let hdr = if k == TOK || k == LITS { 2 } else { 0 };
             if let Some(size) = t.t.block_size(&self.hist[..syms]).map(|b| hdr + b)
                 && size <= room
-                && size + n < v.len()
+                && size + n < limit
             {
                 let o = &mut out.b[out.n..out.n + size];
                 if hdr > 0 {

@@ -1403,3 +1403,50 @@ fn simd_encode_escapes_stored() {
         );
     }
 }
+
+/// TestSIMDEncodeLiteralsStored checks that LevelSuperFastSIMD only codes literal blocks that
+/// save more than 1/16 and LevelFastestSIMD more than 1/32, and that the other levels code any
+/// saving. The first quarter of each input is random bytes below the alphabet size, which only
+/// literals can code, and the rest repeats 64 bytes, so the block is small enough either way.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn simd_encode_literals_stored() {
+    const N: usize = 1 << 20;
+    let levels = [
+        LEVEL_SUPER_FAST,
+        LEVEL_FASTEST,
+        LEVEL_BALANCED,
+        LEVEL_SMALLEST,
+    ];
+    for (alphabet, stored) in [
+        (256, [true, true, true, true]),
+        (240, [true, true, false, false]), // 16 codes of 7 bits and 224 of 8 save 0.8%
+        (224, [true, true, false, false]), // 1.8%
+        (192, [true, false, false, false]), // 4.2%
+        (128, [false, false, false, false]), // 12.5%
+        (64, [false, false, false, false]), // 25%
+    ] {
+        let mut rng = Rng(1);
+        let mut src: Vec<u8> = (0..N / 4).map(|_| rng.intn(alphabet) as u8).collect();
+        let pat = rng.random(64);
+        src.extend(pat.iter().cycle().take(N - N / 4));
+        for (l, want) in levels.into_iter().zip(stored) {
+            let enc = encode_level(&src, l);
+            assert!(
+                decode_block(&enc).as_ref() == Ok(&src),
+                "alphabet {alphabet}, level {l}: roundtrip mismatch"
+            );
+            let mut modes = [[0; 8]; LITS + 1];
+            let mut flags = [0; 2];
+            test_stats(&enc, &mut modes, &mut flags);
+            let blocks: usize = modes[LITS].iter().sum();
+            let n = modes[LITS][STORED];
+            // The last literal block also has literals of the part that repeats, as many as the
+            // parser skips, so it can differ from the others.
+            assert!(
+                blocks >= 4 && (want || n <= 1) && (!want || n + 1 >= blocks),
+                "alphabet {alphabet}, level {l}: {n} of {blocks} literal blocks stored, want stored {want}"
+            );
+        }
+    }
+}
