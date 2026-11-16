@@ -50,14 +50,6 @@ const USER_CB_COUNT: usize = (MAX_USER_NON_SKIPPABLE_CHUNK - MIN_USER_SKIPPABLE_
 
 /// Builder for [`Reader`] options.  Use the chained methods to configure, then
 /// pass an [`io::Read`] to [`ReaderBuilder::build`].
-///
-/// ```
-/// # use std::io::Cursor;
-/// # use minlz::stream::ReaderBuilder;
-/// let src = Cursor::new(Vec::<u8>::new());
-/// let mut reader = ReaderBuilder::new().ignore_crc().build(src).unwrap();
-/// # let _ = &mut reader;
-/// ```
 #[must_use]
 pub struct ReaderBuilder {
     max_block_size: usize,
@@ -123,6 +115,43 @@ impl ReaderBuilder {
     /// The callback receives `(id, payload)` and returns an [`io::Result`].
     /// An `Err` aborts decoding and is surfaced via the next read.
     /// An `id` outside `0x80..=0xfd` makes [`build`](Self::build) fail.
+    ///
+    /// # Example
+    ///
+    /// Store metadata in the stream, beside the data, and read it back:
+    ///
+    /// ```
+    /// use std::io::{Read, Write};
+    /// use std::sync::mpsc;
+    ///
+    /// use minlz::stream::{Reader, ReaderBuilder, Writer};
+    ///
+    /// // IDs 0x80 to 0xbf are skippable: a reader without a callback for the ID skips the chunk.
+    /// const META: u8 = 0x80;
+    ///
+    /// let mut w = Writer::new(Vec::new());
+    /// w.add_user_chunk(META, b"sensor=17")?;
+    /// w.write_all(b"21.5 21.7 21.6 21.9")?;
+    /// let stream = w.finish()?;
+    ///
+    /// // The callback must be 'static, so it sends the payload out through a channel.
+    /// let (tx, rx) = mpsc::channel();
+    /// let mut r = ReaderBuilder::new()
+    ///     .user_chunk_callback(META, move |_, payload| {
+    ///         let _ = tx.send(payload.to_vec());
+    ///         Ok(())
+    ///     })
+    ///     .build(&stream[..])?;
+    /// let mut data = String::new();
+    /// r.read_to_string(&mut data)?;
+    /// assert_eq!(rx.recv().unwrap(), b"sensor=17");
+    ///
+    /// // A reader that does not know the metadata reads the same data.
+    /// let mut plain = String::new();
+    /// Reader::new(&stream[..]).read_to_string(&mut plain)?;
+    /// assert_eq!(plain, data);
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
     pub fn user_chunk_callback<F>(mut self, id: u8, cb: F) -> Self
     where
         F: FnMut(u8, &[u8]) -> io::Result<()> + Send + 'static,
@@ -452,6 +481,21 @@ impl<R: Read> Reader<R> {
     /// with small blocks.
     ///
     /// `w` is written from a scoped thread, so it may be borrowed, such as `&mut Vec<u8>`.
+    ///
+    /// # Example
+    ///
+    /// Decompress a file on all cores:
+    ///
+    /// ```no_run
+    /// use std::fs::File;
+    ///
+    /// use minlz::stream::Reader;
+    ///
+    /// let mut r = Reader::new(File::open("logs.mz")?);
+    /// let done = r.decode_concurrent(File::create("logs.txt")?, 0)?;
+    /// println!("decompressed {} bytes", done.bytes_written);
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
     pub fn decode_concurrent<W>(
         &mut self,
         w: W,

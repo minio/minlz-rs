@@ -30,7 +30,7 @@ use std::process::ExitCode;
 use args::{Cli, Subcommand};
 
 const USAGE: &str = "\
-MinLZ compression tool (Rust port).
+MinLZ compression tool.
 
 Usage:
   mz c [options] <input>       Compress one file (or - for stdin).

@@ -12,28 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MinLZ block codec — public API.
+//! The MinLZ block codec.
 //!
-//! Block format reference: [`SPEC.md`] §1–§2 and [`SPEC_SIMD.md`] in the upstream Go
-//! repository. [`decode`](fn@decode) and [`append_decoded`] read classic and SIMD blocks.
+//! The block format is specified in [`SPEC.md`] §1–§2 and [`SPEC_SIMD.md`], in the repository of
+//! the Go implementation. [`decode`](fn@decode) and [`append_decoded`] read classic and SIMD
+//! blocks.
 //!
 //! # SIMD blocks
 //!
 //! SIMD blocks are a block type added in v1.1 of the format. They store literals and operations
 //! in separate Huffman-coded streams, laid out so they can be decoded with SIMD. The `*Simd`
-//! [`Level`]s write them:
-//!
-//! ```
-//! use minlz::{Level, decode, encode};
-//!
-//! let src = b"SIMD blocks decode with AVX-512, AVX2 or NEON. ".repeat(1000);
-//! let mut block = Vec::new();
-//! encode(&mut block, &src, Level::FastestSimd)?;
-//! let mut out = Vec::new();
-//! decode(&mut out, &block)?;
-//! assert_eq!(out, src);
-//! # Ok::<(), minlz::Error>(())
-//! ```
+//! [`Level`]s write them.
 //!
 //! * Each block carries its own Huffman tables, so the SIMD levels pay off for blocks of 64 KiB
 //!   and more, such as stream blocks at the default 2 MiB. On small blocks the classic levels
@@ -49,6 +38,28 @@
 //!   VBMI2), POPCNT, AVX2 and BMI2; AVX2 on CPUs with AVX2 and BMI2; NEON on little-endian
 //!   aarch64. Other targets, and Miri, run portable code. The encoders' output does not depend on
 //!   the tier, and is the same as the Go encoders'.
+//!
+//! This function writes SIMD blocks only where they pay off:
+//!
+//! ```
+//! use minlz::{Level, decode, encode};
+//!
+//! fn compress(dst: &mut Vec<u8>, src: &[u8]) -> minlz::Result<()> {
+//!     let level = if src.len() >= 64 << 10 { Level::FastestSimd } else { Level::Fastest };
+//!     encode(dst, src, level)
+//! }
+//!
+//! let text = b"SIMD blocks decode with AVX-512, AVX2 or NEON. ";
+//! let (mut block, mut out) = (Vec::new(), Vec::new());
+//! for len in [1 << 10, 256 << 10] {
+//!     let src: Vec<u8> = text.iter().cycle().take(len).copied().collect();
+//!     compress(&mut block, &src)?;
+//!     // `decode` reads both block types.
+//!     decode(&mut out, &block)?;
+//!     assert_eq!(out, src);
+//! }
+//! # Ok::<(), minlz::Error>(())
+//! ```
 //!
 //! [`SPEC.md`]: https://github.com/minio/minlz/blob/main/SPEC.md
 //! [`SPEC_SIMD.md`]: https://github.com/minio/minlz/blob/main/SPEC_SIMD.md
@@ -225,6 +236,47 @@ fn reserve_room(dst: &mut Vec<u8>, max: usize) {
 /// `dst` and return `true`. Returns `false` (leaving `dst` unchanged) if the
 /// input is too small or does not compress to fewer bytes than the input — the
 /// give-up path, parity with Go `TryEncode` returning `nil`.
+///
+/// # Example
+///
+/// Store a value compressed only when that saves space, so values that do not compress are
+/// read without decoding. The first byte says which form follows.
+///
+/// ```
+/// use minlz::{Level, decode, try_encode};
+///
+/// fn pack(value: &[u8]) -> minlz::Result<Vec<u8>> {
+///     let mut stored = vec![1];
+///     if !try_encode(&mut stored, value, Level::Fastest)? {
+///         stored[0] = 0;
+///         stored.extend_from_slice(value);
+///     }
+///     Ok(stored)
+/// }
+///
+/// fn unpack(stored: &[u8]) -> minlz::Result<Vec<u8>> {
+///     let mut value = Vec::new();
+///     match stored.split_first() {
+///         Some((1, block)) => decode(&mut value, block)?,
+///         Some((0, raw)) => value.extend_from_slice(raw),
+///         _ => return Err(minlz::Error::Corrupt("unknown form")),
+///     }
+///     Ok(value)
+/// }
+///
+/// # fn random_bytes(n: usize) -> Vec<u8> {
+/// #     let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+/// #     (0..n).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x >> 32) as u8 }).collect()
+/// # }
+/// let text = b"to be, or not to be, that is the question. ".repeat(20);
+/// let noise = random_bytes(1000);
+/// assert_eq!(pack(&text)?[0], 1);
+/// assert_eq!(pack(&noise)?[0], 0);
+/// for value in [&text[..], &noise] {
+///     assert_eq!(unpack(&pack(value)?)?, value);
+/// }
+/// # Ok::<(), minlz::Error>(())
+/// ```
 pub fn try_encode(dst: &mut Vec<u8>, src: &[u8], level: Level) -> Result<bool, Error> {
     let max = max_encoded_len(src.len()).ok_or(Error::TooLarge)?;
     if src.len() < format::MIN_NON_LITERAL_BLOCK_SIZE {

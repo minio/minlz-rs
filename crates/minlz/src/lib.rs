@@ -12,11 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MinLZ — Rust port of the Go reference (`github.com/minio/minlz`).
+//! MinLZ: fast LZ77-style block and stream compression.
 //!
 //! Implements the MinLZ v1.1 specification: the v1.0 block and stream
 //! formats plus SIMD blocks.  See [`SPEC.md`] §1–§4 and [`SPEC_SIMD.md`]
-//! in the upstream Go repository for the wire format.
+//! in the repository of the Go implementation (`github.com/minio/minlz`)
+//! for the wire format.
+//!
+//! # Example
+//!
+//! Compress a file into a stream, and decompress it again:
+//!
+//! ```no_run
+//! use std::fs::File;
+//! use std::io;
+//!
+//! use minlz::stream::{Reader, Writer};
+//!
+//! // `finish` writes the last block and the end-of-stream marker. Without it,
+//! // readers report the stream as corrupt.
+//! let mut w = Writer::new(File::create("data.json.mz")?);
+//! io::copy(&mut File::open("data.json")?, &mut w)?;
+//! w.finish()?;
+//!
+//! // The reader checks the checksum of every block.
+//! let mut r = Reader::new(File::open("data.json.mz")?);
+//! io::copy(&mut r, &mut File::create("data.json.copy")?)?;
+//! # Ok::<(), io::Error>(())
+//! ```
 //!
 //! # What's here
 //!
@@ -57,6 +80,9 @@
 //! but pay a per-load byte-swap and are not in the perf-target matrix.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// A compiler warning in a doc example, such as an unused import or an ignored `Result`, fails the
+// doctest.
+#![doc(test(attr(deny(warnings))))]
 #![deny(missing_docs)]
 
 pub mod block;

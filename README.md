@@ -2,8 +2,13 @@
 
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue)](#license)
 
-A fast LZ77-style block / streaming compressor — Rust port of
-[`github.com/minio/minlz`](https://github.com/minio/minlz).
+A fast LZ77-style block and stream compressor for Rust.  A Go
+implementation of MinLZ is available at
+[`github.com/minio/minlz`](https://github.com/minio/minlz); both read
+and write the same format.  Go releases before v1.3.0 cannot read SIMD
+blocks.  The stream writers write classic blocks by default, but `mz`
+writes SIMD blocks unless given `--classic`; see
+[SIMD blocks](#simd-blocks).
 
 This implements the **MinLZ specification v1.1** (block + stream codec
 with SIMD blocks, including the optional stream index for random
@@ -70,9 +75,11 @@ integrity check — wrap them in a stream if corruption matters.
 ```rust
 use minlz::{encode, decode, Level};
 
-fn roundtrip(src: &[u8]) -> Result<(), minlz::Error> {
+fn main() -> Result<(), minlz::Error> {
+    let src = b"MinLZ compresses repeated text well. ".repeat(100);
+
     let mut compressed = Vec::new();
-    encode(&mut compressed, src, Level::Balanced)?;
+    encode(&mut compressed, &src, Level::Balanced)?;
 
     let mut decoded = Vec::new();
     decode(&mut decoded, &compressed)?;
@@ -93,15 +100,17 @@ ecosystem.
 use std::io::{Read, Write};
 use minlz::stream::{Reader, Writer};
 
-fn roundtrip(src: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut compressed: Vec<u8> = Vec::new();
-    let mut w = Writer::new(&mut compressed);
-    w.write_all(src)?;
-    w.finish()?;                              // flush + EOF
+fn main() -> std::io::Result<()> {
+    let src = b"MinLZ compresses repeated text well. ".repeat(100);
+
+    let mut w = Writer::new(Vec::new());
+    w.write_all(&src)?;
+    let compressed = w.finish()?;             // flush + EOF
 
     let mut out = Vec::new();
     Reader::new(&compressed[..]).read_to_end(&mut out)?;
-    Ok(out)
+    assert_eq!(out, src);
+    Ok(())
 }
 ```
 
@@ -120,15 +129,17 @@ moves the sink into the writer thread and returns it via `finish`.
 use std::io::Write;
 use minlz::stream::{MtWriter, Reader};
 
-fn parallel_roundtrip(payload: &[u8]) -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
+    let payload = b"MinLZ compresses repeated text well. ".repeat(50_000);
+
     let mut w = MtWriter::new(Vec::<u8>::new());
-    w.write_all(payload)?;
+    w.write_all(&payload)?;
     let compressed = w.finish()?;
 
     // 0 threads: one per available core.
     let mut reader = Reader::new(&compressed[..]);
     let decoded = reader.decode_concurrent(Vec::<u8>::new(), 0)?;
-    println!("decoded {} bytes", decoded.bytes_written);
+    assert_eq!(decoded.writer, payload);
     Ok(())
 }
 ```
@@ -139,26 +150,30 @@ fn parallel_roundtrip(payload: &[u8]) -> std::io::Result<()> {
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use minlz::stream::{ReadSeeker, Reader, WriterBuilder};
 
-fn random_read(payload: &[u8], offset: u64) -> std::io::Result<Vec<u8>> {
-    let mut compressed: Vec<u8> = Vec::new();
+fn main() -> std::io::Result<()> {
+    // 100,000 lines of 13 bytes: "line 0000000\n", "line 0000001\n", ...
+    let text: String = (0..100_000).map(|i| format!("line {i:07}\n")).collect();
+
     let mut w = WriterBuilder::new()
+        .block_size(64 << 10)
         .append_index()                  // index chunk after EOF
-        .build(&mut compressed)?;
-    w.write_all(payload)?;
-    w.finish()?;
+        .build(Vec::new())?;
+    w.write_all(text.as_bytes())?;
+    let compressed = w.finish()?;
 
     // ReadSeeker::new loads the index from the end of the stream.
     let reader = Reader::new(Cursor::new(compressed));
     let mut rs = ReadSeeker::new(reader)?;
-    rs.seek(SeekFrom::Start(offset))?;
-    let mut buf = vec![0u8; 4096];
-    rs.read_exact(&mut buf)?;
-    Ok(buf)
+    rs.seek(SeekFrom::Start(70_000 * 13))?;
+    let mut line = [0u8; 13];
+    rs.read_exact(&mut line)?;
+    assert_eq!(&line, b"line 0070000\n");
+    Ok(())
 }
 ```
 
 Working examples for these patterns live under
-[`crates/minlz/examples/`](crates/minlz/examples/) — see
+[`crates/minlz/examples/`](https://github.com/minio/minlz-rs/tree/main/crates/minlz/examples/) — see
 `index_random_access.rs` and `index_sidecar.rs` for the full plumbing.
 
 ## Compression levels
@@ -195,9 +210,11 @@ readers read both block types.
 ```rust
 use minlz::{decode, encode, Level};
 
-fn roundtrip(src: &[u8]) -> Result<(), minlz::Error> {
+fn main() -> Result<(), minlz::Error> {
+    let src = b"SIMD blocks pay off for blocks of 64 KiB and more. ".repeat(2000);
+
     let mut compressed = Vec::new();
-    encode(&mut compressed, src, Level::FastestSimd)?;
+    encode(&mut compressed, &src, Level::FastestSimd)?;
 
     // decode handles both block types.
     let mut decoded = Vec::new();
@@ -690,7 +707,7 @@ checksums are included).  Decode timing targets `io::sink()` — for MinLZ
 ST that is a `BufRead::fill_buf` loop, for MinLZ MT it is
 `decode_concurrent(io::sink(), 32)`, for the rest it is
 `io::copy(decoder, &mut io::sink())`.  This mirrors what
-[`mz bench`](bin/mz/src/bench.rs) reports (`dec(st)` / `dec(mt)`).
+[`mz bench`](https://github.com/minio/minlz-rs/blob/main/bin/mz/src/bench.rs) reports (`dec(st)` / `dec(mt)`).
 Each variant is verified once via a full decode-to-`Vec` byte compare
 against the source; the verify pass is excluded from the timed loop.
 Best of 3 iterations per (codec, input).  MinLZ encodes with
@@ -713,9 +730,9 @@ Hardware: AMD Ryzen 9 9950X (16C / 32T, Zen 5), 64 GiB DDR5, Windows 11.
 
 Corpus: 11 files from the [Snappy benchmark set] plus the first 1 GiB
 of each of five real-world inputs.  Full per-file breakdowns live in
-[`_helpers/cross_codec/results.md`](_helpers/cross_codec/results.md);
+[`_helpers/cross_codec/results.md`](https://github.com/minio/minlz-rs/blob/main/_helpers/cross_codec/results.md);
 the harness itself is at
-[`_helpers/cross_codec/`](_helpers/cross_codec/) and rebuilds with
+[`_helpers/cross_codec/`](https://github.com/minio/minlz-rs/tree/main/_helpers/cross_codec/) and rebuilds with
 `cargo build --release` from that directory.  Measuring appends CSV
 rows; `--report` prints the tables:
 
@@ -771,12 +788,14 @@ AVX-512; on AVX2, Rust is 0.97–0.99× of master and 0.91–0.96× of #35.
 
 ## CLI: `mz`
 
-The `mz` binary at `bin/mz/` is a Rust port of the Go `cmd/mz` tool.
+The `mz` binary at `bin/mz/` is the MinLZ command-line tool.  Its
+commands follow those of the Go tool, `cmd/mz`.
 
-Build or install from a checkout of this repo:
+Install it from crates.io, or build it from a checkout of this repo:
 
 ```sh
-cargo install --path bin/mz            # installs to ~/.cargo/bin/mz
+cargo install minio-mz                 # installs to ~/.cargo/bin/mz
+cargo install --path bin/mz            # the same, from the checkout
 cargo build --release -p minio-mz      # or just build; binary at target/release/mz
 ```
 
@@ -803,8 +822,8 @@ default block size is 8 MiB, as in Go.  `mz --help` lists every flag.
 
 This crate implements the **MinLZ specification v1.1**, including SIMD
 blocks: block type 1 ([SPEC_SIMD.md]), stream chunk type 0x10 with its
-XXH3 check, and the SIMD stream flag.  Features not implemented (versus
-the Go reference):
+XXH3 check, and the SIMD stream flag.  The Go implementation has these
+features, and this crate does not:
 
 - Snappy / S2 fallback decoding for streams whose first byte indicates a
   legacy magic.
@@ -825,11 +844,11 @@ cargo bench -p minio-minlz --bench xxh3    # criterion: XXH3
 The `reference` feature builds a clean-room reference decoder that the
 tests and fuzzers use as an oracle; semver does not cover it.  The SIMD
 encoders are checked against blocks written by the Go encoder, in
-[`crates/minlz/tests/fixtures/simd.zip`](crates/minlz/tests/fixtures/simd.zip).
+[`crates/minlz/tests/fixtures/simd.zip`](https://github.com/minio/minlz-rs/blob/main/crates/minlz/tests/fixtures/simd.zip).
 Further cross checks against the Go package run when these are set,
 and are skipped otherwise:
 
-- `MINLZ_SIMDGO` — the Go helper in [`_helpers/simdgo/`](_helpers/simdgo/)
+- `MINLZ_SIMDGO` — the Go helper in [`_helpers/simdgo/`](https://github.com/minio/minlz-rs/tree/main/_helpers/simdgo/)
   (`go build` there; it expects the Go repository next to this one, as
   `../minlz`).  `cargo test --release -p minio-minlz --test simd_fixtures`
   then also encodes fresh inputs with Go at every SIMD level and
@@ -844,12 +863,12 @@ and are skipped otherwise:
 `bash _helpers/arm64-test.sh [filter]` runs the library tests on
 aarch64 (the NEON tiers) under QEMU in Docker, from Linux or Git Bash.
 
-Fuzzing lives at [`crates/minlz/fuzz/`](crates/minlz/fuzz/) with nine
+Fuzzing lives at [`crates/minlz/fuzz/`](https://github.com/minio/minlz-rs/tree/main/crates/minlz/fuzz/) with nine
 targets: block (`roundtrip`, `decode_arbitrary`, `simd_decode`), stream
 (`stream_roundtrip`, `stream_decode_arbitrary`, `index_load`) and pivco
 (`pivco_decode`, `pivco_roundtrip`, `pivco_table`).  Seeds come from the ignored
-`write_fuzz_seeds` tests.  See its [`README.md`](crates/minlz/fuzz/README.md)
-and [`RUNBOOK.md`](crates/minlz/fuzz/RUNBOOK.md) for setup.
+`write_fuzz_seeds` tests.  See its [`README.md`](https://github.com/minio/minlz-rs/blob/main/crates/minlz/fuzz/README.md)
+and [`RUNBOOK.md`](https://github.com/minio/minlz-rs/blob/main/crates/minlz/fuzz/RUNBOOK.md) for setup.
 
 Pick the benchmark tool by what you want to know:
 
@@ -857,10 +876,10 @@ Pick the benchmark tool by what you want to know:
 | ---------------------------------------- | ------------------------------------------------ |
 | Check whether a change is faster         | `cargo xtask bench <rev>`                        |
 | Study one build in detail                | `cargo bench -p minio-minlz --bench <name>`      |
-| Compare MinLZ with other codecs          | [`_helpers/cross_codec/`](_helpers/cross_codec/) |
+| Compare MinLZ with other codecs          | [`_helpers/cross_codec/`](https://github.com/minio/minlz-rs/tree/main/_helpers/cross_codec/) |
 | Time one file, or compare with Go's `mz` | `mz bench`                                       |
 
-`cargo xtask bench <rev>` builds [`crates/minlz-bench`](crates/minlz-bench/)
+`cargo xtask bench <rev>` builds [`crates/minlz-bench`](https://github.com/minio/minlz-rs/tree/main/crates/minlz-bench/)
 against commit `rev` and against the working tree. It runs the two builds
 in turn and keeps the fastest sample of each run. Other programs on the
 machine then hardly affect the result. For a run pinned to one core, add
@@ -878,8 +897,8 @@ MSRV: **Rust 1.89**.
 ## License
 
 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) —
-same as the upstream Go implementation.
+the same license as the Go implementation.
 
 The AVX-512 histogram in `crates/minlz/src/pivco/kernel/avx512.rs` is a
 port of Harold Aptroot's histogram under the MIT License; see
-[`crates/minlz/src/pivco/kernel/LICENSE-histogram`](crates/minlz/src/pivco/kernel/LICENSE-histogram).
+[`crates/minlz/src/pivco/kernel/LICENSE-histogram`](https://github.com/minio/minlz-rs/blob/main/crates/minlz/src/pivco/kernel/LICENSE-histogram).

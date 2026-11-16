@@ -45,6 +45,33 @@ const INDEX_HEADER: &[u8; 6] = b"s2idx\x00";
 /// `ReadSeeker` implements [`Read`] (forwarded to the inner reader) and
 /// [`Seek`] (interpreted as uncompressed offsets, never compressed).  See
 /// [`ReadSeeker::read_at`] for the [`std::io::Read`] + offset hybrid.
+///
+/// # Example
+///
+/// Read one line from the middle of a stream. The reader decodes the first block of the stream on
+/// the first seek, and then the block that holds the line. It skips the blocks in between without
+/// decoding them.
+///
+/// ```
+/// use std::io::{Cursor, Write};
+///
+/// use minlz::stream::{ReadSeeker, Reader, WriterBuilder};
+///
+/// // 100,000 lines of 13 bytes: "line 0000000\n", "line 0000001\n", ...
+/// let text: String = (0..100_000).map(|i| format!("line {i:07}\n")).collect();
+///
+/// // `append_index` writes the index at the end of the stream.
+/// let mut w = WriterBuilder::new().block_size(64 << 10).append_index().build(Vec::new())?;
+/// w.write_all(text.as_bytes())?;
+/// let stream = w.finish()?;
+///
+/// // `ReadSeeker::new` loads the index from the end of the stream.
+/// let mut rs = ReadSeeker::new(Reader::new(Cursor::new(stream)))?;
+/// let mut line = [0; 13];
+/// rs.read_exact_at(&mut line, 70_000 * 13)?;
+/// assert_eq!(&line, b"line 0070000\n");
+/// # Ok::<(), std::io::Error>(())
+/// ```
 pub struct ReadSeeker<R: Read + Seek> {
     reader: Reader<R>,
     index: Index,
