@@ -18,7 +18,7 @@ use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use minlz::Level;
+use minlz::{Level, cpu};
 
 #[derive(Debug)]
 pub struct Cli {
@@ -37,8 +37,17 @@ pub enum Subcommand {
 
 #[derive(Debug)]
 pub struct Options {
+    /// The level to write, set by [`parse`]: a SIMD level unless `--classic`; `None` with `-0`.
     pub level: Option<Level>,
-    pub uncompressed: bool,
+    /// `-1/-2/-3/--level/-xfast`; [`parse`] resolves it into `level`.
+    base: Option<Level>,
+    uncompressed: bool,
+    /// `--classic`: write classic MinLZ blocks (Go `-classic`).
+    classic: bool,
+    /// `--simd.delta`: SIMD delta literals (Go `-simd.delta`).
+    simd_delta: bool,
+    /// `minlz::cpu` features turned off by the hidden `--avx2/--avx512/--neon=false`.
+    pub cpu_off: u32,
     pub block_size: Option<usize>,
     pub padding: Option<u32>,
     pub block: bool,
@@ -60,7 +69,7 @@ pub struct Options {
     /// Requires the stream to carry an index.
     pub offset: Option<u64>,
     /// Decompress: only emit the last N uncompressed bytes (`-tail`).
-    /// Requires an index.
+    /// Stream input needs an index.
     pub tail: Option<u64>,
     /// After seeking via `--tail` or `--offset`, skip bytes until the
     /// next `\n` so output starts at a line boundary.  Toggled by the
@@ -76,7 +85,11 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             level: None,
+            base: None,
             uncompressed: false,
+            classic: false,
+            simd_delta: false,
+            cpu_off: 0,
             block_size: None,
             padding: None,
             block: false,
@@ -134,38 +147,22 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     let mut alias = SubcommandAlias::None;
     let mut opts = Options::default();
     let mut input: Option<PathBuf> = None;
-    let mut help_only = false;
 
     while let Some(arg) = it.next() {
         let s = arg.to_string_lossy().to_string();
-        if s == "--help" || s == "-h" {
-            help_only = true;
-            opts.help = true;
+        if sub.is_none()
+            && !s.starts_with('-')
+            && let Some(parsed) = parse_subcommand(&s)
+        {
+            sub = Some(parsed);
+            alias = subcommand_alias(&s);
             continue;
         }
-        if sub.is_none() && !s.starts_with('-') {
-            if let Some(parsed) = parse_subcommand(&s) {
-                sub = Some(parsed);
-                alias = subcommand_alias(&s);
-                continue;
-            }
-        }
-        if s == "-" {
-            // stdin/stdout sentinel; we still record it so we know it's
-            // present.
-            input = Some(PathBuf::from("-"));
-            continue;
-        }
-        if let Some(rest) = s.strip_prefix("--") {
+        // As in Go's flag package, `-name` and `--name` are the same flag; `-` is stdin.
+        if s != "-"
+            && let Some(rest) = s.strip_prefix("--").or_else(|| s.strip_prefix('-'))
+        {
             apply_long_flag(rest, &mut it, &mut opts)?;
-            continue;
-        }
-        if let Some(rest) = s.strip_prefix('-') {
-            if rest.is_empty() {
-                input = Some(PathBuf::from("-"));
-                continue;
-            }
-            apply_short_flag(rest, &mut it, &mut opts)?;
             continue;
         }
         if input.is_some() {
@@ -173,9 +170,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
         }
         input = Some(PathBuf::from(s));
     }
+    opts.cpu_off = cpu_mask(opts.cpu_off);
 
     // Help — caller will print and exit 0; pass it through.
-    if help_only {
+    if opts.help {
         return Ok(Cli {
             subcommand: sub.unwrap_or(Subcommand::Compress),
             options: opts,
@@ -197,9 +195,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     };
 
     // Sanity: cannot combine -0 (uncompressed) with --level.
-    if opts.uncompressed && opts.level.is_some() {
+    if opts.uncompressed && opts.base.is_some() {
         return Err(ParseError::ConflictingLevels);
     }
+    let level = write_level(&opts)?;
+    opts.level = (!opts.uncompressed).then_some(level);
     if subcommand == Subcommand::Bench && opts.bench_n.is_none() {
         opts.bench_n = Some(5);
     }
@@ -250,6 +250,63 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, ParseError
     })
 }
 
+/// The level Go's `mainCompress` writes: SIMD blocks unless `--classic`.
+fn write_level(opts: &Options) -> Result<Level, ParseError> {
+    let level = opts.base.unwrap_or(Level::Balanced);
+    if opts.simd_delta && (opts.classic || opts.uncompressed || level == Level::Smallest) {
+        return Err(ParseError::InvalidValue(
+            "--simd.delta".into(),
+            "cannot be used with --classic, -0 or -3".into(),
+        ));
+    }
+    if opts.classic {
+        return Ok(level);
+    }
+    Ok(match (level, opts.simd_delta) {
+        (Level::SuperFast, false) => Level::SuperFastSimd,
+        (Level::SuperFast, true) => Level::SuperFastSimdDelta,
+        (Level::Fastest, false) => Level::FastestSimd,
+        (Level::Fastest, true) => Level::FastestSimdDelta,
+        (Level::Balanced, false) => Level::BalancedSimd,
+        (Level::Balanced, true) => Level::BalancedSimdDelta,
+        (Level::Smallest, _) => Level::SmallestSimd,
+        (simd, _) => unreachable!("level flags set only classic levels, not {simd:?}"),
+    })
+}
+
+/// Widens the features `--avx2/--avx512/--neon=false` turned off to all the `minlz::cpu`
+/// features they cover. As in Go, AVX-512 needs AVX2, and the pivco kernels follow the exec
+/// tiers.
+fn cpu_mask(mut off: u32) -> u32 {
+    if off & cpu::AVX2 != 0 {
+        off |= cpu::PIVCO_AVX2 | cpu::AVX512;
+    }
+    if off & cpu::AVX512 != 0 {
+        off |= cpu::PIVCO_AVX512 | cpu::PIVCO_HIST_AVX512;
+    }
+    off
+}
+
+/// Records a CPU toggle on its own bit, so the last value given wins, as in Go.
+fn set_cpu(opts: &mut Options, feature: u32, on: bool) {
+    if on {
+        opts.cpu_off &= !feature;
+    } else {
+        opts.cpu_off |= feature;
+    }
+}
+
+fn parse_bool(name: &str, val: &str) -> Result<bool, ParseError> {
+    match val {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(ParseError::InvalidValue(
+            format!("--{name}"),
+            val.to_string(),
+        )),
+    }
+}
+
 fn parse_subcommand(s: &str) -> Option<Subcommand> {
     match s {
         "c" | "compress" => Some(Subcommand::Compress),
@@ -278,54 +335,88 @@ enum SubcommandAlias {
 }
 
 fn apply_long_flag<I: Iterator<Item = OsString>>(
-    name: &str,
+    flag: &str,
     it: &mut std::iter::Peekable<I>,
     opts: &mut Options,
 ) -> Result<(), ParseError> {
-    // `--name=value` form.
-    if let Some((k, v)) = name.split_once('=') {
-        return set_long_value(k, v, opts);
-    }
+    let (name, val) = match flag.split_once('=') {
+        Some((k, v)) => (k, Some(v)),
+        None => (flag, None),
+    };
+    // As in Go's flag package, a bool flag is `-name` or `-name=value`, never `-name value`.
+    let on = || val.map_or(Ok(true), |v| parse_bool(name, v));
     match name {
-        "block" => opts.block = true,
-        "stdout" => opts.stdout = true,
-        "rm" => opts.remove = true,
-        "quiet" => opts.quiet = true,
-        "verify" => opts.verify = true,
-        "help" => opts.help = true,
-        "no-index" => opts.index = false,
-        "follow" => opts.follow = true,
-        _ => {
-            // Long flags that take a separate argument.
-            let val = it
-                .next()
-                .ok_or_else(|| ParseError::MissingValue(format!("--{name}")))?
-                .into_string()
-                .map_err(|_| ParseError::InvalidValue(format!("--{name}"), "<non-utf8>".into()))?;
+        // Go's level flags are bools too; `=false` undoes the same flag given earlier.
+        "xfast" | "1" | "2" | "3" => {
+            let level = Some(match name {
+                "xfast" => Level::SuperFast,
+                "1" => Level::Fastest,
+                "2" => Level::Balanced,
+                _ => Level::Smallest,
+            });
+            if on()? {
+                opts.base = level;
+            } else if opts.base == level {
+                opts.base = None;
+            }
+        }
+        "0" => opts.uncompressed = on()?,
+        "block" => opts.block = on()?,
+        "c" | "stdout" => opts.stdout = on()?,
+        "rm" => opts.remove = on()?,
+        "q" | "quiet" => opts.quiet = on()?,
+        "verify" => opts.verify = on()?,
+        "h" | "help" => opts.help = on()?,
+        "index" => opts.index = on()?,
+        "no-index" => opts.index = !on()?,
+        "follow" => opts.follow = on()?,
+        "classic" => opts.classic = on()?,
+        "simd.delta" => opts.simd_delta = on()?,
+        "avx2" => set_cpu(opts, cpu::AVX2, on()?),
+        "avx512" => set_cpu(opts, cpu::AVX512, on()?),
+        "neon" => set_cpu(opts, cpu::NEON, on()?),
+        "level" | "block-size" | "pad" | "o" | "output" | "bench" | "threads" | "cpu"
+        | "offset" | "tail" => {
+            let val = match val {
+                Some(v) => v.to_owned(),
+                None => it
+                    .next()
+                    .ok_or_else(|| ParseError::MissingValue(format!("--{name}")))?
+                    .into_string()
+                    .map_err(|_| {
+                        ParseError::InvalidValue(format!("--{name}"), "<non-utf8>".into())
+                    })?,
+            };
             return set_long_value(name, &val, opts);
         }
+        // Go reports an undefined flag without consuming the argument after it.
+        _ => return Err(ParseError::UnknownFlag(format!("--{name}"))),
     }
     Ok(())
 }
 
 fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), ParseError> {
     match name {
-        "level" => opts.level = Some(parse_level(val)?),
+        "level" => opts.base = Some(parse_level(val)?),
         "block-size" => {
             opts.block_size = Some(
                 parse_size(val)
-                    .map_err(|_| ParseError::InvalidValue("--block-size".into(), val.to_string()))?
-                    as usize,
+                    .ok()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| {
+                        ParseError::InvalidValue("--block-size".into(), val.to_string())
+                    })?,
             )
         }
         "pad" => {
             opts.padding = Some(
                 parse_size(val)
-                    .map_err(|_| ParseError::InvalidValue("--pad".into(), val.to_string()))?
-                    as u32,
+                    .ok()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| ParseError::InvalidValue("--pad".into(), val.to_string()))?,
             )
         }
-        "output" => opts.output = Some(PathBuf::from(val)),
+        "o" | "output" => opts.output = Some(PathBuf::from(val)),
         "bench" => {
             opts.bench_n = Some(
                 val.parse()
@@ -340,11 +431,6 @@ fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), Parse
                 ParseError::InvalidValue(format!("--{name}"), "must be ≥ 1".into())
             })?);
         }
-        "index" => match val {
-            "true" | "1" | "yes" => opts.index = true,
-            "false" | "0" | "no" => opts.index = false,
-            _ => return Err(ParseError::InvalidValue("--index".into(), val.to_string())),
-        },
         "offset" => {
             let (n, nl) = parse_size_with_nl(val)
                 .map_err(|_| ParseError::InvalidValue("--offset".into(), val.to_string()))?;
@@ -362,56 +448,6 @@ fn set_long_value(name: &str, val: &str, opts: &mut Options) -> Result<(), Parse
             }
         }
         _ => return Err(ParseError::UnknownFlag(format!("--{name}"))),
-    }
-    Ok(())
-}
-
-fn apply_short_flag<I: Iterator<Item = OsString>>(
-    rest: &str,
-    it: &mut std::iter::Peekable<I>,
-    opts: &mut Options,
-) -> Result<(), ParseError> {
-    // Multi-char form like `-index=true` / `-offset 64K` — forward to
-    // the long-flag handler for Go `cmd/mz` parity.
-    let stem = rest.split_once('=').map(|(k, _)| k).unwrap_or(rest);
-    if stem.len() > 1 {
-        return apply_long_flag(rest, it, opts);
-    }
-    // Single-char shorts: -0, -1, -2, -3, -c, -q, -h, -o FILE
-    let mut chars = rest.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '0' => opts.uncompressed = true,
-            '1' => opts.level = Some(Level::Fastest),
-            '2' => opts.level = Some(Level::Balanced),
-            '3' => opts.level = Some(Level::Smallest),
-            'c' => opts.stdout = true,
-            'q' => opts.quiet = true,
-            'h' => opts.help = true,
-            'o' => {
-                let val = if let Some(c) = chars.next() {
-                    // `-oFILE` or `-o FILE`.
-                    let mut s: String = std::iter::once(c).chain(chars.by_ref()).collect();
-                    if s.is_empty() {
-                        s = it
-                            .next()
-                            .ok_or_else(|| ParseError::MissingValue("-o".into()))?
-                            .into_string()
-                            .map_err(|_| {
-                                ParseError::InvalidValue("-o".into(), "<non-utf8>".into())
-                            })?;
-                    }
-                    s
-                } else {
-                    it.next()
-                        .ok_or_else(|| ParseError::MissingValue("-o".into()))?
-                        .into_string()
-                        .map_err(|_| ParseError::InvalidValue("-o".into(), "<non-utf8>".into()))?
-                };
-                opts.output = Some(PathBuf::from(val));
-            }
-            _ => return Err(ParseError::UnknownFlag(format!("-{c}"))),
-        }
     }
     Ok(())
 }
@@ -489,18 +525,118 @@ mod tests {
 
     #[test]
     fn level_flags() {
-        let cli = parse_argv(&["-1", "x"]).unwrap();
+        let cli = parse_argv(&["-xfast", "--classic", "x"]).unwrap();
+        assert_eq!(cli.options.level, Some(Level::SuperFast));
+        let cli = parse_argv(&["-1", "--classic", "x"]).unwrap();
         assert_eq!(cli.options.level, Some(Level::Fastest));
-        let cli = parse_argv(&["-3", "x"]).unwrap();
+        let cli = parse_argv(&["-3", "-classic", "x"]).unwrap();
         assert_eq!(cli.options.level, Some(Level::Smallest));
-        let cli = parse_argv(&["--level", "2", "x"]).unwrap();
+        let cli = parse_argv(&["--level", "2", "--classic=true", "x"]).unwrap();
         assert_eq!(cli.options.level, Some(Level::Balanced));
+        let cli = parse_argv(&["--classic", "x"]).unwrap();
+        assert_eq!(cli.options.level, Some(Level::Balanced));
+    }
+
+    #[test]
+    fn simd_levels_by_default() {
+        for (args, want) in [
+            (&[][..], Level::BalancedSimd),
+            (&["-xfast"], Level::SuperFastSimd),
+            (&["--xfast"], Level::SuperFastSimd),
+            (&["-1"], Level::FastestSimd),
+            (&["-2"], Level::BalancedSimd),
+            (&["-3"], Level::SmallestSimd),
+            (&["--level", "1"], Level::FastestSimd),
+            (&["--classic=false", "-1"], Level::FastestSimd),
+            (&["--simd.delta"], Level::BalancedSimdDelta),
+            (&["-xfast", "-simd.delta"], Level::SuperFastSimdDelta),
+            (&["-1", "--simd.delta=true"], Level::FastestSimdDelta),
+            (&["-2", "--simd.delta"], Level::BalancedSimdDelta),
+            (&["-2", "--simd.delta=false"], Level::BalancedSimd),
+        ] {
+            let cli = parse_argv(&[&["c"], args, &["x"]].concat()).unwrap();
+            assert_eq!(cli.options.level, Some(want), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn simd_flag_conflicts() {
+        for args in [
+            &["--simd.delta", "--classic"][..],
+            &["--simd.delta", "-0"],
+            &["--simd.delta", "-3"],
+        ] {
+            let err = parse_argv(&[&["c"], args, &["x"]].concat()).unwrap_err();
+            assert!(
+                matches!(err, ParseError::InvalidValue(ref s, _) if s == "--simd.delta"),
+                "{args:?}: {err:?}"
+            );
+        }
+        let err = parse_argv(&["c", "-xfast", "-0", "x"]).unwrap_err();
+        assert!(matches!(err, ParseError::ConflictingLevels), "{err:?}");
+    }
+
+    #[test]
+    fn cpu_toggles() {
+        const AVX512: u32 = cpu::AVX512 | cpu::PIVCO_AVX512 | cpu::PIVCO_HIST_AVX512;
+        for (args, want) in [
+            (&["-avx2", "--avx512=true", "-neon=1"][..], 0),
+            (&["-avx2=false"], cpu::AVX2 | cpu::PIVCO_AVX2 | AVX512),
+            (&["--avx512=false"], AVX512),
+            (&["-neon=false"], cpu::NEON),
+            (&["-avx512=false", "-avx2=true"], AVX512),
+        ] {
+            let cli = parse_argv(&[args, &["c", "x"]].concat()).unwrap();
+            assert_eq!(cli.options.cpu_off, want, "{args:?}");
+        }
+        assert!(parse_argv(&["-avx2=maybe", "c", "x"]).is_err());
+    }
+
+    #[test]
+    fn bool_flag_values() {
+        for (args, want) in [
+            (&["-xfast=true"][..], Level::SuperFastSimd),
+            (&["-1", "-xfast=false"], Level::FastestSimd),
+            (&["-xfast", "-xfast=false"], Level::BalancedSimd),
+            (&["-1", "-1=false"], Level::BalancedSimd),
+            (&["-3=1"], Level::SmallestSimd),
+        ] {
+            let cli = parse_argv(&[&["c"], args, &["x"]].concat()).unwrap();
+            assert_eq!(cli.options.level, Some(want), "{args:?}");
+        }
+        let cli = parse_argv(&["c", "-c=true", "-block=1", "-rm=false", "-0=false", "x"]).unwrap();
+        let o = &cli.options;
+        assert!(o.stdout && o.block && !o.remove && !o.uncompressed);
+        for args in [
+            &["-avx2=false", "-avx2=true"][..],
+            &["-neon=false", "--neon"],
+            &["-avx512=false", "-avx512"],
+        ] {
+            let cli = parse_argv(&[args, &["c", "x"]].concat()).unwrap();
+            assert_eq!(cli.options.cpu_off, 0, "{args:?}");
+        }
+        assert!(parse_argv(&["c", "-q=maybe", "x"]).is_err());
+    }
+
+    #[test]
+    fn unknown_flag_takes_no_value() {
+        for argv in [
+            ["c", "a.txt", "-x"],
+            ["c", "a.txt", "--bogus"],
+            ["c", "-x", "a.txt"],
+        ] {
+            assert!(
+                matches!(parse_argv(&argv), Err(ParseError::UnknownFlag(_))),
+                "{argv:?}"
+            );
+        }
     }
 
     #[test]
     fn level_zero_uncompressed() {
         let cli = parse_argv(&["-0", "x"]).unwrap();
         assert!(cli.options.uncompressed);
+        assert_eq!(cli.options.level, None);
     }
 
     #[test]
@@ -519,6 +655,41 @@ mod tests {
             cli.options.output.as_deref(),
             Some(std::path::Path::new("foo.mz"))
         );
+    }
+
+    #[test]
+    fn go_style_flag_values() {
+        let cli = parse_argv(&["c", "-o=out.mz", "in.txt"]).unwrap();
+        assert_eq!(
+            cli.options.output.as_deref(),
+            Some(std::path::Path::new("out.mz"))
+        );
+        let cli = parse_argv(&["c", "--o", "out.mz", "--1", "in.txt"]).unwrap();
+        assert_eq!(
+            cli.options.output.as_deref(),
+            Some(std::path::Path::new("out.mz"))
+        );
+        assert_eq!(cli.options.level, Some(Level::FastestSimd));
+        assert!(matches!(
+            parse_argv(&["c", "a.txt", "-"]),
+            Err(ParseError::TooManyInputs)
+        ));
+    }
+
+    #[test]
+    fn bare_index_is_a_toggle() {
+        for args in [
+            &["c", "--no-index", "--index", "e.txt"][..],
+            &["c", "-index", "e.txt"],
+        ] {
+            let cli = parse_argv(args).unwrap();
+            assert!(cli.options.index, "{args:?}");
+            assert_eq!(cli.input, Some(PathBuf::from("e.txt")), "{args:?}");
+        }
+        let cli = parse_argv(&["c", "-index", "-c", "e.txt"]).unwrap();
+        assert!(cli.options.index && cli.options.stdout);
+        let cli = parse_argv(&["c", "-index=false", "e.txt"]).unwrap();
+        assert!(!cli.options.index);
     }
 
     #[test]
@@ -548,13 +719,13 @@ mod tests {
     fn conflicting_levels_error() {
         // -0 + --level should conflict.
         let err = parse_argv(&["-0", "--level", "2", "x"]).unwrap_err();
-        matches!(err, ParseError::ConflictingLevels);
+        assert!(matches!(err, ParseError::ConflictingLevels), "{err:?}");
     }
 
     #[test]
     fn no_subcommand_no_input_errors() {
         let err = parse_argv(&[]).unwrap_err();
-        matches!(err, ParseError::NoSubcommand);
+        assert!(matches!(err, ParseError::NoSubcommand), "{err:?}");
     }
 
     #[test]
@@ -562,6 +733,17 @@ mod tests {
         let cli = parse_argv(&["--block-size", "64K", "--pad", "4096", "in.txt"]).unwrap();
         assert_eq!(cli.options.block_size, Some(64 << 10));
         assert_eq!(cli.options.padding, Some(4096));
+    }
+
+    #[test]
+    fn pad_out_of_u32_range_rejected() {
+        for args in [&["--pad", "4G"][..], &["--pad", "4294971392"]] {
+            let err = parse_argv(&[args, &["in.txt"]].concat()).unwrap_err();
+            assert!(
+                matches!(err, ParseError::InvalidValue(ref s, _) if s == "--pad"),
+                "{args:?}: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -626,6 +808,26 @@ mod tests {
     fn follow_with_bench_errors() {
         let err = parse_argv(&["d", "--follow", "--bench=2", "file.mz"]).unwrap_err();
         assert!(matches!(err, ParseError::InvalidValue(ref s, _) if s == "--follow"));
+    }
+
+    #[test]
+    fn every_help_spelling_skips_validation() {
+        for h in ["-h", "--help", "-help"] {
+            for argv in [
+                &[h][..],
+                &["c", "--simd.delta", "-3", h],
+                &["c", "-0", "--level", "2", h],
+            ] {
+                assert!(parse_argv(argv).unwrap().options.help, "{argv:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn follow_with_cat_not_tail() {
+        let cli = parse_argv(&["cat", "--follow", "file.mz"]).unwrap();
+        assert!(cli.options.follow && cli.options.stdout && cli.options.tail.is_none());
+        assert!(parse_argv(&["tail", "--follow", "file.mz"]).is_err());
     }
 
     #[test]

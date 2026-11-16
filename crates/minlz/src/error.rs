@@ -33,6 +33,10 @@ pub enum Error {
     ///
     /// Equivalent to Go's `ErrInvalidLevel`.
     InvalidLevel,
+    /// The block uses a reserved block type, for a newer format version.
+    ///
+    /// Equivalent to Go's `ErrUnsupported`.
+    Unsupported,
 }
 
 impl fmt::Display for Error {
@@ -41,6 +45,7 @@ impl fmt::Display for Error {
             Error::Corrupt(reason) => write!(f, "minlz: corrupt input: {reason}"),
             Error::TooLarge => f.write_str("minlz: decoded block is too large"),
             Error::InvalidLevel => f.write_str("minlz: invalid compression level"),
+            Error::Unsupported => f.write_str("minlz: unsupported input"),
         }
     }
 }

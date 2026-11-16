@@ -24,6 +24,7 @@ use super::format::{
 };
 use super::hash::{hash5, hash6};
 use super::load_store::{load32, load64};
+use super::table_pool::{self, U32_15};
 
 /// Entry point: dispatches on `src.len()`.  Returns the number of bytes
 /// written into `dst` or `0` if the block is incompressible.
@@ -42,11 +43,16 @@ pub(super) fn encode_block(dst: &mut [u8], src: &[u8]) -> usize {
 
 /// L1 encoder for inputs > 64 KiB (port of `encodeBlockGo`).
 fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
+    let mut table = table_pool::get(&U32_15);
+    let n = encode_block_big_with(dst, src, &mut table);
+    table_pool::put(&U32_15, table);
+    n
+}
+
+fn encode_block_big_with(dst: &mut [u8], src: &[u8], table: &mut [u32; 1 << 15]) -> usize {
     const TABLE_BITS: u32 = 15;
-    const TABLE_SIZE: usize = 1 << TABLE_BITS;
     const SKIP_LOG: u32 = 6;
 
-    let mut table = vec![0u32; TABLE_SIZE].into_boxed_slice();
     let s_limit = src.len() - INPUT_MARGIN;
     let dst_limit = src.len() - (src.len() >> 5) - 6;
     let mut next_emit: usize = 0;

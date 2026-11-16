@@ -26,8 +26,8 @@ pub enum Error {
     /// The stream is structurally malformed (bad chunk header, truncated
     /// chunk, invalid stream identifier, etc.).  Equivalent to Go `ErrCorrupt`.
     Corrupt,
-    /// A chunk's masked CRC32C did not match its contents.  Equivalent to
-    /// Go `ErrCRC`.
+    /// A chunk's checksum did not match its contents: the masked CRC32C, or
+    /// the XXH3-64 hash of a SIMD chunk.  Equivalent to Go `ErrCRC`.
     Crc,
     /// A block's declared or actual uncompressed size exceeds the configured
     /// [`max_block_size`](super::ReaderBuilder::max_block_size).
@@ -35,15 +35,14 @@ pub enum Error {
     TooLarge,
     /// The stream uses a feature the reader cannot handle: a reserved
     /// non-skippable chunk, an unknown stream magic (Snappy/S2 fallback
-    /// is not implemented in this crate), or an invalid
-    /// stream-identifier indicator.  Equivalent to Go `ErrUnsupported`.
+    /// is not implemented in this crate), or a stream identifier of a
+    /// later version: longer, or with bit 7 of its indicator set.
+    /// Equivalent to Go `ErrUnsupported`.
     Unsupported,
     /// A block-codec error bubbled up while decoding.
     Block(BlockError),
-    /// An underlying I/O error from the wrapped reader/writer.
-    Io(io::Error),
-    /// A builder was given an invalid option (block size, padding,
-    /// concurrency, …). Returned by the `build` methods; carries a short,
+    /// A builder was given an invalid option (block size, padding, user chunk id). The `build`
+    /// methods return it inside an [`io::ErrorKind::InvalidInput`] error; carries a short,
     /// stable reason for diagnostics — do not match on its exact text.
     Config(&'static str),
 }
@@ -56,7 +55,6 @@ impl core::fmt::Display for Error {
             Error::TooLarge => f.write_str("minlz: block too large"),
             Error::Unsupported => f.write_str("minlz: unsupported chunk or stream"),
             Error::Block(e) => write!(f, "minlz: block decode failed: {e}"),
-            Error::Io(e) => write!(f, "minlz: I/O error: {e}"),
             Error::Config(m) => write!(f, "minlz: invalid configuration: {m}"),
         }
     }
@@ -66,15 +64,8 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Block(e) => Some(e),
-            Error::Io(e) => Some(e),
             _ => None,
         }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Self {
-        Error::Io(e)
     }
 }
 
@@ -87,7 +78,6 @@ impl From<BlockError> for Error {
 impl From<Error> for io::Error {
     fn from(e: Error) -> io::Error {
         match e {
-            Error::Io(inner) => inner,
             cfg @ Error::Config(_) => io::Error::new(io::ErrorKind::InvalidInput, cfg),
             other => io::Error::new(io::ErrorKind::InvalidData, other),
         }
@@ -95,4 +85,4 @@ impl From<Error> for io::Error {
 }
 
 /// Specialized [`Result`] type for stream operations.
-pub type Result<T> = core::result::Result<T, Error>;
+pub(crate) type Result<T> = io::Result<T>;

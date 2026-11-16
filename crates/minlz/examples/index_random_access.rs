@@ -78,7 +78,7 @@ fn main() {
     // -------------------- 3. Open with ReadSeeker --------------------
     let t = Instant::now();
     let reader = Reader::new(Cursor::new(compressed.clone()));
-    let mut rs = ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = ReadSeeker::new(reader).expect("ReadSeeker::new");
     let open_elapsed = t.elapsed();
     let idx = rs.index();
     println!(

@@ -17,7 +17,7 @@
 //! Ported from `asm_none.go` (`emitLiteral`, `emitRepeat`, `emitCopy`,
 //! `emitCopyLits2`, `emitCopyLits3`, `encodeCopy3`) and `encode.go`
 //! (`encodeCopy2`).  These functions assume `dst` is large enough; the
-//! caller pre-allocates `max_encoded_len(src.len())` bytes.
+//! caller pre-allocates `max_encoded_len(src.len()) + ENCODE_SLACK` bytes.
 
 use super::format::{
     MAX_COPY1_OFFSET, MAX_COPY2_LITS, MAX_COPY2_OFFSET, MAX_COPY3_LITS, MIN_COPY2_OFFSET,
@@ -41,7 +41,7 @@ pub(super) fn emit_literal(dst: &mut [u8], lit: &[u8]) -> usize {
             unsafe { store8(dst, 0, ((n as u8) << 3) | TAG_LITERAL) };
             1
         }
-        29..=283 => {
+        29..=284 => {
             // n - 29 fits in 1 byte.  29<<3|TAG_LITERAL == 0xe8.
             // SAFETY: `dst.len() >= 2`.
             unsafe {
@@ -50,7 +50,7 @@ pub(super) fn emit_literal(dst: &mut [u8], lit: &[u8]) -> usize {
             }
             2
         }
-        284..=65564 => {
+        285..=65564 => {
             let n2 = n - 29;
             // SAFETY: `dst.len() >= 3`.
             unsafe {
@@ -291,9 +291,9 @@ pub(super) fn emit_literal_size_n(n: usize) -> usize {
         0
     } else if n <= 29 {
         1
-    } else if n < 29 + (1 << 8) {
+    } else if n <= 29 + (1 << 8) {
         2
-    } else if n < 29 + (1 << 16) {
+    } else if n <= 29 + (1 << 16) {
         3
     } else {
         4
@@ -396,13 +396,23 @@ mod tests {
             (255, b"\xe8\xe1"),
             (256, b"\xe8\xe2"),
             (257, b"\xe8\xe3"),
+            (284, b"\xe8\xfe"),
+            (285, b"\xe8\xff"),
+            (286, b"\xf0\x00\x01"),
+            (287, b"\xf0\x01\x01"),
             (65534, b"\xf0\xe0\xff"),
             (65535, b"\xf0\xe1\xff"),
             (65536, b"\xf0\xe2\xff"),
+            (65565, b"\xf0\xff\xff"),
+            (65566, b"\xf8\x00\x00\x01"),
             (165536, b"\xf8\x82\x86\x02"),
         ];
         let mut dst = vec![0u8; super::super::format::MAX_BLOCK_SIZE + 16];
         let nines = vec![0x99u8; super::super::format::MAX_BLOCK_SIZE];
+        // Miri checks the literal bytes slowly: of the long cases, only the first 4-byte header.
+        let cases = cases
+            .iter()
+            .filter(|c| !cfg!(miri) || c.0 < 300 || c.0 == 65566);
         for &(len, want_header) in cases {
             let lit = &nines[..len];
             let n = emit_literal(&mut dst, lit);
@@ -415,6 +425,25 @@ mod tests {
                 got_header, want_header,
                 "length={len}: header mismatch\ngot  {got_header:?}\nwant {want_header:?}"
             );
+        }
+    }
+
+    /// Ports `TestEmitLiteralSizeN` (`encode_test.go`): L3's estimate is the header
+    /// [`emit_literal`] writes.
+    #[test]
+    fn emit_literal_size_n_matches_emit_literal() {
+        let lit = vec![0u8; 65600];
+        let mut dst = vec![0u8; lit.len() + 16];
+        // The header size only steps after 29, 285 and 65565; copying every length between is
+        // slow, more so under Miri.
+        let (step, near) = if cfg!(miri) {
+            (8192, 65564..=65566)
+        } else {
+            (97, 65530..=65600)
+        };
+        for n in (1..=320).chain((388..65530).step_by(step)).chain(near) {
+            let header = emit_literal(&mut dst, &lit[..n]) - n;
+            assert_eq!(emit_literal_size_n(n), header, "n={n}");
         }
     }
 

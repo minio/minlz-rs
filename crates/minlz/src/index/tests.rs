@@ -14,7 +14,7 @@
 
 //! Tests ported from Go `index_test.go` plus Rust-specific edge cases.
 
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 
 use super::*;
 use crate::stream::Reader as StreamReader;
@@ -106,7 +106,26 @@ fn add_rejects_decreasing_offset() {
     idx.reset(1 << 20);
     idx.add(100, 1 << 20).unwrap();
     let err = idx.add(99, 2 << 20).unwrap_err();
-    assert!(matches!(err, Error::Invalid(_)));
+    assert!(matches!(err.kind(), io::ErrorKind::InvalidData));
+}
+
+#[test]
+fn add_rejects_decreasing_uncompressed_offset() {
+    for est in [0, 1 << 20] {
+        let mut idx = Index::new();
+        if est > 0 {
+            idx.reset(est);
+        }
+        idx.add(0, 2 << 20).unwrap();
+        let res = idx.add(10, 1 << 20);
+        assert!(
+            matches!(err_kind(&res), Some(io::ErrorKind::InvalidData)),
+            "est {est}: {res:?}"
+        );
+        let mut buf = Vec::new();
+        idx.append_to(&mut buf, Some(3 << 20), None).unwrap();
+        Index::default().load(&buf).unwrap();
+    }
 }
 
 #[test]
@@ -148,7 +167,10 @@ fn find_big_index_binary_search() {
 #[test]
 fn load_rejects_short_buffer() {
     let mut idx = Index::default();
-    assert!(matches!(idx.load(&[0; 8]).unwrap_err(), Error::Truncated));
+    assert!(matches!(
+        idx.load(&[0; 8]).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    ));
 }
 
 #[test]
@@ -159,7 +181,10 @@ fn load_rejects_wrong_chunk_type() {
         .append_to(&mut buf, Some(0), Some(0))
         .unwrap();
     buf[0] = 0x80;
-    assert!(matches!(idx.load(&buf).unwrap_err(), Error::BadFormat(_)));
+    assert!(matches!(
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    ));
 }
 
 #[test]
@@ -183,7 +208,10 @@ fn load_rejects_bad_trailer() {
     let last = buf.len() - 1;
     buf[last] ^= 0xFF;
     let mut idx = Index::default();
-    assert!(matches!(idx.load(&buf).unwrap_err(), Error::BadFormat(_)));
+    assert!(matches!(
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    ));
 }
 
 #[test]
@@ -195,8 +223,8 @@ fn load_rejects_truncated_chunk() {
     buf.truncate(buf.len() - 1);
     let mut idx = Index::default();
     assert!(matches!(
-        idx.load(&buf).unwrap_err(),
-        Error::Truncated | Error::BadFormat(_)
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::Unsupported
     ));
 }
 
@@ -215,6 +243,24 @@ fn header_round_trip() {
 fn remove_headers_rejects_garbage() {
     assert!(remove_index_headers(&[0; 4]).is_none());
     assert!(remove_index_headers(&[0xff; 64]).is_none());
+}
+
+/// Every length field, including ones shorter than the header, over every cut of a valid
+/// chunk: only the real length of the whole chunk gives the payload back.
+#[test]
+fn remove_headers_any_chunk_len() {
+    let payload = [1, 2, 3, 4, 5, 6, 7, 8];
+    let full = restore_index_headers(&payload);
+    let real = full.len() - 4;
+    for chunk_len in 0..=real + 1 {
+        let mut b = full.clone();
+        b[1] = chunk_len as u8;
+        for cut in 0..=b.len() {
+            let want = (cut == b.len() && chunk_len == real).then_some(&payload[..]);
+            let got = remove_index_headers(&b[..cut]);
+            assert_eq!(got, want, "chunk_len {chunk_len}, cut {cut}");
+        }
+    }
 }
 
 #[test]
@@ -266,9 +312,18 @@ fn load_stream_rejects_when_trailer_missing() {
     let mut cur = Cursor::new(stream);
     let mut idx = Index::default();
     assert!(matches!(
-        idx.load_stream(&mut cur).unwrap_err(),
-        Error::BadFormat(_)
+        idx.load_stream(&mut cur).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
     ));
+}
+
+/// Ports `TestIndexStreamSmall` (`writer_test.go`).
+#[test]
+fn index_stream_small() {
+    let mut w = crate::stream::Writer::new(Vec::new());
+    w.write_all(&b"abcdefgh".repeat(100)).unwrap();
+    let stream = w.finish().unwrap();
+    index_stream(Cursor::new(&stream)).unwrap();
 }
 
 #[test]
@@ -315,7 +370,7 @@ fn writer_close_index_round_trip() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     let mut idx = Index::default();
     idx.load(&idx_bytes).unwrap();
@@ -340,7 +395,7 @@ fn seek_with_index_skip() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     let mut idx = Index::default();
     idx.load(&idx_bytes).unwrap();
@@ -383,7 +438,7 @@ fn read_seeker_seek_start_end_and_current() {
     let compressed = build_indexed_stream(&payload);
 
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     // SeekFrom::Start with an offset inside a later block.
     let off = (200 << 10) as u64;
@@ -420,7 +475,7 @@ fn read_seeker_read_at_random() {
     let compressed = build_indexed_stream(&payload);
 
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let mut buf = vec![0u8; 100];
     let offsets = [0u64, 11, 1_000, 65_000, (128 << 10) - 33, (256 << 10) - 100];
@@ -441,11 +496,12 @@ fn read_seeker_external_index_bytes() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     // (a) Full chunk form.
     let reader = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).expect("ReadSeeker::new");
+    let mut rs =
+        crate::stream::ReadSeeker::with_index(reader, &idx_bytes).expect("ReadSeeker::new");
     rs.seek(SeekFrom::Start(150 << 10)).unwrap();
     let mut buf = vec![0u8; 1024];
     rs.read_exact(&mut buf).unwrap();
@@ -455,20 +511,29 @@ fn read_seeker_external_index_bytes() {
     let slim = remove_index_headers(&idx_bytes).unwrap().to_vec();
     let restored = restore_index_headers(&slim);
     let reader2 = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs2 = crate::stream::ReadSeeker::new(reader2, &restored).expect("ReadSeeker::new");
+    let mut rs2 =
+        crate::stream::ReadSeeker::with_index(reader2, &restored).expect("ReadSeeker::new");
     rs2.seek(SeekFrom::Start(150 << 10)).unwrap();
     let mut buf2 = vec![0u8; 1024];
     rs2.read_exact(&mut buf2).unwrap();
     assert_eq!(buf, buf2);
 
-    // (c) Bare slim form passed *directly* to ReadSeeker::new — must
+    // (c) Bare slim form passed *directly* to ReadSeeker::with_index — must
     // be auto-detected and accepted without calling restore_index_headers.
-    let reader3 = StreamReader::new(Cursor::new(compressed));
-    let mut rs3 = crate::stream::ReadSeeker::new(reader3, &slim).expect("ReadSeeker::new bare");
+    let reader3 = StreamReader::new(Cursor::new(compressed.clone()));
+    let mut rs3 =
+        crate::stream::ReadSeeker::with_index(reader3, &slim).expect("ReadSeeker::with_index bare");
     rs3.seek(SeekFrom::Start(150 << 10)).unwrap();
     let mut buf3 = vec![0u8; 1024];
     rs3.read_exact(&mut buf3).unwrap();
     assert_eq!(buf, buf3);
+
+    // (d) No bytes are no index.
+    let reader4 = StreamReader::new(Cursor::new(compressed));
+    let err = crate::stream::ReadSeeker::with_index(reader4, &[])
+        .err()
+        .expect("empty index");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 }
 
 // -------------------- additional coverage (Stage F follow-ups) --------------------
@@ -478,21 +543,73 @@ fn add_rejects_decreasing_compressed_offset() {
     let mut idx = Index::default();
     idx.reset(1 << 20);
     idx.add(1000, 1 << 20).unwrap();
-    // Larger uncomp gap but smaller comp — error.
-    let err = idx.add(999, 2 << 20).unwrap_err();
-    assert!(matches!(err, Error::Invalid(_)));
+    // Larger uncomp gap but smaller comp — error, also where the entry would be skipped (Go
+    // 51ce6ee).
+    for u in [(1 << 20) + 100, 2 << 20] {
+        let res = idx.add(999, u);
+        assert!(
+            matches!(err_kind(&res), Some(io::ErrorKind::InvalidData)),
+            "{u}: {res:?}"
+        );
+    }
+    assert_eq!(idx.offsets.len(), 1);
 }
 
 #[test]
 fn add_equal_offsets_after_skip_window_succeed() {
-    // After the skip check, equal offsets are accepted (Go uses `<`/`>`,
-    // never `<=` — equality on either field is fine).
+    // An entry equal to the last one replaces it with itself.
     let mut idx = Index::default();
     idx.reset(1 << 20);
     idx.add(0, 0).unwrap();
-    // Same offsets are skipped by the gap check (gap=0 < 1MB).
     idx.add(0, 0).unwrap();
     assert_eq!(idx.offsets.len(), 1);
+}
+
+#[test]
+fn add_same_uncompressed_moves_to_later_chunk() {
+    // Go: the stream header or a skippable chunk at an offset is followed by its block.
+    let mut idx = Index::default();
+    idx.reset(1 << 20);
+    idx.add(0, 0).unwrap();
+    idx.add(10, 0).unwrap();
+    idx.add(5000, 1 << 20).unwrap();
+    idx.add(5100, 1 << 20).unwrap();
+    let got: Vec<(u64, u64)> = idx
+        .offsets
+        .iter()
+        .map(|p| (p.compressed, p.uncompressed))
+        .collect();
+    assert_eq!(got, [(10, 0), (5100, 1 << 20)]);
+}
+
+#[test]
+fn add_same_uncompressed_rejects_decreasing_compressed() {
+    let mut idx = Index::default();
+    idx.reset(1 << 20);
+    idx.add(100, 0).unwrap();
+    idx.add(5000, 1 << 20).unwrap();
+    assert!(matches!(
+        err_kind(&idx.add(50, 1 << 20)),
+        Some(io::ErrorKind::InvalidData)
+    ));
+    let mut buf = Vec::new();
+    idx.append_to(&mut buf, Some(2 << 20), None).unwrap();
+    Index::default().load(&buf).unwrap();
+}
+
+#[test]
+fn add_new_entry_rejects_equal_compressed() {
+    let mut idx = Index::default();
+    idx.reset(1 << 20);
+    idx.add(100, 0).unwrap();
+    assert!(matches!(
+        err_kind(&idx.add(100, 1 << 20)),
+        Some(io::ErrorKind::InvalidData)
+    ));
+    assert_eq!(idx.offsets.len(), 1);
+    let mut buf = Vec::new();
+    idx.append_to(&mut buf, Some(2 << 20), None).unwrap();
+    Index::default().load(&buf).unwrap();
 }
 
 #[test]
@@ -588,7 +705,7 @@ fn read_seeker_index_without_zero_entry() {
     .unwrap();
 
     let reader = StreamReader::new(Cursor::new(&compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).unwrap();
+    let mut rs = crate::stream::ReadSeeker::with_index(reader, &idx_bytes).unwrap();
     assert!(rs.index().offsets().len() > 200);
     let mut buf = [0u8; 16];
     // A far read first, so the next one can't use the buffered block.
@@ -670,7 +787,10 @@ fn load_rejects_entries_above_max() {
     buf[2] = (chunk_len >> 8) as u8;
     buf[3] = (chunk_len >> 16) as u8;
     let mut idx = Index::default();
-    assert!(matches!(idx.load(&buf).unwrap_err(), Error::Invalid(_)));
+    assert!(matches!(
+        idx.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    ));
 }
 
 #[test]
@@ -683,7 +803,10 @@ fn load_rejects_negative_total_uncompressed() {
     // The first varint sits at offset 4 + INDEX_HEADER.len() = 10.
     buf[10] = 1; // zigzag(-1) = 1 → decoded as -1
     let mut idx2 = Index::default();
-    assert!(matches!(idx2.load(&buf).unwrap_err(), Error::Invalid(_)));
+    assert!(matches!(
+        idx2.load(&buf).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    ));
 }
 
 #[test]
@@ -693,12 +816,13 @@ fn load_stream_short_file_errors() {
     let mut cur = Cursor::new(stream);
     let mut idx = Index::default();
     let err = idx.load_stream(&mut cur).unwrap_err();
-    // No trailer (BadFormat) or a seek/read I/O error — both acceptable;
-    // just ensure it doesn't panic.
-    assert!(
-        matches!(err, Error::BadFormat(_) | Error::Io(_)),
-        "err={err:?}"
-    );
+    assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "err={err:?}");
+
+    // A trailer whose size reaches past the start of the stream.
+    let mut stream = 11u32.to_le_bytes().to_vec();
+    stream.extend_from_slice(INDEX_TRAILER);
+    let err = idx.load_stream(&mut Cursor::new(stream)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "err={err:?}");
 }
 
 #[test]
@@ -713,7 +837,7 @@ fn read_at_short_read_at_eof() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 200 << 10];
     let n = rs.read_at(&mut buf, (50 << 10) as u64).unwrap();
     assert_eq!(n, 50 << 10);
@@ -726,7 +850,7 @@ fn read_exact_at_errors_on_eof() {
     let payload = vec![b'x'; 100 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 200 << 10];
     let err = rs.read_exact_at(&mut buf, (50 << 10) as u64).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
@@ -739,7 +863,7 @@ fn read_seeker_seek_past_end_errors_then_recovers() {
     let payload = vec![b'A'; 256 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
 
     // Read a few bytes so the reader has internal state.
     let mut warm = [0u8; 16];
@@ -897,7 +1021,7 @@ fn writer_close_index_round_trip_miri() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
     let mut idx = Index::default();
     idx.load(&idx_bytes).unwrap();
     assert_eq!(idx.total_uncompressed, Some(payload.len() as u64));
@@ -913,7 +1037,7 @@ fn seek_with_index_skip_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let off = (16 << 10) as u64;
     rs.seek(SeekFrom::Start(off)).unwrap();
@@ -931,7 +1055,7 @@ fn read_seeker_seek_start_end_and_current_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let off = (20 << 10) as u64;
     let abs = rs.seek(SeekFrom::Start(off)).unwrap();
@@ -961,7 +1085,7 @@ fn read_seeker_read_at_random_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).expect("ReadSeeker::new");
+    let mut rs = crate::stream::ReadSeeker::new(reader).expect("ReadSeeker::new");
 
     let mut buf = vec![0u8; 64];
     for &off in &[0u64, 11, 4_000, (16 << 10) - 33, (32 << 10) - 64] {
@@ -981,10 +1105,11 @@ fn read_seeker_external_index_bytes_miri() {
         .build(&mut compressed)
         .unwrap();
     w.write_all(&payload).unwrap();
-    let idx_bytes = w.close_index().unwrap();
+    let (_, idx_bytes) = w.close_index().unwrap();
 
     let reader = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &idx_bytes).expect("ReadSeeker::new");
+    let mut rs =
+        crate::stream::ReadSeeker::with_index(reader, &idx_bytes).expect("ReadSeeker::new");
     rs.seek(SeekFrom::Start(20 << 10)).unwrap();
     let mut buf = vec![0u8; 512];
     rs.read_exact(&mut buf).unwrap();
@@ -993,7 +1118,8 @@ fn read_seeker_external_index_bytes_miri() {
     let slim = remove_index_headers(&idx_bytes).unwrap().to_vec();
     let restored = restore_index_headers(&slim);
     let reader2 = StreamReader::new(Cursor::new(compressed.clone()));
-    let mut rs2 = crate::stream::ReadSeeker::new(reader2, &restored).expect("ReadSeeker::new");
+    let mut rs2 =
+        crate::stream::ReadSeeker::with_index(reader2, &restored).expect("ReadSeeker::new");
     rs2.seek(SeekFrom::Start(20 << 10)).unwrap();
     let mut buf2 = vec![0u8; 512];
     rs2.read_exact(&mut buf2).unwrap();
@@ -1009,7 +1135,7 @@ fn read_at_short_read_at_eof_miri() {
     }
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 64 << 10];
     let n = rs.read_at(&mut buf, (16 << 10) as u64).unwrap();
     assert_eq!(n, 16 << 10);
@@ -1022,7 +1148,7 @@ fn read_exact_at_errors_on_eof_miri() {
     let payload = vec![b'x'; 32 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
     let mut buf = vec![0u8; 64 << 10];
     let err = rs.read_exact_at(&mut buf, (16 << 10) as u64).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
@@ -1034,7 +1160,7 @@ fn read_seeker_seek_past_end_errors_then_recovers_miri() {
     let payload = vec![b'A'; 32 << 10];
     let compressed = build_indexed_stream(&payload);
     let reader = StreamReader::new(Cursor::new(compressed));
-    let mut rs = crate::stream::ReadSeeker::new(reader, &[]).unwrap();
+    let mut rs = crate::stream::ReadSeeker::new(reader).unwrap();
 
     let mut warm = [0u8; 16];
     rs.read_exact(&mut warm).unwrap();
@@ -1056,8 +1182,14 @@ fn add_rejects_offset_beyond_i64_range() {
     // `add` must reject them instead of wrapping at encode time.
     let too_big = i64::MAX as u64 + 1;
     let mut idx = Index::default();
-    assert!(matches!(idx.add(0, too_big), Err(Error::Invalid(_))));
-    assert!(matches!(idx.add(too_big, 0), Err(Error::Invalid(_))));
+    assert!(matches!(
+        err_kind(&idx.add(0, too_big)),
+        Some(io::ErrorKind::InvalidData)
+    ));
+    assert!(matches!(
+        err_kind(&idx.add(too_big, 0)),
+        Some(io::ErrorKind::InvalidData)
+    ));
     // A value exactly at the boundary is accepted.
     assert!(idx.add(0, i64::MAX as u64).is_ok());
 }
@@ -1069,14 +1201,46 @@ fn append_to_rejects_total_beyond_i64_range() {
     idx.add(0, 0).unwrap();
     let mut buf = Vec::new();
     assert!(matches!(
-        idx.append_to(&mut buf, Some(too_big), Some(0)),
-        Err(Error::Invalid(_))
+        err_kind(&idx.append_to(&mut buf, Some(too_big), Some(0))),
+        Some(io::ErrorKind::InvalidData)
     ));
     assert!(matches!(
-        idx.append_to(&mut buf, Some(0), Some(too_big)),
-        Err(Error::Invalid(_))
+        err_kind(&idx.append_to(&mut buf, Some(0), Some(too_big))),
+        Some(io::ErrorKind::InvalidData)
     ));
     // Known-good totals still encode.
     buf.clear();
     assert!(idx.append_to(&mut buf, Some(0), Some(0)).is_ok());
+}
+
+/// Ports `TestIndexMaxEntries`, without Go's reference loader: an index with 65536 entries,
+/// the maximum, loads, and one with more doesn't.
+#[test]
+#[cfg_attr(miri, ignore = "65536 index entries are slow under miri")]
+fn index_max_entries() {
+    const EST: i64 = 1 << 20;
+    let index = |n: usize| {
+        let mut b = Vec::new();
+        super::put_varint(&mut b, n as i64 * EST);
+        super::put_varint(&mut b, -1);
+        super::put_varint(&mut b, EST);
+        super::put_varint(&mut b, n as i64);
+        // No uncompressed offsets, and compressed offsets as zero deltas from the estimate.
+        b.resize(b.len() + 1 + n, 0);
+        restore_index_headers(&b)
+    };
+    for n in [1 << 16, (1 << 16) + 1] {
+        let ok = n <= 1 << 16;
+        let mut i = Index::default();
+        let res = i.load(&index(n)).map(drop);
+        assert!(
+            res.is_ok() == ok && (!ok || i.offsets().len() == n),
+            "{n} entries: got {} offsets, {res:?}",
+            i.offsets().len()
+        );
+    }
+}
+
+fn err_kind<T>(res: &io::Result<T>) -> Option<io::ErrorKind> {
+    res.as_ref().err().map(io::Error::kind)
 }

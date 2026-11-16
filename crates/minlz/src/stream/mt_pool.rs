@@ -15,10 +15,12 @@
 //! Tiny buffer pool used by [`super::MtWriter`] and the parallel
 //! decoder.  Mirrors Go's `sync.Pool` of `[]byte` on `writer.go`.
 //!
-//! The pool holds up to `max_items` empty-but-allocated `Vec<u8>`.
-//! `acquire` either pops one or allocates a fresh `Vec` with the
-//! requested capacity hint.  `release` clears the vec and pushes it
-//! back if there's room, otherwise drops it.
+//! The pool holds up to `max_items` allocated `Vec<u8>`, as they were
+//! released.  `acquire` either pops one, cleared, or allocates a fresh
+//! `Vec` with the requested capacity hint.  [`BufferPool::reuse`] pops one
+//! with its length and bytes, so a buffer the caller overwrites resizes
+//! without zeroing it again.  `release` pushes a vec back if there's room,
+//! otherwise drops it.
 //!
 //! Bounded to keep memory steady; one pool is sized to
 //! `concurrency + 1` per the MT plan ("one extra in-flight block").
@@ -43,6 +45,14 @@ impl BufferPool {
     /// Pop a recycled buffer or allocate a fresh one of at least
     /// `cap_hint` bytes capacity.  Returns an empty `Vec`.
     pub(super) fn acquire(&self) -> Vec<u8> {
+        let mut buf = self.reuse();
+        buf.clear();
+        buf
+    }
+
+    /// [`acquire`](Self::acquire), but a recycled buffer keeps the length and
+    /// bytes it was released with.
+    pub(super) fn reuse(&self) -> Vec<u8> {
         // `lock().unwrap()` only panics if another thread panicked while
         // holding this lock; that propagates a pre-existing worker panic
         // rather than introducing a new failure mode.
@@ -52,10 +62,9 @@ impl BufferPool {
         Vec::with_capacity(self.cap_hint)
     }
 
-    /// Return a buffer to the pool (cleared first).  If the pool is
-    /// full, the buffer is dropped.
-    pub(super) fn release(&self, mut buf: Vec<u8>) {
-        buf.clear();
+    /// Return a buffer to the pool.  If the pool is full, the buffer is
+    /// dropped.
+    pub(super) fn release(&self, buf: Vec<u8>) {
         // Lock poison only propagates a prior worker panic (see `acquire`).
         let mut guard = self.inner.lock().unwrap();
         if guard.len() < self.max_items {

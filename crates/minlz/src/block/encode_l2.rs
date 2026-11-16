@@ -16,11 +16,9 @@
 //!
 //! Ports `encode_l2.go:encodeBlockBetterGo` (for inputs > 64 KiB) and
 //! `encode_l2.go:encodeBlockBetterGo64K` (for inputs ≤ 64 KiB).  Uses a
-//! long (8-byte hash) table and a short (4-byte hash) table, with the
-//! large long table allocated per-thread via [`thread_local!`] to avoid
-//! a 512 KiB allocation per encode call (Go's `sync.Pool` analog).
-
-use std::cell::RefCell;
+//! long (8-byte hash) table and a short (4-byte hash) table, from
+//! [`table_pool`] except the 8 KiB short table of the 64 KiB path, so the
+//! SIMD Balanced parser shares the big ones (Go's `encLPool`).
 
 use super::emit::{emit_copy, emit_copy_lits2, emit_copy_lits3, emit_literal, emit_repeat};
 use super::format::{
@@ -29,6 +27,7 @@ use super::format::{
 };
 use super::hash::{hash4, hash6, hash7};
 use super::load_store::{load32, load64};
+use super::table_pool::{self, U16_15, U32_14, U32_17};
 
 /// Entry point: dispatches on `src.len()`.  Returns the number of bytes
 /// written into `dst` or `0` if the block is incompressible.
@@ -52,54 +51,28 @@ const L_TABLE_SIZE_64K: usize = 1 << L_TABLE_BITS_64K;
 const S_TABLE_BITS_64K: u32 = 12;
 const S_TABLE_SIZE_64K: usize = 1 << S_TABLE_BITS_64K;
 
-thread_local! {
-    static L_TABLE_BIG: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
-    static L_TABLE_64K: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Lend the per-thread big long-table to `f`, lazily allocating on first
-/// use and zero-clearing on every borrow (mirrors Go's `encLPool` reset).
-fn with_l_table_big<R>(f: impl FnOnce(&mut [u32]) -> R) -> R {
-    L_TABLE_BIG.with(|cell| {
-        let mut t = cell.borrow_mut();
-        if t.len() < L_TABLE_SIZE_BIG {
-            t.resize(L_TABLE_SIZE_BIG, 0);
-        } else {
-            t.iter_mut().for_each(|x| *x = 0);
-        }
-        f(&mut t[..L_TABLE_SIZE_BIG])
-    })
-}
-
-fn with_l_table_64k<R>(f: impl FnOnce(&mut [u16]) -> R) -> R {
-    L_TABLE_64K.with(|cell| {
-        let mut t = cell.borrow_mut();
-        if t.len() < L_TABLE_SIZE_64K {
-            t.resize(L_TABLE_SIZE_64K, 0);
-        } else {
-            t.iter_mut().for_each(|x| *x = 0);
-        }
-        f(&mut t[..L_TABLE_SIZE_64K])
-    })
-}
-
 /// L2 encoder for inputs > 64 KiB.  Port of `encodeBlockBetterGo`.
 fn encode_block_big(dst: &mut [u8], src: &[u8]) -> usize {
     let s_limit = src.len() - INPUT_MARGIN;
     let dst_limit = src.len() - (src.len() >> 5) - 6;
 
-    with_l_table_big(|l_table| {
-        let mut s_table = [0u32; S_TABLE_SIZE_BIG];
-        encode_better_inner_big(dst, src, s_limit, dst_limit, l_table, &mut s_table)
-    })
+    let mut l_table = table_pool::get(&U32_17);
+    let mut s_table = table_pool::get(&U32_14);
+    let n = encode_better_inner_big(dst, src, s_limit, dst_limit, &mut l_table, &mut s_table);
+    table_pool::put(&U32_14, s_table);
+    table_pool::put(&U32_17, l_table);
+    n
 }
 
+// Inlined next to the pooled tables, whose drops the panic paths need, the loops ran up to 2.5%
+// slower.
+#[inline(never)]
 fn encode_better_inner_big(
     dst: &mut [u8],
     src: &[u8],
     s_limit: usize,
     dst_limit: usize,
-    l_table: &mut [u32],
+    l_table: &mut [u32; L_TABLE_SIZE_BIG],
     s_table: &mut [u32; S_TABLE_SIZE_BIG],
 ) -> usize {
     const S_TABLE_BITS: u32 = S_TABLE_BITS_BIG;
@@ -114,7 +87,8 @@ fn encode_better_inner_big(
         let candidate_l;
         let mut next_s: usize;
         loop {
-            next_s = s + ((s - next_emit) >> 7) + 1;
+            // Blocks can be long, limit max skipping.
+            next_s = s + (((s - next_emit) >> 7) + 1).min(100);
             if next_s > s_limit {
                 break 'outer;
             }
@@ -345,18 +319,21 @@ fn encode_block_64k(dst: &mut [u8], src: &[u8]) -> usize {
     let s_limit = src.len() - INPUT_MARGIN;
     let dst_limit = src.len() - (src.len() >> 5) - 6;
 
-    with_l_table_64k(|l_table| {
-        let mut s_table = [0u16; S_TABLE_SIZE_64K];
-        encode_better_inner_64k(dst, src, s_limit, dst_limit, l_table, &mut s_table)
-    })
+    let mut l_table = table_pool::get(&U16_15);
+    let mut s_table = [0u16; S_TABLE_SIZE_64K];
+    let n = encode_better_inner_64k(dst, src, s_limit, dst_limit, &mut l_table, &mut s_table);
+    table_pool::put(&U16_15, l_table);
+    n
 }
 
+// See encode_better_inner_big.
+#[inline(never)]
 fn encode_better_inner_64k(
     dst: &mut [u8],
     src: &[u8],
     s_limit: usize,
     dst_limit: usize,
-    l_table: &mut [u16],
+    l_table: &mut [u16; L_TABLE_SIZE_64K],
     s_table: &mut [u16; S_TABLE_SIZE_64K],
 ) -> usize {
     const S_TABLE_BITS: u32 = S_TABLE_BITS_64K;

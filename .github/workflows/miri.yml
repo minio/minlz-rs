@@ -17,6 +17,8 @@ jobs:
   miri:
     name: cargo miri test
     runs-on: ubuntu-latest
+    # About 3x the expected run, so a slow test fails fast instead of running for 6 h.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -29,13 +31,56 @@ jobs:
         # rust-toolchain.toml pins stable, so `cargo miri setup` would
         # try (and fail) to resolve miri on stable.  Force nightly.
         run: cargo +nightly miri setup
-      # Heavy tests are #[cfg_attr(miri, ignore)]'d in source; the lighter
-      # set takes ~15 min on a 4-core runner.
+      # Heavy tests are #[cfg_attr(miri, ignore)]'d or shrunk under cfg!(miri)
+      # in source; the lighter set takes ~23 min on a 4-core runner.
       - name: cargo +nightly miri test --lib
         # --report-time appends `<X.YZs>` to each test line so slow tests
-        # are visible in the CI log without rerunning.
+        # are visible in the CI log without rerunning. Under isolation that is
+        # Miri's virtual clock, which can read several times below wall time.
         run: cargo +nightly miri test --lib -- -Z unstable-options --report-time
         env:
           # Tree borrows would also work; stacked borrows is the
           # historical default and catches the bugs we care about.
+          MIRIFLAGS: -Zmiri-strict-provenance
+
+  # Every other leg runs on 64-bit little-endian hosts. Miri interprets a
+  # big-endian and a 32-bit target directly, so no emulator is needed.
+  miri-cross:
+    name: cargo miri test (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    # About 3x the expected run (~25 min for the full s390x set), as for the
+    # host job.
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: s390x-unknown-linux-gnu # big-endian
+            apt: gcc-s390x-linux-gnu libc6-dev-s390x-cross
+            filter: ""
+          - target: i686-unknown-linux-gnu # 32-bit
+            apt: gcc-i686-linux-gnu libc6-dev-i386-cross
+            # With the stream and index tests, i686 runs out of Miri's 32-bit
+            # address space: crc32c_update_table copies its const tables per
+            # lookup.
+            filter: "block:: pivco xxh3 stream::crc stream::format"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri-${{ matrix.target }}
+      - name: Install a C cross compiler
+        # The build scripts of ring (via ureq) and alloca (via criterion),
+        # both dev-dependencies, compile C for the target.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
+      - name: Miri setup
+        run: cargo +nightly miri setup --target ${{ matrix.target }}
+      - name: cargo +nightly miri test --lib --target ${{ matrix.target }}
+        run: >-
+          cargo +nightly miri test --lib --target ${{ matrix.target }} --
+          -Z unstable-options --report-time ${{ matrix.filter }}
+        env:
           MIRIFLAGS: -Zmiri-strict-provenance

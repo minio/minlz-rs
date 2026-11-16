@@ -3,7 +3,7 @@ name = "minlz-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 
 # Stand-alone manifest (cargo-fuzz convention) — do not roll up into the
 # parent workspace.
@@ -16,7 +16,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.minlz]
+package = "minio-minlz"
 path = ".."
+features = ["reference", "unstable-internals"]
 
 [profile.release]
 debug = 1
@@ -52,6 +54,34 @@ bench = false
 [[bin]]
 name = "index_load"
 path = "fuzz_targets/index_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pivco_decode"
+path = "fuzz_targets/pivco_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pivco_roundtrip"
+path = "fuzz_targets/pivco_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pivco_table"
+path = "fuzz_targets/pivco_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simd_decode"
+path = "fuzz_targets/simd_decode.rs"
 test = false
 doc = false
 bench = false

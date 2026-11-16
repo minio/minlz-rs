@@ -7,3 +7,4 @@ Cargo.lock
 /crates/minlz/fuzz/artifacts/
 /crates/minlz/fuzz/coverage/
 /crates/minlz/fuzz/target/
+/_helpers/cross_codec/target/

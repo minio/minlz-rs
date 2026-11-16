@@ -1,7 +1,8 @@
 [package]
-name = "mz"
-version = "0.1.0"
+name = "minio-mz"
+version = "1.3.0"
 description = "MinLZ command-line tool (Rust port)"
+readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,7 +14,9 @@ name = "mz"
 path = "src/main.rs"
 
 [dependencies]
-minlz = { path = "../../crates/minlz" }
+# Exact, since unstable-internals is not covered by semver; bump it with minio-minlz.
+minlz = { package = "minio-minlz", version = "=1.3.0", path = "../../crates/minlz", features = ["unstable-internals"] }
+same-file = "1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"

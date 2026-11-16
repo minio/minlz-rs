@@ -8,6 +8,11 @@
 #   bash run.sh decode_arbitrary      # just one
 #   MAX_SECS=300 bash run.sh          # 5 min each
 #   JOBS=4 WORKERS=4 bash run.sh      # quieter parallelism
+#   FORK=24 bash run.sh roundtrip     # libFuzzer fork mode, 24 processes
+#
+# Every -jobs process replays the whole corpus before it mutates anything;
+# for roundtrip's corpus that takes 20 min at 24 jobs.  Fork mode replays it
+# once, then hands each child a subset, and keeps going after a crash.
 #
 # Targets are auto-discovered from `cargo +nightly fuzz list` (with a
 # fallback to scanning `fuzz_targets/*.rs`), so adding / removing a
@@ -73,6 +78,11 @@ MAX_LEN="${MAX_LEN:-9437184}"        # 9 MiB — matches the in-target cap on
 # Default to ceil(nproc / 2) so the box stays usable for other work.
 JOBS="${JOBS:-$(( ( $(nproc 2>/dev/null || echo 16) + 1 ) / 2 ))}"
 WORKERS="${WORKERS:-$JOBS}"
+if [[ -n "${FORK:-}" ]]; then
+    par=(-fork="$FORK" -ignore_crashes=1)
+else
+    par=(-jobs="$JOBS" -workers="$WORKERS")
+fi
 
 # --- Target discovery ------------------------------------------------------
 # Prefer `cargo +nightly fuzz list` (the canonical view) and fall back to
@@ -116,7 +126,7 @@ echo "==============================================================="
 echo " cargo-fuzz batch run"
 echo "   targets : ${targets[*]}"
 echo "   budget  : $(hms "$MAX_SECS") per target ($((MAX_SECS*${#targets[@]})) s total)"
-echo "   jobs    : $JOBS workers, max input $MAX_LEN bytes"
+echo "   jobs    : ${par[*]}, max input $MAX_LEN bytes"
 echo "==============================================================="
 
 declare -A crashes_before crashes_after seeds_before seeds_after
@@ -134,7 +144,7 @@ for tgt in "${targets[@]}"; do
     set +e
     cargo +nightly fuzz run "$tgt" -- \
         -max_total_time="$MAX_SECS" \
-        -jobs="$JOBS" -workers="$WORKERS" \
+        "${par[@]}" \
         -max_len="$MAX_LEN"
     status=$?
     set -e

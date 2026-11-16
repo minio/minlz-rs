@@ -85,6 +85,18 @@ pub(super) fn put_uvarint(dst: &mut Vec<u8>, mut v: u64) {
     dst.push(v as u8);
 }
 
+/// Write the unsigned LEB128 of `v` to the start of `dst`; returns its size.
+pub(super) fn put_uvarint_at(dst: &mut [u8], mut v: u64) -> usize {
+    let mut i = 0;
+    while v >= 0x80 {
+        dst[i] = (v as u8) | 0x80;
+        v >>= 7;
+        i += 1;
+    }
+    dst[i] = v as u8;
+    i + 1
+}
+
 /// Decode an unsigned LEB128 from the head of `src`.
 ///
 /// Returns `Some((value, bytes_read))` on success, `None` if the buffer is

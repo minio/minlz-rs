@@ -18,7 +18,8 @@
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Resolve the worker-thread count from `Options::threads`, falling
 /// back to `available_parallelism()` and finally to 1.
@@ -47,8 +48,69 @@ pub fn open_output(path: &Path) -> io::Result<Box<dyn Write>> {
     if path == Path::new("-") {
         return Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, io::stdout())));
     }
+    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, create(path)?)))
+}
+
+/// The output file being written, which [`remove_output`] removes when the run fails, so a
+/// failed run leaves no partial output.
+static OUTPUT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn create(path: &Path) -> io::Result<File> {
     let file = File::create(path)?;
-    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, file)))
+    // Only a regular file is removed, never a device or a symlink given as output.
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        *OUTPUT.lock().unwrap() = Some(path.to_owned());
+    }
+    Ok(file)
+}
+
+/// Removes the output file of a failed run, if [`open_output`] created one.
+pub fn remove_output() {
+    if let Some(p) = OUTPUT.lock().unwrap().take() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Rejects an output that is the input file: [`open_output`] would
+/// truncate it before the first read. This compares file identity, so
+/// path aliases, symlinks, hard links and stdin redirected from the
+/// output are all caught.
+pub fn check_not_input(input: &Path, output: &Path) -> io::Result<()> {
+    if output != Path::new("-") && is_file(output) && is_input(input, output) {
+        return Err(io::Error::other("input and output are the same file"));
+    }
+    Ok(())
+}
+
+// Only regular files are compared: `same_file` opens both paths, and opening a FIFO blocks
+// until the other end appears. An output it can't open for reading can't be the input.
+fn is_input(input: &Path, output: &Path) -> bool {
+    let same = if input == Path::new("-") {
+        same_file::Handle::stdin().and_then(|h| Ok(h == same_file::Handle::from_path(output)?))
+    } else if is_file(input) {
+        same_file::is_same_file(input, output)
+    } else {
+        return false;
+    };
+    matches!(same, Ok(true))
+}
+
+/// Syncs the output to disk before `--rm` deletes the input, so a crash can't lose both.
+/// Stdout and other outputs that aren't regular files are skipped: pipes and terminals
+/// can't be synced, and opening a FIFO would block.
+pub fn sync_output(path: &Path) -> io::Result<()> {
+    if path != Path::new("-") && is_file(path) {
+        // Reopened because the writers are boxed. Windows syncs only through a handle with
+        // write access.
+        File::options().write(true).open(path)?.sync_all()?;
+    }
+    // The output is complete, and will be the only copy once the input is removed.
+    OUTPUT.lock().unwrap().take();
+    Ok(())
+}
+
+fn is_file(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
 /// Like [`open_output`], but `Send + 'static` so the value can be moved
@@ -57,8 +119,7 @@ pub fn open_output_send(path: &Path) -> io::Result<Box<dyn Write + Send + 'stati
     if path == Path::new("-") {
         return Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, io::stdout())));
     }
-    let file = File::create(path)?;
-    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, file)))
+    Ok(Box::new(BufWriter::with_capacity(BUF_SIZE, create(path)?)))
 }
 
 /// `Read` adapter that counts the bytes read for progress reporting.
