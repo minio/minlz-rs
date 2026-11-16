@@ -21,7 +21,7 @@ use crate::stream::crc::masked_crc32c;
 use crate::stream::format::{
     CHECKSUM_SIZE, CHUNK_HEADER_SIZE, CHUNK_TYPE_EOF, CHUNK_TYPE_MINLZ_COMPRESSED_DATA,
     CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_MINLZ_SIMD, CHUNK_TYPE_PADDING,
-    CHUNK_TYPE_UNCOMPRESSED_DATA, DEFAULT_BLOCK_SIZE, MAGIC_BODY_LEN, MAX_BLOCK_SIZE,
+    CHUNK_TYPE_UNCOMPRESSED_DATA, DEFAULT_BLOCK_SIZE, MAGIC_BODY, MAGIC_BODY_LEN, MAX_BLOCK_SIZE,
     STREAM_FLAG_SIMD, get_uvarint, make_stream_header, put_uvarint, read_chunk_len,
 };
 use crate::stream::{Error, MtWriterBuilder, ReadSeeker, Reader, ReaderBuilder, WriterBuilder};
@@ -1389,6 +1389,17 @@ fn reader_simd_chunks() {
         *id.last_mut().unwrap() |= 1 << 7;
         id
     };
+    // long_id is id with bit 7 set and one more byte.
+    let long_id = |id: &[u8]| {
+        [
+            &b"\xff\x07\x00\x00"[..],
+            MAGIC_BODY,
+            &[id[id.len() - 1] | 1 << 7, 1],
+        ]
+        .concat()
+    };
+    let short_id = [&b"\xff\x05\x00\x00"[..], MAGIC_BODY].concat();
+    let min_lz_chunk = chunk(CHUNK_TYPE_MINLZ_COMPRESSED_DATA, &sum, &min_lz);
     let (_, h) = get_uvarint(&min_lz[1..]).unwrap();
     let mut too_large = vec![0];
     let mut v = [0; 10];
@@ -1483,19 +1494,54 @@ fn reader_simd_chunks() {
             false,
             Some(Error::Corrupt),
         ),
+        // Bit 7 and longer identifiers are reserved for a later version, so they are
+        // unsupported, not corrupt.
         (
             "bit-7",
-            cat(&[
-                &bit7(&no_flag),
-                &chunk(CHUNK_TYPE_MINLZ_COMPRESSED_DATA, &sum, &min_lz),
-                &eof,
-            ]),
+            cat(&[&bit7(&no_flag), &min_lz_chunk, &eof]),
             false,
-            Some(Error::Corrupt),
+            Some(Error::Unsupported),
         ),
         (
             "bit-7-simd",
             cat(&[&bit7(&hdr), &simd_chunk, &eof]),
+            false,
+            Some(Error::Unsupported),
+        ),
+        (
+            "long-identifier",
+            cat(&[&long_id(&no_flag), &min_lz_chunk, &eof]),
+            false,
+            Some(Error::Unsupported),
+        ),
+        (
+            "long-identifier-simd",
+            cat(&[&long_id(&hdr), &simd_chunk, &eof]),
+            false,
+            Some(Error::Unsupported),
+        ),
+        (
+            "long-identifier-concatenated",
+            cat(&[
+                &hdr,
+                &simd_chunk,
+                &eof,
+                &long_id(&no_flag),
+                &min_lz_chunk,
+                &eof,
+            ]),
+            false,
+            Some(Error::Unsupported),
+        ),
+        (
+            "short-identifier",
+            cat(&[&short_id, &min_lz_chunk, &eof]),
+            false,
+            Some(Error::Corrupt),
+        ),
+        (
+            "short-identifier-concatenated",
+            cat(&[&hdr, &simd_chunk, &eof, &short_id, &min_lz_chunk, &eof]),
             false,
             Some(Error::Corrupt),
         ),
@@ -1551,6 +1597,16 @@ fn reader_simd_chunks() {
                 assert!(matches, "{name}/{r}: got error {e}, want {want}");
             }
         }
+    }
+    // index_stream reports a longer identifier as unsupported and a shorter one as invalid, as
+    // Go's ErrUnsupported and ErrCorrupt.
+    for (name, kind) in [
+        ("long-identifier", io::ErrorKind::Unsupported),
+        ("short-identifier", io::ErrorKind::InvalidData),
+    ] {
+        let stream = &tests.iter().find(|t| t.0 == name).unwrap().1;
+        let e = crate::index::index_stream(&stream[..]).unwrap_err();
+        assert_eq!(e.kind(), kind, "{name}/IndexStream: got {e}");
     }
 
     // Ignoring checksums also ignores the hash.

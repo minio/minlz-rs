@@ -61,6 +61,8 @@ pub(crate) const SIMD_HASH_SIZE: usize = 8;
 
 /// The stream identifier flag of streams with SIMD chunks.
 pub(crate) const STREAM_FLAG_SIMD: u8 = 1 << 6;
+/// Reserved for a later version: this one can't read streams that set it.
+pub(crate) const STREAM_FLAG_RESERVED: u8 = 1 << 7;
 
 pub(crate) const MAGIC_BODY: &[u8] = b"MinLz";
 /// Magic body + 1-byte block-size indicator.

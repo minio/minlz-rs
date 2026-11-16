@@ -35,8 +35,9 @@ pub enum Error {
     TooLarge,
     /// The stream uses a feature the reader cannot handle: a reserved
     /// non-skippable chunk, an unknown stream magic (Snappy/S2 fallback
-    /// is not implemented in this crate), or an invalid
-    /// stream-identifier indicator.  Equivalent to Go `ErrUnsupported`.
+    /// is not implemented in this crate), or a stream identifier of a
+    /// later version: longer, or with bit 7 of its indicator set.
+    /// Equivalent to Go `ErrUnsupported`.
     Unsupported,
     /// A block-codec error bubbled up while decoding.
     Block(BlockError),

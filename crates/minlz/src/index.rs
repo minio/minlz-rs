@@ -670,8 +670,13 @@ pub fn index_stream<R: Read>(mut r: R) -> io::Result<Vec<u8>> {
                 uncomp_pos += n2 as u64;
             }
             CHUNK_TYPE_STREAM_IDENTIFIER => {
+                // A longer identifier may come from a later version, so it is unsupported
+                // rather than invalid.
+                if chunk_len > MAGIC_BODY_LEN {
+                    return Err(Error::BadFormat("stream identifier of a later version").into());
+                }
                 if chunk_len != MAGIC_BODY_LEN {
-                    return Err(Error::BadFormat("bad stream identifier length").into());
+                    return Err(Error::Invalid("bad stream identifier length").into());
                 }
                 let magic = &body[..MAGIC_BODY_LEN];
                 if !magic.starts_with(MAGIC_BODY_MINLZ)

@@ -33,8 +33,8 @@ use super::format::{
     CHUNK_TYPE_MINLZ_COMPRESSED_DATA_COMP_CRC, CHUNK_TYPE_MINLZ_SIMD, CHUNK_TYPE_STREAM_IDENTIFIER,
     CHUNK_TYPE_UNCOMPRESSED_DATA, MAGIC_BODY, MAGIC_BODY_LEN, MAX_BLOCK_SIZE,
     MAX_NON_SKIPPABLE_CHUNK, MAX_USER_NON_SKIPPABLE_CHUNK, MAX_VARINT_LEN_64,
-    MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, STREAM_FLAG_SIMD,
-    block_size_from_indicator, get_uvarint, read_chunk_len, read_u32_le,
+    MIN_USER_NON_SKIPPABLE_CHUNK, MIN_USER_SKIPPABLE_CHUNK, SIMD_HASH_SIZE, STREAM_FLAG_RESERVED,
+    STREAM_FLAG_SIMD, block_size_from_indicator, get_uvarint, read_chunk_len, read_u32_le,
 };
 
 /// Callback invoked when a user-defined chunk (`0x80..=0xfd`) is encountered.
@@ -875,12 +875,16 @@ pub(super) fn read_uncompressed<R: Read>(
 
 /// Reads the body of a stream identifier chunk of chunk_len bytes, and returns whether the stream
 /// holds SIMD chunks and its largest block size. It fails unless the body is the MinLZ magic with
-/// bit 7 of the block size indicator clear and a block size of at most max_block_user.
+/// bit 7 of the block size indicator clear and a block size of at most max_block_user. A longer
+/// body or bit 7, which are reserved for a later version, are unsupported rather than corrupt.
 pub(super) fn read_stream_identifier<R: Read>(
     r: &mut R,
     chunk_len: usize,
     max_block_user: usize,
 ) -> Result<(bool, usize)> {
+    if chunk_len > MAGIC_BODY_LEN {
+        return Err(Error::Unsupported.into());
+    }
     if chunk_len != MAGIC_BODY_LEN {
         return Err(Error::Corrupt.into());
     }
@@ -891,9 +895,8 @@ pub(super) fn read_stream_identifier<R: Read>(
         return Err(Error::Unsupported.into());
     }
     let indicator = tmp[MAGIC_BODY_LEN - 1];
-    // Bit 7 must be 0.
-    if indicator & 0x80 != 0 {
-        return Err(Error::Corrupt.into());
+    if indicator & STREAM_FLAG_RESERVED != 0 {
+        return Err(Error::Unsupported.into());
     }
     let max_block = block_size_from_indicator(indicator).ok_or(Error::Corrupt)?;
     if max_block > max_block_user {
