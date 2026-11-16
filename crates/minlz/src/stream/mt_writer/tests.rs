@@ -831,11 +831,14 @@ fn concurrent_writers_share_bounded_engines() {
             });
         }
     });
-    // Writers only build an engine when none is parked, so at most one per
-    // concurrent writer exists.
+    // Writers only build an engine when none is parked. The parked engines of a shape keep at
+    // most one worker per CPU, and at least one engine: when that holds an engine per writer,
+    // at most one per concurrent writer exists. Otherwise the surplus drops at park, and later
+    // writers build new ones.
+    let cap = (crate::stream::worker_count(0) / 2).max(1);
     let ids = ids.into_inner().unwrap();
     assert!(
-        ids.len() <= THREADS,
+        cap < THREADS || ids.len() <= THREADS,
         "{} engines for {THREADS} writers",
         ids.len()
     );
@@ -845,7 +848,10 @@ fn concurrent_writers_share_bounded_engines() {
         .iter()
         .filter(|e| e.key == (2, BS))
         .count();
-    assert!(parked <= THREADS, "{parked} parked engines");
+    assert!(
+        parked <= cap.min(THREADS),
+        "{parked} parked engines, at most {cap} of 2 workers"
+    );
 }
 
 #[test]
