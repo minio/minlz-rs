@@ -418,7 +418,10 @@ unsafe fn copy_short_literal(
 /// LZ77 forward copy: `dst[d+i] = dst[d-offset+i]` for `i ∈ [0, length)`.
 ///
 /// Used when `offset <= length`, where the read range overlaps the write
-/// range and earlier writes in the same copy may be read.
+/// range and earlier writes in the same copy may be read. As in Go's amd64
+/// decoder, a copy of 128 bytes or more copies the decoded prefix, which
+/// doubles each step, and a shorter one copies 16 bytes at a time while
+/// `offset >= 16`.
 ///
 /// # Safety
 /// - `d >= offset`
@@ -427,11 +430,31 @@ unsafe fn copy_short_literal(
 unsafe fn forward_copy_ptr(dst_ptr: *mut u8, d: usize, offset: usize, length: usize) {
     debug_assert!(offset > 0);
     debug_assert!(offset <= length);
-    let mut i = 0;
-    // SAFETY: caller guarantees `d + length` is in-bounds and `d >= offset`.
-    while i < length {
-        unsafe { *dst_ptr.add(d + i) = *dst_ptr.add(d - offset + i) };
-        i += 1;
+    // SAFETY: caller guarantees `d + length` is in-bounds and `d >= offset`. Every
+    // copy reads only bytes before the ones it writes.
+    unsafe {
+        let src = dst_ptr.add(d - offset);
+        let dst = dst_ptr.add(d);
+        if length >= 128 {
+            let mut done = 0;
+            while done < length {
+                let n = (offset + done).min(length - done);
+                ptr::copy_nonoverlapping(src, dst.add(done), n);
+                done += n;
+            }
+            return;
+        }
+        let mut i = 0;
+        if offset >= 16 {
+            while length - i >= 16 {
+                ptr::copy_nonoverlapping(src.add(i), dst.add(i), 16);
+                i += 16;
+            }
+        }
+        while i < length {
+            *dst.add(i) = *src.add(i);
+            i += 1;
+        }
     }
 }
 

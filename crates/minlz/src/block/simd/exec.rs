@@ -28,8 +28,11 @@
 //!    A fast loop writes at most `SLACK` bytes past the end of an operation, and nothing before
 //!    `st[0]`.
 //! 2. **Literals.** `lits` is readable `SLACK` bytes past the last literal the operations use.
-//!    The decoder passes its whole literal buffer: the block's size plus [`PAD`](super::PAD) bytes, and the
-//!    literals used never pass the output position.
+//!    A chunk uses at most the sum of its literal lengths, plus 255 for each literal escape.
+//!    The decoder passes its literal buffer, which holds the block's size plus
+//!    [`PAD`](super::PAD) bytes. When one run of stored literal blocks holds every literal the
+//!    chunk can use, and [`PAD`](super::PAD) bytes follow them, the decoder passes the literal
+//!    section from that run on instead.
 //! 3. **Streams stay readable past their values.** `tok` is readable 7 tokens past the last
 //!    operation run (Go's NEON batches read 8 tokens), `ll` and `offc` 8 bytes past the last value
 //!    the operations use, and `raw` 8 bytes from byte `pos >> 3` of each bit position `pos` the
@@ -553,9 +556,9 @@ impl Chunk<'_> {
 ///
 /// The CPU has the features of f's tier, and the operations keep memory rules 1 and 2: they
 /// end at least `SLACK` bytes before the end of dst, and lits is readable `SLACK` bytes past
-/// their literals. [`Chunk::run`] splits chunks so, and the decoder's literal buffer is longer
-/// than dst. c's counts are at least what its operations read. Rule 3 is checked here against
-/// those counts; rule 4 is the loops' own.
+/// their literals. [`Chunk::run`] splits chunks for rule 1, and the decoder passes lits as rule 2
+/// says. c's counts are at least what its operations read. Rule 3 is checked here against those
+/// counts; rule 4 is the loops' own.
 #[allow(dead_code, reason = "called by the vector tiers")]
 pub(super) unsafe fn exec_vec(
     f: ExecFn,

@@ -2162,8 +2162,77 @@ fn simd_lit_lazy() {
     }
 }
 
+/// Chunks read a run of stored literal blocks in place when it holds their literals and the PAD
+/// bytes after them, and otherwise get them copied (Go `TestSIMDChunkLits`).
+#[test]
+fn simd_chunk_lits() {
+    let mut rng = Rng(13);
+    let mut b = TestBuilder::default();
+    let lits: Vec<u8> = (0..6000).map(|_| b"abcdefgh"[rng.intn(8)]).collect();
+    // Returns a decoder with literal blocks of 1000 literals, in modes, and the literal section.
+    let mut setup = |modes: &[usize]| {
+        let mut e = TestEnc {
+            typ: BLOCK_TYPE,
+            size: lits.len(),
+            no_lz: true,
+            ..Default::default()
+        };
+        for v in lits.chunks(1000) {
+            e.lits
+                .push(b.stream(LITS, modes[e.lits.len() % modes.len()], v));
+        }
+        let raw = e.bytes();
+        let (_, h) = get_uvarint(&raw[1..]).unwrap();
+        let body = &raw[2 + h..];
+        let (_, n) = rvarint(body).unwrap();
+        let sec = body[..body.len() - n].to_vec();
+        let mut s = Decoder::new();
+        let mut r = s.literals(&sec, lits.len()).expect("literal section");
+        s.lits
+            .fill(&mut s.t, &mut r, 0, lits.len(), lits.len())
+            .expect("no literals");
+        (s, sec)
+    };
+    let check = |name: &str, s: &mut Decoder, sec: &[u8], a: usize, b: usize, in_place: bool| {
+        let (got, at) = s.lits.chunk_lits(sec, a, b);
+        assert!(
+            got[a - at..b - at] == lits[a..b],
+            "{name}: literals {a} to {b} differ"
+        );
+        assert_eq!(
+            sec.as_ptr_range().contains(&got.as_ptr()),
+            in_place,
+            "{name}: literals {a} to {b} read in place"
+        );
+    };
+    let modes: [&[usize]; 2] = [&[STORED], &[STORED, STORED, CODE_LENS, STORED, CURRENT]];
+    let (mut s, sec) = setup(modes[1]);
+    check("in a stored block", &mut s, &sec, 100, 900, true);
+    check("across stored blocks", &mut s, &sec, 500, 1500, true);
+    check("into a coded block", &mut s, &sec, 1500, 2500, false);
+    check("in a coded block", &mut s, &sec, 2100, 2900, false);
+    check("from a coded block", &mut s, &sec, 2900, 3500, false);
+    // The literal records of a section of stored blocks are shorter than PAD.
+    let (mut s, sec) = setup(modes[0]);
+    check("before the records", &mut s, &sec, 0, 5900, true);
+    check("at the records", &mut s, &sec, 5990, 6000, false);
+    for m in modes {
+        let (mut s, sec) = setup(m);
+        let mut a = 0;
+        while a < lits.len() {
+            let b = (a + rng.intn(700)).min(lits.len());
+            let (got, at) = s.lits.chunk_lits(&sec, a, b);
+            assert!(
+                got[a - at..b - at] == lits[a..b],
+                "modes {m:?}: literals {a} to {b} differ"
+            );
+            a += rng.intn(300);
+        }
+    }
+}
+
 /// fill decodes literal blocks only until the literals a chunk needs are decoded, and zeros
-/// follow them.
+/// follow them. Stored literals stay in place until copy_stored copies them.
 #[test]
 fn simd_lit_fill() {
     let mut rng = Rng(12);
@@ -2192,9 +2261,8 @@ fn simd_lit_fill() {
     let (_, n) = rvarint(body).unwrap();
     let mut s = Decoder::new();
     s.lits.buf = vec![0xa5; lits.len() + PAD];
-    let mut r = s
-        .literals(&body[..body.len() - n], lits.len())
-        .expect("literal section");
+    let sec = &body[..body.len() - n];
+    let mut r = s.literals(sec, lits.len()).expect("literal section");
     let mut l = 0;
     while !r.recs.is_empty() {
         let need = rng.intn(6000);
@@ -2209,6 +2277,7 @@ fn simd_lit_fill() {
             s.lits.fill(&mut s.t, &mut r, l, need, lits.len()).is_some(),
             "fill failed"
         );
+        s.lits.copy_stored(sec, 0, s.lits.n);
         let got = &s.lits.buf;
         assert!(
             s.lits.n == want && got[..want] == lits[..want] && got[want..want + PAD] == [0; PAD],
