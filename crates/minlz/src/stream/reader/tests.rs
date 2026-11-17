@@ -2384,10 +2384,12 @@ fn builder_rejects_bad_config() {
 
 #[test]
 fn decode_concurrent_callback_panic_returns() {
+    // The timeout below runs on Miri's virtual clock, which 100 KB blocks overrun.
+    let n = if cfg!(miri) { 1_000 } else { 100_000 };
     let mut w = crate::stream::Writer::new(Vec::new());
-    w.write_all(&[7u8; 100_000]).unwrap();
+    w.write_all(&vec![7u8; n]).unwrap();
     w.add_user_chunk(0x80, b"boom").unwrap();
-    w.write_all(&[8u8; 100_000]).unwrap();
+    w.write_all(&vec![8u8; n]).unwrap();
     let stream = w.finish().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
