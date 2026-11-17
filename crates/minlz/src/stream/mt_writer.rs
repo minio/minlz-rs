@@ -374,6 +374,22 @@ impl MtWriterBuilder {
 /// next `MtWriter` with the same concurrency and block size to reuse; unused,
 /// they exit.
 ///
+/// # Example
+///
+/// Compress a file on all cores. The writer owns its sink, and `finish` returns it:
+///
+/// ```no_run
+/// use std::fs::File;
+/// use std::io;
+///
+/// use minlz::stream::MtWriter;
+///
+/// let mut w = MtWriter::new(File::create("logs.mz")?);
+/// io::copy(&mut File::open("logs.txt")?, &mut w)?;
+/// w.finish()?.sync_all()?;
+/// # Ok::<(), io::Error>(())
+/// ```
+///
 /// [`finish`]: MtWriter::finish
 /// [`close_index`]: MtWriter::close_index
 pub struct MtWriter<W: Write + Send + 'static> {

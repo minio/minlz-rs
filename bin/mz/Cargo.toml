@@ -1,8 +1,10 @@
 [package]
 name = "minio-mz"
 version = "1.3.0"
-description = "MinLZ command-line tool (Rust port)"
+description = "mz, the MinLZ command-line tool: compresses, decompresses, checks and benchmarks MinLZ files"
 readme = "../../README.md"
+keywords = ["minlz", "compression", "cli", "decompression"]
+categories = ["command-line-utilities", "compression"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

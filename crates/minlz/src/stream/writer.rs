@@ -44,14 +44,6 @@ pub struct Written {
 }
 
 /// Builder for [`Writer`] options.
-///
-/// ```
-/// # use minlz::stream::WriterBuilder;
-/// # use minlz::Level;
-/// let mut buf = Vec::<u8>::new();
-/// let mut writer = WriterBuilder::new().level(Level::Smallest).build(&mut buf).unwrap();
-/// # let _ = &mut writer;
-/// ```
 #[must_use]
 pub struct WriterBuilder {
     block_size: usize,

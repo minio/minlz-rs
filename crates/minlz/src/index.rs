@@ -227,6 +227,42 @@ impl Index {
     /// an offset past the last entry returns the last entry.  Maps Go
     /// `Index.Find` (callers wanting "distance from end" pass
     /// `total_uncompressed - dist`; bounds are enforced by the seek layer).
+    ///
+    /// # Example
+    ///
+    /// Read from an uncompressed offset of a stream that cannot seek, such as an HTTP body.
+    /// The index tells which byte range of the stream to fetch:
+    ///
+    /// ```
+    /// use std::io::{Read, Write};
+    ///
+    /// use minlz::Index;
+    /// use minlz::stream::{ReaderBuilder, WriterBuilder};
+    ///
+    /// // 100,000 lines of 13 bytes: "line 0000000\n", "line 0000001\n", ...
+    /// let text: String = (0..100_000).map(|i| format!("line {i:07}\n")).collect();
+    ///
+    /// // `close_index` returns the index apart from the stream, to store elsewhere.
+    /// let mut w = WriterBuilder::new().block_size(64 << 10).build(Vec::new())?;
+    /// w.write_all(text.as_bytes())?;
+    /// let (stream, index_bytes) = w.close_index()?;
+    ///
+    /// let mut index = Index::new();
+    /// index.load(&index_bytes)?;
+    /// let want = 70_000 * 13;
+    /// let start = index.find(want);
+    ///
+    /// // Fetch the stream from `start.compressed` on, for example with an HTTP range request.
+    /// let part = &stream[start.compressed as usize..];
+    ///
+    /// // The part starts at a block, without the stream identifier.
+    /// let mut r = ReaderBuilder::new().ignore_stream_id().build(part)?;
+    /// r.skip(want - start.uncompressed)?;
+    /// let mut line = [0; 13];
+    /// r.read_exact(&mut line)?;
+    /// assert_eq!(&line, b"line 0070000\n");
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
     pub fn find(&self, uncompressed_offset: u64) -> OffsetPair {
         if self.offsets.is_empty() {
             return OffsetPair::default();
@@ -577,6 +613,31 @@ impl Index {
 /// separately).
 ///
 /// Matches Go `IndexStream`.
+///
+/// # Example
+///
+/// Add random access to a stream written without an index. The index is built once and stored
+/// beside the stream, which stays unchanged:
+///
+/// ```
+/// use std::io::{Cursor, Write};
+///
+/// use minlz::index_stream;
+/// use minlz::stream::{ReadSeeker, Reader, WriterBuilder};
+///
+/// let text: String = (0..100_000).map(|i| format!("line {i:07}\n")).collect();
+/// let mut w = WriterBuilder::new().block_size(64 << 10).build(Vec::new())?;
+/// w.write_all(text.as_bytes())?;
+/// let stream = w.finish()?;
+///
+/// let index = index_stream(&stream[..])?;
+///
+/// let mut rs = ReadSeeker::with_index(Reader::new(Cursor::new(&stream)), &index)?;
+/// let mut line = [0; 13];
+/// rs.read_exact_at(&mut line, 70_000 * 13)?;
+/// assert_eq!(&line, b"line 0070000\n");
+/// # Ok::<(), std::io::Error>(())
+/// ```
 pub fn index_stream<R: Read>(mut r: R) -> io::Result<Vec<u8>> {
     let mut idx = Index::new();
     let mut comp_pos: u64 = 0;

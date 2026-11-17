@@ -1,8 +1,13 @@
 [package]
 name = "minio-minlz"
 version = "1.3.0"
-description = "MinLZ compression"
+description = "Fast MinLZ block and stream compression, with SIMD blocks"
 readme = "../../README.md"
+keywords = ["minlz", "compression", "lz77", "simd", "decompression"]
+categories = ["compression"]
+# The SIMD fixtures stay in the repository, with the two integration tests that read them. Some
+# unit tests read the fixtures and `testdata/` too, so the unit tests run only in the repository.
+exclude = ["tests/fixtures", "tests/simd_fixtures.rs", "tests/simd_decode_allocs.rs"]
 edition.workspace = true
 rust-version.workspace = true
 # The AVX-512 histogram is MIT licensed: src/pivco/kernel/LICENSE-histogram.
