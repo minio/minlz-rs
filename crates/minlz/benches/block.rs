@@ -298,7 +298,7 @@ fn bench_decode(c: &mut Criterion) {
             encode(&mut enc, &src, level).expect("encode for bench prep");
             let id = BenchmarkId::new(*label, level_label(level));
             g.bench_with_input(id, &enc, |b, enc| {
-                let mut buf = Vec::with_capacity(src.len() + 16);
+                let mut buf = Vec::with_capacity(src.len());
                 b.iter(|| {
                     decode(&mut buf, enc).expect("decode");
                 });
@@ -358,7 +358,7 @@ fn bench_snappy_decode(c: &mut Criterion) {
             encode(&mut enc, &data, level).expect("encode for bench prep");
             let id = BenchmarkId::new(tf.label, level_label(level));
             g.bench_with_input(id, &enc, |b, enc| {
-                let mut buf = Vec::with_capacity(data.len() + 16);
+                let mut buf = Vec::with_capacity(data.len());
                 b.iter(|| {
                     decode(&mut buf, enc).expect("decode");
                 });

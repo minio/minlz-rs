@@ -329,13 +329,10 @@ fn decode_at(dst: &mut Vec<u8>, start: usize, src: &[u8]) -> Result<(), Error> {
         Header::Classic { body, dlen } => (body, dlen),
     };
     dst.truncate(start);
-    // The decoder uses LZ4-style 16-byte overshoot stores in its hot path;
-    // give it `OVERSHOOT_PAD` bytes of writable padding past `dlen`.
-    dst.reserve(dlen + decode::OVERSHOOT_PAD);
+    dst.reserve(dlen);
     // SAFETY: we just reserved enough room; `dst.as_mut_ptr().add(start)`
-    // points to at least `dlen + OVERSHOOT_PAD` writable bytes.  The
-    // decoder writes `dlen` valid bytes on success; the padding region's
-    // contents are undefined and will not be exposed via the returned Vec.
+    // points to at least `dlen` writable bytes.  The decoder writes `dlen`
+    // valid bytes on success.
     unsafe {
         let dst_ptr = dst.as_mut_ptr().add(start);
         decode::minlz_decode(dst_ptr, dlen, body)?;
@@ -503,9 +500,9 @@ fn encode_body(dst: &mut [u8], src: &[u8], level: Level) -> usize {
 pub(crate) fn append_decoded_chunk_body(dst: &mut Vec<u8>, body: &[u8]) -> Result<(), Error> {
     let (dlen, compressed) = split_chunk_body(body)?;
     let start = dst.len();
-    dst.reserve(dlen + decode::OVERSHOOT_PAD);
-    // SAFETY: same invariants as `decode_at` — we just reserved
-    // `dlen + OVERSHOOT_PAD` writable bytes past `start`.
+    dst.reserve(dlen);
+    // SAFETY: same invariants as `decode_at` — we just reserved `dlen`
+    // writable bytes past `start`.
     unsafe {
         let dst_ptr = dst.as_mut_ptr().add(start);
         decode::minlz_decode(dst_ptr, dlen, compressed)?;

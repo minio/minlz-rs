@@ -52,8 +52,8 @@ fuzz_target!(|data: &[u8]| {
     let mel = max_encoded_len(data.len()).unwrap();
     // `encode` reserves the encoders' room past `max_encoded_len` itself.
     let mut enc = Vec::new();
-    // The SIMD decoder writes exactly the output, so this never grows.
-    let mut sdec = Vec::with_capacity(data.len());
+    // Both decoders write exactly the output, so this never grows.
+    let mut dec = Vec::with_capacity(data.len());
     for level in LEVELS {
         encode(&mut enc, data, level).expect("encode");
         assert!(
@@ -62,7 +62,7 @@ fuzz_target!(|data: &[u8]| {
             enc.len()
         );
         if common::is_simd(&enc) {
-            common::decode_tiers(&level, &enc, Ok(data), &mut sdec, 0xfe);
+            common::decode_tiers(&level, &enc, Ok(data), &mut dec, 0xfe);
             let r = decode_simd_block_strict(&enc);
             assert!(
                 r.as_deref() == Ok(data),
@@ -70,14 +70,9 @@ fuzz_target!(|data: &[u8]| {
                 r.err()
             );
         } else {
-            // The classic decoder reserves room to overshoot, which would double a dst sized for
-            // the output. A new one gets exactly that room; the second decode finds garbage in it.
-            let mut dec = Vec::new();
-            for _ in 0..2 {
-                common::garbage(&mut dec, 0xfe);
-                minlz::decode(&mut dec, &enc).expect("decode");
-                assert!(dec == data, "{level:?}: mismatch");
-            }
+            common::garbage(&mut dec, 0xfe);
+            minlz::decode(&mut dec, &enc).expect("decode");
+            assert!(dec == data, "{level:?}: mismatch");
         }
     }
 });
