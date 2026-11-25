@@ -69,11 +69,19 @@ struct Case {
     op: Op,
     input: &'static str,
     level: Level,
+    /// For a block decode, the bytes of each block the input is cut into, each encoded on its
+    /// own; 0 encodes the input as one block.
+    block: usize,
 }
 
 impl Case {
     fn name(&self) -> String {
-        format!("{}/{}/{:?}", self.op.name(), self.input, self.level)
+        if self.block == 0 {
+            format!("{}/{}/{:?}", self.op.name(), self.input, self.level)
+        } else {
+            let k = self.block / 1024;
+            format!("{}/{}@{k}k/{:?}", self.op.name(), self.input, self.level)
+        }
     }
 }
 
@@ -86,6 +94,19 @@ fn cases() -> Vec<Case> {
                 op: Op::BlockDecode,
                 input,
                 level,
+                block: 0,
+            });
+        }
+    }
+    // The corpus cut into small blocks, the sizes a block cache holds, so the end of each
+    // block's output weighs as it does there rather than once per megabyte.
+    for block in [4 << 10, 32 << 10] {
+        for level in [Level::Fastest, Level::Balanced, Level::Smallest] {
+            v.push(Case {
+                op: Op::BlockDecode,
+                input: "corpus",
+                level,
+                block,
             });
         }
     }
@@ -95,6 +116,7 @@ fn cases() -> Vec<Case> {
                 op,
                 input,
                 level: Level::Fastest,
+                block: 0,
             });
         }
     }
@@ -200,16 +222,32 @@ fn run(case: &Case, secs: f64) -> (f64, usize, u64) {
     };
     let (ns, enc) = match case.op {
         Op::BlockDecode => {
-            let mut enc = Vec::new();
-            minlz::encode(&mut enc, &src, case.level).expect("encode");
-            let mut out = Vec::with_capacity(src.len());
+            let blocks: Vec<&[u8]> = if case.block == 0 {
+                vec![&src[..]]
+            } else {
+                src.chunks(case.block).collect()
+            };
+            let encs: Vec<Vec<u8>> = blocks
+                .iter()
+                .map(|b| {
+                    let mut enc = Vec::new();
+                    minlz::encode(&mut enc, b, case.level).expect("encode");
+                    enc
+                })
+                .collect();
+            let mut out = Vec::with_capacity(blocks[0].len());
             let (ns, _) = measure(secs, || {
-                out.clear();
-                minlz::decode(&mut out, black_box(&enc)).expect("decode");
-                black_box(&out);
+                for enc in &encs {
+                    out.clear();
+                    minlz::decode(&mut out, black_box(enc)).expect("decode");
+                    black_box(&out);
+                }
             });
-            assert!(out == src, "decode differs from the input");
-            (ns, enc)
+            for (enc, b) in encs.iter().zip(&blocks) {
+                minlz::decode(&mut out, enc).expect("decode");
+                assert!(out == *b, "decode differs from the input");
+            }
+            (ns, encs.concat())
         }
         Op::StreamRead => {
             let enc = write_stream(&src);
