@@ -1842,3 +1842,122 @@ fn emit_copy_short_dst_panics_in_debug() {
     let mut buf = [0u8; 8];
     emit::emit_copy(&mut buf[..1], 204_800, 4);
 }
+
+/// Build a valid block body op by op, returning the body and its output.
+///
+/// The ops are short and mixed, the shape a real encoder emits only rarely
+/// near a block's end: literals of one to four bytes, short matches at
+/// offsets past and below 16, fused Copy2 matches, and repeats. A short op
+/// spends more source bytes than it writes output bytes, so the decoder's
+/// fast loop, which runs while 16 source bytes remain, reaches the last
+/// bytes of the output.
+fn short_op_block(rng: &mut Xor64) -> (Vec<u8>, Vec<u8>) {
+    use emit::{emit_copy, emit_copy_lits2, emit_literal, emit_repeat};
+    use format::MIN_COPY2_OFFSET;
+
+    let target = 32 + (rng.next() as usize % 480);
+    let mut body = vec![0u8; 16 * target + 64];
+    let mut n = 0;
+    let mut out: Vec<u8> = Vec::with_capacity(target + 64);
+    let mut last_offset = 1;
+    let copy = |out: &mut Vec<u8>, offset: usize, length: usize| {
+        for _ in 0..length {
+            out.push(out[out.len() - offset]);
+        }
+    };
+
+    let first: Vec<u8> = (0..32 + rng.next() as usize % 48)
+        .map(|_| rng.next() as u8)
+        .collect();
+    n += emit_literal(&mut body[n..], &first);
+    out.extend_from_slice(&first);
+    while out.len() < target {
+        let d = out.len();
+        match rng.next() % 6 {
+            0 | 1 => {
+                // Mostly one to four bytes, sometimes up to 20.
+                let most = if rng.next().is_multiple_of(4) { 20 } else { 4 };
+                let len = 1 + rng.next() as usize % most;
+                let lit: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+                n += emit_literal(&mut body[n..], &lit);
+                out.extend_from_slice(&lit);
+            }
+            2 => {
+                let offset = 16 + rng.next() as usize % (d.min(1024) - 15);
+                let length = 4 + rng.next() as usize % 13;
+                n += emit_copy(&mut body[n..], offset, length);
+                copy(&mut out, offset, length);
+                last_offset = offset;
+            }
+            3 => {
+                let offset = 1 + rng.next() as usize % 15;
+                let length = 4 + rng.next() as usize % 17;
+                n += emit_copy(&mut body[n..], offset, length);
+                copy(&mut out, offset, length);
+                last_offset = offset;
+            }
+            4 if d + 1 >= MIN_COPY2_OFFSET => {
+                let lits: Vec<u8> = (0..1 + rng.next() as usize % 4)
+                    .map(|_| rng.next() as u8)
+                    .collect();
+                let reach = d + lits.len();
+                let offset =
+                    MIN_COPY2_OFFSET + rng.next() as usize % (reach - MIN_COPY2_OFFSET + 1);
+                let length = 4 + rng.next() as usize % 8;
+                n += emit_copy_lits2(&mut body[n..], &lits, offset, length);
+                out.extend_from_slice(&lits);
+                copy(&mut out, offset, length);
+                last_offset = offset;
+            }
+            _ => {
+                let length = 1 + rng.next() as usize % 16;
+                n += emit_repeat(&mut body[n..], length);
+                copy(&mut out, last_offset, length);
+            }
+        }
+    }
+    body.truncate(n);
+    (body, out)
+}
+
+/// The decoder writes nothing past the decoded length. Each body decodes
+/// into a buffer of `dlen` bytes followed by a guard of sentinel bytes, and
+/// the guard comes back unchanged: on valid blocks of short ops, whose
+/// output must also match, and on the same blocks with one byte changed,
+/// whose decode may fail anywhere.
+#[test]
+fn decode_writes_nothing_past_the_decoded_length() {
+    const GUARD: usize = 64;
+    const SENTINEL: u8 = 0xA5;
+    fn decode_guarded(body: &[u8], dlen: usize) -> (Result<(), Error>, Vec<u8>) {
+        let mut buf = vec![SENTINEL; dlen + GUARD];
+        // SAFETY: `buf` holds `dlen + GUARD` writable bytes, more than the
+        // decoder's contract asks for.
+        let res = unsafe { decode::minlz_decode(buf.as_mut_ptr(), dlen, body) };
+        (res, buf)
+    }
+
+    let mut rng = Xor64::new(0x0dd_ba11);
+    let blocks = if cfg!(miri) { 64 } else { 20_000 };
+    for i in 0..blocks {
+        let (body, want) = short_op_block(&mut rng);
+        let dlen = want.len();
+        let (res, buf) = decode_guarded(&body, dlen);
+        res.unwrap_or_else(|e| panic!("block {i}: {e:?}"));
+        assert!(buf[..dlen] == want[..], "block {i}: output mismatch");
+        assert!(
+            buf[dlen..].iter().all(|&b| b == SENTINEL),
+            "block {i}: the decoder wrote past dlen = {dlen}: {:?}",
+            &buf[dlen..dlen + 16]
+        );
+
+        let mut corrupt = body.clone();
+        let at = rng.next() as usize % corrupt.len();
+        corrupt[at] ^= 1 + (rng.next() as u8 % 255);
+        let (_, buf) = decode_guarded(&corrupt, dlen);
+        assert!(
+            buf[dlen..].iter().all(|&b| b == SENTINEL),
+            "block {i}, byte {at} changed: the decoder wrote past dlen = {dlen}"
+        );
+    }
+}

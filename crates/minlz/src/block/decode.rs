@@ -18,29 +18,28 @@
 //! runs while `s + 16 <= src.len()` and uses raw-pointer loads/stores
 //! behind that invariant; the tail loop bounds-checks every byte read.
 //!
-//! The fast loop also uses LZ4-style 16-byte overshoot writes for short
-//! copies — this requires the caller to provide `OVERSHOOT_PAD` bytes of
-//! writable padding past `dlen` in the destination buffer.
+//! The fast loop copies short literals and short matches with one LZ4-style
+//! 16-byte move, which writes past the end of the op.  It makes one only
+//! where 16 bytes of output remain, so the decoder writes nothing past
+//! `dlen` and needs no padding after it, the rule the SIMD block decoder
+//! keeps with `SLACK`.  The room a move needs implies the bounds checks of
+//! the op, so the move costs no more checks than an exact copy.
 
 use super::format::{MIN_COPY2_OFFSET, MIN_COPY3_OFFSET};
 use crate::Error;
 use core::ptr;
 
-/// Bytes of writable padding past `dlen` that the caller must allocate.
-pub(super) const OVERSHOOT_PAD: usize = 16;
-
 /// Decode `src` into the buffer at `dst_ptr`.
 ///
 /// On success the function writes exactly `dlen` valid bytes into
-/// `dst_ptr[..dlen]`.  The caller must ensure that the buffer has at
-/// least `dlen + OVERSHOOT_PAD` bytes of writable space (the extra padding
-/// permits 16-byte overshoot stores in the hot path).
+/// `dst_ptr[..dlen]`.  It writes nothing past `dst_ptr[..dlen]`, on
+/// success or on error.
 ///
 /// # Safety
-/// - `dst_ptr` must point to at least `dlen + OVERSHOOT_PAD` writable
-///   bytes within a single allocation.
+/// - `dst_ptr` must point to at least `dlen` writable bytes within a
+///   single allocation.
 /// - The bytes in `dst_ptr[..dlen]` may be uninitialised on entry; on
-///   `Ok(())` they are fully written.  The padding region is undefined.
+///   `Ok(())` they are fully written.
 pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> Result<(), Error> {
     let src_len = src.len();
     let src_ptr = src.as_ptr();
@@ -83,17 +82,21 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                     };
                     if v & 4 == 0 {
                         // Literal: copy, advance, and skip the docopy below.
-                        if length > dlen - d || length > src_len - s {
-                            return Err(Error::Corrupt("literal length out of bounds"));
-                        }
-                        // SAFETY: bounds checked above.  We pad dst by
-                        // `OVERSHOOT_PAD ≥ 16` bytes, so a 16-byte write
-                        // at offset `d ≤ dlen - length` stays in-bounds
-                        // because `d + 16 ≤ dlen + 16`.  For src, the
-                        // 16-byte overshoot read needs `s + 16 ≤ src_len`,
-                        // satisfied while inside the fast loop.
-                        unsafe {
-                            copy_short_literal(src_ptr.add(s), dst_ptr.add(d), length, s, src_len);
+                        // `s` is at most 4 past the iteration's start, so
+                        // `src_len - s` does not wrap.
+                        if length <= 16 && src_len - s >= 16 && dlen - d >= 16 {
+                            // SAFETY: 16 bytes are readable at `s` and
+                            // writable at `d`, and the literal's `length ≤
+                            // 16` bytes lie inside both.
+                            unsafe { copy16(src_ptr.add(s), dst_ptr.add(d)) };
+                        } else {
+                            if length > dlen - d || length > src_len - s {
+                                return Err(Error::Corrupt("literal length out of bounds"));
+                            }
+                            // SAFETY: bounds checked above.
+                            unsafe {
+                                ptr::copy_nonoverlapping(src_ptr.add(s), dst_ptr.add(d), length)
+                            };
                         }
                         d += length;
                         s += length;
@@ -181,23 +184,25 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
                 }
             }
             // docopy: emit `length` bytes from `dst[d-offset..]`.
-            if d < offset || length > dlen - d {
-                return Err(Error::Corrupt("match copy out of bounds"));
-            }
-            // SAFETY: `d + length ≤ dlen`, `d ≥ offset`, both checked above.
-            unsafe {
-                if offset > length {
-                    // Disjoint ranges — pure memcpy.  Use LZ4-style 16-byte
-                    // overshoot when small and the offset gives us a clean
-                    // 16-byte read.
-                    if length <= 16 && offset >= 16 {
-                        let v = ptr::read_unaligned(dst_ptr.add(d - offset) as *const u128);
-                        ptr::write_unaligned(dst_ptr.add(d) as *mut u128, v);
-                    } else {
+            if length <= 16 && offset >= 16 && d >= offset && dlen - d >= 16 {
+                // A short copy at an offset of 16 or more reads 16 bytes that
+                // end at or before `d`, so it takes one 16-byte move.
+                // SAFETY: `dst[d-offset..][..16]` is written and ends at or
+                // before `d`, and 16 bytes are writable at `d`, which holds
+                // the copy's `length ≤ 16` bytes.
+                unsafe { copy16(dst_ptr.add(d - offset), dst_ptr.add(d)) };
+            } else {
+                if d < offset || length > dlen - d {
+                    return Err(Error::Corrupt("match copy out of bounds"));
+                }
+                // SAFETY: `d + length ≤ dlen`, `d ≥ offset`, both checked above.
+                unsafe {
+                    if offset > length {
+                        // Disjoint ranges — pure memcpy.
                         ptr::copy_nonoverlapping(dst_ptr.add(d - offset), dst_ptr.add(d), length);
+                    } else {
+                        forward_copy_ptr(dst_ptr, d, offset, length);
                     }
-                } else {
-                    forward_copy_ptr(dst_ptr, d, offset, length);
                 }
             }
             d += length;
@@ -385,34 +390,15 @@ pub(super) unsafe fn minlz_decode(dst_ptr: *mut u8, dlen: usize, src: &[u8]) -> 
     Ok(())
 }
 
-/// Copy `length` (≤ 16) literal bytes from `src_ptr` to `dst_ptr`.
+/// Move 16 bytes from `src` to `dst` with one unaligned load and store.
 ///
-/// Uses a 16-byte overshoot move when the source has 16 readable bytes
-/// remaining; otherwise falls back to a length-exact memcpy.  The caller
-/// must guarantee 16 writable bytes at `dst_ptr` (which the
-/// `OVERSHOOT_PAD = 16` padding contract provides).
+/// # Safety
+/// 16 bytes must be readable at `src` and writable at `dst`, and the two
+/// ranges must not overlap.
 #[inline(always)]
-unsafe fn copy_short_literal(
-    src_ptr: *const u8,
-    dst_ptr: *mut u8,
-    length: usize,
-    s: usize,
-    src_len: usize,
-) {
-    // SAFETY: caller guarantees 16 bytes writable at `dst_ptr`.
-    // The fast loop's invariant `s + 16 ≤ src_len` is what gates the
-    // overshoot read; we re-check here so a corrupt input's bogus length
-    // doesn't read past `src_len`.
-    if length <= 16 && s + 16 <= src_len {
-        unsafe {
-            let v = ptr::read_unaligned(src_ptr as *const u128);
-            ptr::write_unaligned(dst_ptr as *mut u128, v);
-        }
-    } else {
-        unsafe {
-            ptr::copy_nonoverlapping(src_ptr, dst_ptr, length);
-        }
-    }
+unsafe fn copy16(src: *const u8, dst: *mut u8) {
+    // SAFETY: the caller's contract; unaligned accesses need no alignment.
+    unsafe { ptr::write_unaligned(dst as *mut u128, ptr::read_unaligned(src as *const u128)) };
 }
 
 /// LZ77 forward copy: `dst[d+i] = dst[d-offset+i]` for `i ∈ [0, length)`.
